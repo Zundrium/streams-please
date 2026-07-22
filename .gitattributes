@@ -1,0 +1,4 @@
+* text=auto eol=lf
+
+src-tauri/lib/*.dll filter=lfs diff=lfs merge=lfs -text
+src-tauri/lib/*.exe filter=lfs diff=lfs merge=lfs -text
