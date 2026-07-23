@@ -1,7 +1,7 @@
 <script lang="ts">
-  import { openUrl } from '@tauri-apps/plugin-opener';
   import {
     ArrowLeft,
+    ArrowRight,
     BookMarked,
     BookmarkPlus,
     CalendarDays,
@@ -34,8 +34,16 @@
   import { Separator } from '$lib/components/ui/separator';
   import { Spinner } from '$lib/components/ui/spinner';
   import { Switch } from '$lib/components/ui/switch';
+  import RevealImage from '$lib/components/RevealImage.svelte';
+  import ContextToolbar from '$lib/components/ContextToolbar.svelte';
+  import TasteIndicator from '$lib/components/TasteIndicator.svelte';
   import { isTauri } from '$lib/backend';
+  import {
+    youtubeTrailerSearchPageUrl,
+    youtubeTrailerSearchPlaybackUrl
+  } from '$lib/trailers';
   import type {
+    AniListRelationNode,
     DayName,
     DiscoveryVerdict,
     EpisodePlaybackRequest,
@@ -44,10 +52,12 @@
     SubsPleaseDownload,
     SubsPleaseRelease,
     SubsPleaseScheduleShow,
-    SubsPleaseShowResponse
+    SubsPleaseShowResponse,
+    TrailerPlaybackRequest
   } from '$lib/types';
 
   const SUBSPLEASE_ORIGIN = 'https://subsplease.org';
+  const TEXT_REVEAL_DURATION_MS = 360;
   const DAY_LABELS: Record<DayName, string> = {
     Monday: 'Monday',
     Tuesday: 'Tuesday',
@@ -66,19 +76,26 @@
     loadShow,
     onBack,
     onPlay,
+    onPlayTrailer,
     onToggleLibrary,
     onSetDiscoveryVerdict,
     onToggleWatched,
     onShowLoaded,
+    onOpenRelation,
     preferredQuality
   }: {
     show: SubsPleaseScheduleShow;
     day?: DayName;
     libraryEntry?: LibraryEntry;
     discoveryVerdict?: DiscoveryVerdict;
-    loadShow: (slug: string, timezone: string) => Promise<SubsPleaseShowResponse>;
+    loadShow: (
+      slug: string,
+      timezone: string,
+      anilistId?: number
+    ) => Promise<SubsPleaseShowResponse>;
     onBack: () => void | Promise<void>;
     onPlay: (request: EpisodePlaybackRequest) => Promise<void>;
+    onPlayTrailer: (request: TrailerPlaybackRequest) => void | Promise<void>;
     onToggleLibrary: (
       details: SubsPleaseShowResponse,
       show: SubsPleaseScheduleShow,
@@ -96,6 +113,7 @@
       show: SubsPleaseScheduleShow,
       day?: DayName
     ) => void;
+    onOpenRelation: (media: AniListRelationNode) => Promise<void>;
     preferredQuality: PlaybackQuality;
   } = $props();
 
@@ -108,12 +126,22 @@
   });
   const todayCalendarDay = calendarDayFormatter.format(new Date());
   let details = $state<SubsPleaseShowResponse | null>(null);
+  let loadedShowPage = $state('');
+  let mediaRevealShowPage = $state('');
   let detailsLoading = $state(true);
   let detailsError = $state('');
   let episodeQuery = $state('');
   let episodeLimit = $state(18);
   let playingKey = $state('');
   let trailerError = $state('');
+  let relationNavigationId = $state<number | null>(null);
+  let relationError = $state('');
+  let detailsReady = $derived(
+    !detailsLoading && loadedShowPage === show.page && details !== null
+  );
+  let mediaRevealReady = $derived(
+    detailsReady && mediaRevealShowPage === show.page
+  );
 
   let episodes = $derived.by(() => {
     const all = Object.values(details?.episode ?? {});
@@ -140,8 +168,21 @@
     return '';
   });
   let trailerTargetUrl = $derived(
-    exactTrailerUrl ||
-      `https://www.youtube.com/results?search_query=${encodeURIComponent(`${details?.title || show.title} official trailer`)}`
+    exactTrailerUrl || youtubeTrailerSearchPageUrl(details?.title || show.title)
+  );
+  let prequelRelations = $derived.by(() =>
+    (details?.relations?.edges ?? []).flatMap((edge) =>
+      edge.relationType === 'PREQUEL' && edge.node?.type === 'ANIME'
+        ? [edge.node]
+        : []
+    )
+  );
+  let sequelRelations = $derived.by(() =>
+    (details?.relations?.edges ?? []).flatMap((edge) =>
+      edge.relationType === 'SEQUEL' && edge.node?.type === 'ANIME'
+        ? [edge.node]
+        : []
+    )
   );
 
   $effect(() => {
@@ -149,15 +190,19 @@
     const activeDay = day;
     let cancelled = false;
     details = null;
+    loadedShowPage = '';
     detailsLoading = true;
     detailsError = '';
     episodeQuery = '';
     episodeLimit = 18;
     trailerError = '';
-    loadShow(activeShow.page, timezone)
+    relationNavigationId = null;
+    relationError = '';
+    loadShow(activeShow.page, timezone, activeShow.anilist_id)
       .then((nextDetails) => {
         if (cancelled) return;
         details = nextDetails;
+        loadedShowPage = activeShow.page;
         onShowLoaded(nextDetails, activeShow, activeDay);
       })
       .catch((reason) => {
@@ -169,6 +214,22 @@
     return () => {
       cancelled = true;
     };
+  });
+
+  $effect(() => {
+    const activePage = show.page;
+    if (!detailsReady) {
+      mediaRevealShowPage = '';
+      return;
+    }
+
+    const timer = window.setTimeout(() => {
+      if (show.page === activePage && loadedShowPage === activePage) {
+        mediaRevealShowPage = activePage;
+      }
+    }, TEXT_REVEAL_DURATION_MS);
+
+    return () => window.clearTimeout(timer);
   });
 
   function posterUrl(path: string): string {
@@ -207,6 +268,28 @@
       .replace(/(^|\s)\S/g, (letter) => letter.toUpperCase());
   }
 
+  function relatedTitle(media: AniListRelationNode): string {
+    return (
+      media.title.english ??
+      media.title.userPreferred ??
+      media.title.romaji ??
+      media.title.native ??
+      `AniList #${media.id}`
+    );
+  }
+
+  async function openRelatedShow(media: AniListRelationNode): Promise<void> {
+    relationNavigationId = media.id;
+    relationError = '';
+    try {
+      await onOpenRelation(media);
+    } catch (reason) {
+      relationError = reason instanceof Error ? reason.message : String(reason);
+    } finally {
+      relationNavigationId = null;
+    }
+  }
+
   function preferredDownload(release: SubsPleaseRelease): SubsPleaseDownload | undefined {
     return (
       release.downloads.find((download) => download.res === preferredQuality) ??
@@ -230,11 +313,19 @@
   }
 
   async function openTrailer() {
-    if (!trailerTargetUrl) return;
+    if (!details) return;
     trailerError = '';
     try {
       if (isTauri()) {
-        await openUrl(trailerTargetUrl);
+        await onPlayTrailer({
+          url: youtubeTrailerSearchPlaybackUrl(details.title || show.title),
+          title: `${decodeEntities(details.title || show.title)} · Trailer`,
+          thumbnail:
+            details.trailer?.thumbnail ||
+            details.banner_image_url ||
+            posterUrl(details.image_url) ||
+            undefined
+        });
       } else {
         const opened = window.open(trailerTargetUrl, '_blank', 'noopener,noreferrer');
         if (!opened) throw new Error('The browser blocked the new window.');
@@ -253,6 +344,7 @@
     playingKey = key;
     try {
       await onPlay({
+        anilistId: details?.metadata_id ?? show.anilist_id,
         slug: details?.slug || show.page,
         title: details?.title || show.title,
         imageUrl: details?.image_url || show.image_url,
@@ -268,59 +360,43 @@
   }
 </script>
 
-<section class="h-full min-h-0 overflow-y-auto bg-(--bg) text-(--text)" aria-label={`${show.title} details`}>
-  <header class="sticky top-0 z-40 -mb-16 flex h-16 items-center gap-2 border-b border-(--text)/8 bg-(--bg)/72 px-5 backdrop-blur-2xl lg:gap-4 lg:px-10">
+<section
+  class="h-full min-h-0 overflow-y-auto bg-(--bg) text-(--text)"
+  data-content-state={detailsReady ? mediaRevealReady ? 'media-enabled' : 'text-ready' : detailsError ? 'error' : 'loading'}
+  aria-label={`${show.title} details`}
+>
+  <ContextToolbar overlay class="justify-start">
     <Button variant="ghost" size="sm" class="gap-2 bg-(--bg-elevated)/60" onclick={() => void onBack()}>
       <ArrowLeft class="size-4" /> Back
     </Button>
-    <Separator orientation="vertical" class="h-6" />
-    <p class="min-w-0 truncate text-sm font-medium text-(--text)/60">{decodeEntities(show.title)}</p>
-    <div class="flex-1"></div>
-    <Select
-      type="single"
-      value={discoveryVerdict ?? 'unknown'}
-      onValueChange={setDiscoveryVerdict}
-    >
-      <SelectTrigger
-        class="h-9 min-w-36 bg-(--bg-elevated)/80"
-        disabled={!details}
-        aria-label="Taste status"
-        title={`Taste: ${discoveryVerdict === 'love' ? 'Love' : discoveryVerdict === 'maybe' ? 'OK' : discoveryVerdict === 'pass' ? 'Not for me' : 'Unknown'}`}
-      >
-        {#if discoveryVerdict === 'love'}
-          <Heart class="size-4 text-chart-5" fill="currentColor" /> <span>Love</span>
-        {:else if discoveryVerdict === 'maybe'}
-          <Meh class="size-4 text-chart-3" /> <span>OK</span>
-        {:else if discoveryVerdict === 'pass'}
-          <ThumbsDown class="size-4 text-(--text)/60" /> <span>Not for me</span>
-        {:else}
-          <CircleHelp class="size-4 text-(--text)/45" /> <span>Unknown</span>
-        {/if}
-      </SelectTrigger>
-      <SelectContent>
-        <SelectItem value="unknown"><span class="flex items-center gap-2"><CircleHelp class="size-4 text-(--text)/45" /> Unknown</span></SelectItem>
-        <SelectItem value="love"><span class="flex items-center gap-2"><Heart class="size-4 text-chart-5" fill="currentColor" /> Love</span></SelectItem>
-        <SelectItem value="maybe"><span class="flex items-center gap-2"><Meh class="size-4 text-chart-3" /> OK</span></SelectItem>
-        <SelectItem value="pass"><span class="flex items-center gap-2"><ThumbsDown class="size-4 text-(--text)/60" /> Not for me</span></SelectItem>
-      </SelectContent>
-    </Select>
-    <Button
-      variant={libraryEntry ? 'ghost' : 'default'}
-      size="sm"
-      class="gap-2 bg-(--bg-elevated)/80"
-      disabled={!details}
-      onclick={() => details && onToggleLibrary(details, show, day)}
-    >
-      {#if libraryEntry}<BookMarked class="size-4" /> In library{:else}<BookmarkPlus class="size-4" /> Add{/if}
-    </Button>
-  </header>
+    {#if detailsReady && details}
+      <Separator orientation="vertical" class="h-6" />
+      <p class="text-reveal min-w-0 truncate text-sm font-medium text-(--text)/60">{decodeEntities(details.title)}</p>
+    {/if}
+  </ContextToolbar>
 
-  <section class="relative isolate min-h-[42rem] overflow-hidden lg:min-h-[52rem]" aria-label="Show introduction">
-    {#if details?.banner_image_url || details?.image_url || show.image_url}
-      <img
+  {#if detailsLoading || (!detailsReady && !detailsError)}
+    <div class="h-full min-h-[42rem] bg-(--bg)" aria-busy="true" role="status">
+      <span class="sr-only">Loading show details</span>
+    </div>
+  {:else if detailsError}
+    <div class="grid h-full min-h-[42rem] place-items-center bg-(--bg) px-5 pt-16">
+      <Alert variant="destructive" class="max-w-xl">
+        <Tv2 class="size-5" />
+        <AlertTitle>Show unavailable</AlertTitle>
+        <AlertDescription>{detailsError}</AlertDescription>
+      </Alert>
+    </div>
+  {:else if detailsReady && details}
+  <section class="media-placeholder relative isolate min-h-[42rem] overflow-hidden lg:min-h-[52rem]" aria-label="Show introduction">
+    {#if details.banner_image_url || details.image_url}
+      <RevealImage
         class="absolute inset-0 -z-30 size-full scale-105 object-cover object-[center_28%] opacity-70 blur-[2px]"
-        src={posterUrl(details?.banner_image_url || details?.image_url || show.image_url)}
+        src={posterUrl(details.banner_image_url || details.image_url)}
         alt=""
+        loading="eager"
+        fetchpriority="high"
+        reveal={mediaRevealReady}
       />
     {/if}
     <div class="absolute inset-0 -z-20 bg-gradient-to-r from-(--bg)/85 via-(--bg)/38 to-(--bg)/15"></div>
@@ -331,35 +407,109 @@
 
     <div class="mx-auto flex min-h-[42rem] max-w-7xl items-end px-6 pb-40 pt-36 lg:min-h-[52rem] lg:px-12 lg:pb-64">
       <div class="grid w-full items-end gap-7 md:grid-cols-[11rem_minmax(0,1fr)] lg:grid-cols-[13rem_minmax(0,1fr)]">
-        <div class="hidden aspect-[3/4] overflow-hidden rounded-lg border border-white/15 bg-(--text)/5 shadow-2xl shadow-black/35 md:block">
-          {#if details?.image_url || show.image_url}
-            <img class="size-full object-cover" src={posterUrl(details?.image_url || show.image_url)} alt="" />
+        <div class="media-placeholder relative hidden aspect-[3/4] overflow-hidden rounded-lg border border-white/15 shadow-2xl shadow-black/35 md:block">
+          {#if details.image_url}
+            <RevealImage class="size-full object-cover" src={posterUrl(details.image_url)} alt="" loading="eager" fetchpriority="high" reveal={mediaRevealReady} />
           {:else}
             <span class="grid size-full place-items-center"><Film class="size-10 text-(--text)/25" /></span>
           {/if}
+          <TasteIndicator verdict={discoveryVerdict} class="absolute bottom-3 right-3" />
         </div>
         <div class="pb-2 drop-shadow-sm">
-          <div class="mb-4 flex flex-wrap gap-2">
+          {#if prequelRelations.length || sequelRelations.length}
+            <div class="text-reveal mb-3 flex flex-wrap items-center gap-2" aria-label="Series order">
+              {#each prequelRelations as media (media.id)}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  class="h-8 gap-1.5 rounded-full border-white/12 bg-black/18 px-3 text-xs text-white/68 backdrop-blur hover:bg-white/10 hover:text-white"
+                  disabled={relationNavigationId !== null}
+                  aria-label={`Open prequel ${relatedTitle(media)}`}
+                  title={relatedTitle(media)}
+                  onclick={() => void openRelatedShow(media)}
+                >
+                  {#if relationNavigationId === media.id}
+                    <Spinner class="size-3.5" />
+                  {:else}
+                    <ArrowLeft class="size-3.5 opacity-65" />
+                  {/if}
+                  Prequel
+                </Button>
+              {/each}
+              {#each sequelRelations as media (media.id)}
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  class="h-8 gap-1.5 rounded-full border-white/12 bg-black/18 px-3 text-xs text-white/68 backdrop-blur hover:bg-white/10 hover:text-white"
+                  disabled={relationNavigationId !== null}
+                  aria-label={`Open sequel ${relatedTitle(media)}`}
+                  title={relatedTitle(media)}
+                  onclick={() => void openRelatedShow(media)}
+                >
+                  Sequel
+                  {#if relationNavigationId === media.id}
+                    <Spinner class="size-3.5" />
+                  {:else}
+                    <ArrowRight class="size-3.5 opacity-65" />
+                  {/if}
+                </Button>
+              {/each}
+            </div>
+          {/if}
+          {#if relationError}
+            <p class="text-reveal mb-3 text-sm text-red-400" role="alert">{relationError}</p>
+          {/if}
+          <h1 class:text-reveal={Boolean(details)} class="max-w-4xl text-4xl font-semibold leading-[0.98] tracking-[-0.06em] sm:text-5xl lg:text-7xl">
+            {decodeEntities(details.title)}
+          </h1>
+          <div class:text-reveal={Boolean(details)} class="mt-5 flex flex-wrap gap-2" aria-label="Show tags and details">
+            {#each details?.genres?.slice(0, 4) ?? [] as genre (genre)}
+              <Badge class="bg-blue-500/22 text-blue-100 ring-1 ring-inset ring-blue-300/20 backdrop-blur">{genre}</Badge>
+            {/each}
             {#if day}
               <Badge class="bg-(--bg-elevated)/75 text-(--text)/70 backdrop-blur"><CalendarDays class="size-3" /> {DAY_LABELS[day]} · {show.time}</Badge>
-            {:else}
+            {:else if libraryEntry}
               <Badge class="bg-(--bg-elevated)/75 text-(--text)/70 backdrop-blur"><BookMarked class="size-3" /> In your library</Badge>
+            {:else}
+              <Badge class="bg-(--bg-elevated)/75 text-(--text)/70 backdrop-blur"><BookMarked class="size-3" /> SubsPlease archive</Badge>
             {/if}
-            {#if details?.year}<Badge class="bg-(--bg-elevated)/75 backdrop-blur">{details.year}</Badge>{/if}
-            {#if details?.format}<Badge class="bg-(--bg-elevated)/75 backdrop-blur">{metadataLabel(details.format)}</Badge>{/if}
-            {#if details?.status}<Badge class="bg-(--bg-elevated)/75 backdrop-blur">{metadataLabel(details.status)}</Badge>{/if}
+            {#if details?.year}<Badge class="bg-(--bg-elevated)/75 text-(--text)/70 backdrop-blur">{details.year}</Badge>{/if}
+            {#if details?.format}<Badge class="bg-(--bg-elevated)/75 text-(--text)/70 backdrop-blur">{metadataLabel(details.format)}</Badge>{/if}
+            {#if details?.status}<Badge class="bg-(--bg-elevated)/75 text-(--text)/70 backdrop-blur">{metadataLabel(details.status)}</Badge>{/if}
           </div>
-          <h1 class="max-w-4xl text-4xl font-semibold leading-[0.98] tracking-[-0.06em] sm:text-5xl lg:text-7xl">
-            {decodeEntities(details?.title || show.title)}
-          </h1>
-          {#if details?.genres?.length}
-            <p class="mt-5 text-sm font-medium text-(--text)/55">{details.genres.slice(0, 4).join(' · ')}</p>
-          {/if}
           <div class="mt-7 flex flex-wrap gap-2">
             <Button size="lg" class="gap-2" disabled={detailsLoading} onclick={() => void openTrailer()}>
               {#if detailsLoading}<Spinner class="size-4 border-(--bg)/20 border-t-(--bg)" />{:else}<Play class="size-4" fill="currentColor" />{/if}
               Watch trailer <ExternalLink class="size-3.5 opacity-55" />
             </Button>
+            <Select
+              type="single"
+              value={discoveryVerdict ?? 'unknown'}
+              onValueChange={setDiscoveryVerdict}
+            >
+              <SelectTrigger
+                class="h-11 min-w-36 rounded-3xl bg-(--bg-elevated)/72 backdrop-blur"
+                disabled={!details}
+                aria-label="Taste status"
+                title={`Taste: ${discoveryVerdict === 'love' ? 'Love' : discoveryVerdict === 'maybe' ? 'OK' : discoveryVerdict === 'pass' ? 'Not for me' : 'Unknown'}`}
+              >
+                {#if discoveryVerdict === 'love'}
+                  <Heart class="size-4 text-chart-5" fill="currentColor" /> <span>Love</span>
+                {:else if discoveryVerdict === 'maybe'}
+                  <Meh class="size-4 text-chart-3" /> <span>OK</span>
+                {:else if discoveryVerdict === 'pass'}
+                  <ThumbsDown class="size-4 text-(--text)/60" /> <span>Not for me</span>
+                {:else}
+                  <CircleHelp class="size-4 text-(--text)/45" /> <span>Unknown</span>
+                {/if}
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="unknown"><span class="flex items-center gap-2"><CircleHelp class="size-4 text-(--text)/45" /> Unknown</span></SelectItem>
+                <SelectItem value="love"><span class="flex items-center gap-2"><Heart class="size-4 text-chart-5" fill="currentColor" /> Love</span></SelectItem>
+                <SelectItem value="maybe"><span class="flex items-center gap-2"><Meh class="size-4 text-chart-3" /> OK</span></SelectItem>
+                <SelectItem value="pass"><span class="flex items-center gap-2"><ThumbsDown class="size-4 text-(--text)/60" /> Not for me</span></SelectItem>
+              </SelectContent>
+            </Select>
             <Button
               variant="ghost"
               size="lg"
@@ -370,7 +520,7 @@
               {#if libraryEntry}<BookMarked class="size-4" /> Remove from library{:else}<BookmarkPlus class="size-4" /> Add to library{/if}
             </Button>
           </div>
-          {#if trailerError}<p class="mt-3 text-sm text-red-500">{trailerError}</p>{/if}
+          {#if trailerError}<p class="text-reveal mt-3 text-sm text-red-500">{trailerError}</p>{/if}
         </div>
       </div>
     </div>
@@ -378,18 +528,18 @@
 
   <article class="relative z-10 mx-auto -mt-36 max-w-7xl px-5 pb-24 lg:-mt-48 lg:px-12">
     <section class="grid gap-10 border-b border-(--text)/8 pb-16 pt-8 md:grid-cols-[minmax(0,1.8fr)_minmax(13rem,0.7fr)] lg:gap-16 lg:pb-20 lg:pt-10" aria-labelledby="story-title">
-      <div>
+      <div class="text-reveal">
         <p class="mb-3 text-[10px] font-medium uppercase tracking-[0.2em] text-(--text)/35">The story</p>
         <h2 id="story-title" class="text-2xl font-semibold tracking-[-0.045em]">What is this show about?</h2>
         {#if detailsLoading}
           <div class="mt-6 flex items-center gap-3 text-sm text-(--text)/45"><Spinner /> Loading show information…</div>
         {:else if details?.synopsis}
-          <p class="mt-6 max-w-3xl text-base leading-8 text-(--text)/62 lg:text-lg lg:leading-9">{decodeEntities(details.synopsis)}</p>
+          <p class="text-reveal mt-6 max-w-3xl text-base leading-8 text-(--text)/62 lg:text-lg lg:leading-9">{decodeEntities(details.synopsis)}</p>
         {:else}
           <p class="mt-6 text-base leading-8 text-(--text)/45">No description has been found for this show yet.</p>
         {/if}
       </div>
-      <dl class="grid content-start grid-cols-2 gap-x-5 gap-y-6 border-t border-(--text)/8 pt-7 text-sm md:grid-cols-1 md:border-l md:border-t-0 md:pl-8 md:pt-1">
+      <dl class="text-reveal grid content-start grid-cols-2 gap-x-5 gap-y-6 border-t border-(--text)/8 pt-7 text-sm md:grid-cols-1 md:border-l md:border-t-0 md:pl-8 md:pt-1">
         {#if day}<div><dt class="text-(--text)/35">Airs</dt><dd class="mt-1 font-medium">{DAY_LABELS[day]} at {show.time}</dd></div>{/if}
         <div><dt class="text-(--text)/35">Available</dt><dd class="mt-1 font-medium">{Object.keys(details?.episode ?? {}).length} episodes</dd></div>
         {#if libraryEntry}<div><dt class="text-(--text)/35">Watched</dt><dd class="mt-1 font-medium">{libraryEntry.watchedEpisodes.length} episodes</dd></div>{/if}
@@ -400,7 +550,7 @@
 
     <section class="pt-16" aria-labelledby="episodes-title">
       <div class="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
-        <div>
+        <div class="text-reveal">
           <p class="mb-2 text-[10px] font-medium uppercase tracking-[0.2em] text-(--text)/35">Ready to watch?</p>
           <h2 id="episodes-title" class="text-3xl font-semibold tracking-[-0.05em]">Episodes</h2>
           <p class="mt-3 text-sm text-(--text)/45">{Object.keys(details?.episode ?? {}).length} available · watched episodes are tracked automatically</p>
@@ -482,4 +632,5 @@
       {/if}
     </section>
   </article>
+  {/if}
 </section>

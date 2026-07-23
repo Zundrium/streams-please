@@ -12,19 +12,19 @@ Yoru Stream is a local Tauri v2 desktop player for legal or personally owned Bit
 - adding external `.ass`, `.ssa`, `.srt`, `.vtt`, and `.sub` files;
 - live download, upload, and peer status, plus pausing P2P and stopping the session;
 - a local media cache in the OS-specific app cache directory;
-- a scrollable SubsPlease weekly schedule with posters and a dedicated show page;
-- AniList enrichment for descriptions, trailers, genres, and show data;
-- Discord-capturable Discovery trailers through the same in-process libmpv player;
+- AniList-first seasonal browsing with previous/next season navigation;
+- SubsPlease availability filtering, weekly release times, and historical episode access;
+- Discord-capturable YouTube trailer search through the same in-process libmpv player;
 - a browser preview mode for UI development without native Tauri APIs.
 
 ## Architecture
 
 ```text
 SvelteKit UI + Lily components (Tauri WebView)
-  ├─ catalog proxy ───> SubsPlease schedule / show API + AniList metadata
+  ├─ catalog proxy ───> AniList seasonal catalog + SubsPlease availability/releases
   ├─ Tauri commands ──> librqbit session ──> trackers / DHT / peers
   ├─ player controls ─> in-process libmpv playback ──> episodes + trailers
-  ├─ trailer resolver > bundled yt-dlp + Deno ──> YouTube / Dailymotion
+  ├─ trailer search ───> bundled yt-dlp + Deno ──> first YouTube result
   └─ media URL ───────> 127.0.0.1:<random>/torrents/:id/stream/:file
 ```
 
@@ -82,9 +82,13 @@ npm run tauri build
 4. Use **External subtitle** to add a local subtitle file.
 5. Pause P2P or stop the session when you are done. Stopping forgets the torrent but preserves cache files that have already been written.
 
-The **SubsPlease** tab lets you scroll through the full weekly schedule or jump directly to a day using the fixed day navigation. Each show opens on its own details page with a description, trailer action, and episodes. SubsPlease provides the schedule and releases; the Rust backend enriches show information through AniList where possible. Selecting an episode passes the chosen magnet link to the same local player flow.
+The **SubsPlease** tab starts with an AniList season and filters it against the SubsPlease
+show archive. Use the previous and next controls to browse other seasons. AniList IDs are
+the canonical identity for saved shows; the optional SubsPlease slug and numeric ID are
+retained only for weekly timing and episode retrieval. Selecting an episode passes the
+chosen magnet link to the same local player flow.
 
-On the **Discovery** tab, select a trailer thumbnail to open it in Yoru's native player. Closing the trailer restores the active episode at its previous position and leaves it paused. The browser-only UI preview continues to use the normal provider iframe because libmpv is available only in the Tauri desktop app.
+Select a trailer from Discovery, Library, or SubsPlease details to open it in Yoru's native player. The desktop app asks yt-dlp for the first YouTube result matching `<series title> trailer English subtitles`; AniList's trailer remains the browser-preview fallback. Discovery trailers start inside the page's trailer frame and can be expanded with the theater or full-screen controls. Closing a trailer restores the active episode at its previous position and leaves it paused.
 
 The **Legal Sintel demo** button enters a Creative Commons/open movie torrent so you can test the flow without commercial content.
 

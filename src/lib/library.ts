@@ -6,7 +6,8 @@ import type {
   SubsPleaseShowResponse
 } from '$lib/types';
 
-const STORAGE_KEY = 'yoru-stream.library.v1';
+const STORAGE_KEY = 'yoru-stream.library.v2';
+const LEGACY_STORAGE_KEY = 'yoru-stream.library.v1';
 
 function unique(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
@@ -24,14 +25,20 @@ export function sortEpisodeNumbers(values: string[]): string[] {
 export function loadLibrary(): LibraryEntry[] {
   if (typeof window === 'undefined') return [];
   try {
-    const parsed = JSON.parse(window.localStorage.getItem(STORAGE_KEY) ?? '[]');
+    const source =
+      window.localStorage.getItem(STORAGE_KEY) ??
+      window.localStorage.getItem(LEGACY_STORAGE_KEY) ??
+      '[]';
+    const parsed = JSON.parse(source);
     if (!Array.isArray(parsed)) return [];
     return parsed.flatMap((value): LibraryEntry[] => {
       if (!value || typeof value !== 'object') return [];
       const entry = value as Partial<LibraryEntry>;
       if (!entry.slug || !entry.title) return [];
       return [{
+        anilistId: entry.anilistId ?? entry.metadataId,
         slug: entry.slug,
+        subspleaseId: entry.subspleaseId,
         title: entry.title,
         imageUrl: entry.imageUrl ?? '',
         bannerImageUrl: entry.bannerImageUrl,
@@ -40,7 +47,11 @@ export function loadLibrary(): LibraryEntry[] {
         year: entry.year,
         trailer: entry.trailer,
         metadataId: entry.metadataId,
-        following: entry.following ?? true,
+        following:
+          entry.discoveryVerdict === 'love' && !entry.libraryDismissed
+            ? true
+            : entry.following ?? true,
+        libraryDismissed: entry.libraryDismissed,
         discoveryVerdict: entry.discoveryVerdict,
         checkedAt: entry.checkedAt,
         day: entry.day,
@@ -62,6 +73,15 @@ export function saveLibrary(entries: LibraryEntry[]): void {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
 }
 
+export function libraryEntryMatches(
+  entry: LibraryEntry,
+  anilistId?: number,
+  subspleaseSlug?: string
+): boolean {
+  if (anilistId && entry.anilistId) return entry.anilistId === anilistId;
+  return Boolean(subspleaseSlug && entry.slug === subspleaseSlug);
+}
+
 export function entryFromShow(
   details: SubsPleaseShowResponse,
   scheduleShow: SubsPleaseScheduleShow,
@@ -70,7 +90,10 @@ export function entryFromShow(
 ): LibraryEntry {
   const now = new Date().toISOString();
   return {
+    anilistId: details.metadata_id ?? scheduleShow.anilist_id ?? previous?.anilistId,
     slug: details.slug || scheduleShow.page,
+    subspleaseId:
+      details.subsplease_id ?? scheduleShow.subsplease_id ?? previous?.subspleaseId,
     title: details.title || scheduleShow.title,
     imageUrl: details.image_url || scheduleShow.image_url,
     bannerImageUrl: details.banner_image_url,
@@ -78,8 +101,9 @@ export function entryFromShow(
     genres: details.genres ?? previous?.genres,
     year: details.year ?? previous?.year,
     trailer: details.trailer ?? previous?.trailer,
-    metadataId: details.metadata_id ?? previous?.metadataId,
+    metadataId: details.metadata_id ?? scheduleShow.anilist_id ?? previous?.metadataId,
     following: previous?.following ?? true,
+    libraryDismissed: previous?.libraryDismissed,
     discoveryVerdict: previous?.discoveryVerdict,
     checkedAt: previous?.checkedAt,
     day: day ?? previous?.day,
@@ -104,7 +128,8 @@ export function entryFromDiscovery(
   const entry = entryFromShow(details, scheduleShow, day, previous);
   return {
     ...entry,
-    following: previous?.following ?? false,
+    following: verdict === 'love' || previous?.following === true,
+    libraryDismissed: verdict === 'love' ? false : previous?.libraryDismissed,
     discoveryVerdict: verdict,
     checkedAt: new Date().toISOString()
   };

@@ -1,6 +1,9 @@
 import { invoke } from '@tauri-apps/api/core';
 import type {
+  AnimeSeason,
   AniListSearchResult,
+  AniListSeasonResponse,
+  SubsPleaseIndexResponse,
   SubsPleaseScheduleResponse,
   SubsPleaseShowResponse,
   TorrentDetails
@@ -75,7 +78,7 @@ const mockSubsPleaseSchedule: SubsPleaseScheduleResponse = {
   }
 };
 
-function mockSubsPleaseShow(slug: string): SubsPleaseShowResponse {
+function mockSubsPleaseShow(slug: string, anilistId?: number): SubsPleaseShowResponse {
   const show = Object.values(mockSubsPleaseSchedule.schedule)
     .flat()
     .find((item) => item?.page === slug);
@@ -95,6 +98,9 @@ function mockSubsPleaseShow(slug: string): SubsPleaseShowResponse {
   return {
     title,
     slug,
+    subsplease_id: Math.abs(
+      [...slug].reduce((total, character) => (total * 31 + character.charCodeAt(0)) | 0, 17)
+    ),
     image_url: show?.image_url ?? '',
     synopsis:
       'New episodes appear here according to the current SubsPlease schedule. Select an episode to open it in the Yoru player.',
@@ -104,6 +110,7 @@ function mockSubsPleaseShow(slug: string): SubsPleaseShowResponse {
     format: 'TV',
     status: 'RELEASING',
     metadata_source: 'AniList',
+    metadata_id: anilistId,
     episode: Object.fromEntries(
       [makeRelease('03', 0), makeRelease('02', 7), makeRelease('01', 14)].map((release) => [
         `${title} - ${release.episode}`,
@@ -118,26 +125,30 @@ async function enrichMockShow(show: SubsPleaseShowResponse): Promise<SubsPleaseS
   const timeout = window.setTimeout(() => controller.abort(), 5_000);
   try {
     const [exact, normalized, short] = anilistSearchQueries(show.title);
+    const hasId = Boolean(show.metadata_id);
     const response = await fetch('https://graphql.anilist.co', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
       signal: controller.signal,
       body: JSON.stringify({
-        query: `query ($exact: String!, $normalized: String!, $short: String!) {
-          exact: Page(page: 1, perPage: 6) {
+        query: `query ($id: Int, $hasId: Boolean!, $exact: String!, $normalized: String!, $short: String!) {
+          direct: Media(id: $id, type: ANIME) @include(if: $hasId) {
+            ...Metadata
+          }
+          exact: Page(page: 1, perPage: 6) @skip(if: $hasId) {
             media(search: $exact, type: ANIME) { ...Metadata }
           }
-          normalized: Page(page: 1, perPage: 6) {
+          normalized: Page(page: 1, perPage: 6) @skip(if: $hasId) {
             media(search: $normalized, type: ANIME) { ...Metadata }
           }
-          short: Page(page: 1, perPage: 6) {
+          short: Page(page: 1, perPage: 6) @skip(if: $hasId) {
             media(search: $short, type: ANIME) { ...Metadata }
           }
         }
         fragment Metadata on Media {
             id
             idMal
-            title { romaji english native }
+            title { romaji english native userPreferred }
             synonyms
             description(asHtml: false)
             trailer { id site thumbnail }
@@ -152,31 +163,55 @@ async function enrichMockShow(show: SubsPleaseShowResponse): Promise<SubsPleaseS
             relations {
               edges {
                 relationType
-                node { type format }
+                node {
+                  id
+                  type
+                  format
+                  status
+                  season
+                  seasonYear
+                  title { romaji english native userPreferred }
+                  synonyms
+                  coverImage { extraLarge large color }
+                  siteUrl
+                }
               }
             }
         }`,
-        variables: { exact, normalized, short }
+        variables: { id: show.metadata_id, hasId, exact, normalized, short }
       })
     });
     if (!response.ok) return show;
     const payload = await response.json();
-    const candidates = ['exact', 'normalized', 'short'].flatMap(
-      (key) => payload?.data?.[key]?.media ?? []
-    );
+    const candidates = hasId
+      ? [payload?.data?.direct]
+      : ['exact', 'normalized', 'short'].flatMap(
+          (key) => payload?.data?.[key]?.media ?? []
+        );
     const seen = new Set<number>();
-    const media = candidates
-      .filter((candidate) => {
-        if (!candidate?.id || seen.has(candidate.id)) return false;
-        seen.add(candidate.id);
-        return true;
-      })
-      .map((candidate) => ({ candidate, score: anilistCandidateScore(show.title, candidate) }))
-      .filter(({ score }) => score >= 0.62)
-      .sort((left, right) => right.score - left.score)[0]?.candidate;
+    const media = hasId
+      ? candidates.find((candidate) => candidate?.id === show.metadata_id)
+      : candidates
+          .filter((candidate) => {
+            if (!candidate?.id || seen.has(candidate.id)) return false;
+            seen.add(candidate.id);
+            return true;
+          })
+          .map((candidate) => ({
+            candidate,
+            score: anilistCandidateScore(show.title, candidate)
+          }))
+          .filter(({ score }) => score >= 0.62)
+          .sort((left, right) => right.score - left.score)[0]?.candidate;
     if (!media) return show;
     return {
       ...show,
+      title:
+        media.title?.english ??
+        media.title?.userPreferred ??
+        media.title?.romaji ??
+        media.title?.native ??
+        show.title,
       synopsis: media.description || show.synopsis,
       image_url: media.coverImage?.extraLarge || media.coverImage?.large || show.image_url,
       banner_image_url: media.bannerImage || undefined,
@@ -186,6 +221,7 @@ async function enrichMockShow(show: SubsPleaseShowResponse): Promise<SubsPleaseS
       format: media.format || show.format,
       status: media.status || show.status,
       episode_count: media.episodes || undefined,
+      relations: media.relations || undefined,
       has_series_prequel: (media.relations?.edges ?? []).some(
         (edge: Record<string, any>) =>
           edge?.relationType === 'PREQUEL' &&
@@ -198,6 +234,87 @@ async function enrichMockShow(show: SubsPleaseShowResponse): Promise<SubsPleaseS
     };
   } catch {
     return show;
+  } finally {
+    window.clearTimeout(timeout);
+  }
+}
+
+const mockSubsPleaseIndex: SubsPleaseIndexResponse = {
+  shows: [
+    ...Object.values(mockSubsPleaseSchedule.schedule)
+      .flat()
+      .filter((show): show is NonNullable<typeof show> => Boolean(show))
+      .map((show) => ({ title: show.title, page: show.page })),
+    { title: 'Mushoku Tensei', page: 'mushoku-tensei' },
+    { title: 'Mushoku Tensei S2', page: 'mushoku-tensei-s2' }
+  ]
+};
+
+function currentAnimeSeason(date = new Date()): { season: AnimeSeason; year: number } {
+  const month = date.getMonth() + 1;
+  const season: AnimeSeason =
+    month <= 3 ? 'WINTER' : month <= 6 ? 'SPRING' : month <= 9 ? 'SUMMER' : 'FALL';
+  return { season, year: date.getFullYear() };
+}
+
+async function mockAniListSeason(season: AnimeSeason, year: number): Promise<AniListSeasonResponse> {
+  const controller = new AbortController();
+  const timeout = window.setTimeout(() => controller.abort(), 8_000);
+  try {
+    const query = `query ($season: MediaSeason!, $year: Int!) {
+      page1: Page(page: 1, perPage: 50) { media(type: ANIME, season: $season, seasonYear: $year, format_in: [TV, TV_SHORT, ONA], isAdult: false, sort: [POPULARITY_DESC, START_DATE]) { ...SeasonCard } }
+      page2: Page(page: 2, perPage: 50) { media(type: ANIME, season: $season, seasonYear: $year, format_in: [TV, TV_SHORT, ONA], isAdult: false, sort: [POPULARITY_DESC, START_DATE]) { ...SeasonCard } }
+      page3: Page(page: 3, perPage: 50) { media(type: ANIME, season: $season, seasonYear: $year, format_in: [TV, TV_SHORT, ONA], isAdult: false, sort: [POPULARITY_DESC, START_DATE]) { ...SeasonCard } }
+    }
+    fragment SeasonCard on Media {
+      id
+      title { romaji english native userPreferred }
+      synonyms
+      coverImage { extraLarge large color }
+      season
+      seasonYear
+      startDate { year month day }
+      endDate { year month day }
+      format
+      status
+      episodes
+      nextAiringEpisode { episode airingAt timeUntilAiring }
+    }`;
+    const response = await fetch('https://graphql.anilist.co', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+      signal: controller.signal,
+      body: JSON.stringify({ query, variables: { season, year } })
+    });
+    if (!response.ok) throw new Error(`AniList returned ${response.status}.`);
+    const payload = await response.json();
+    const shows: AniListSeasonResponse['shows'] = ['page1', 'page2', 'page3'].flatMap(
+      (page) => (Array.isArray(payload?.data?.[page]?.media) ? payload.data[page].media : [])
+    );
+    return { season, year, shows };
+  } catch {
+    const current = currentAnimeSeason();
+    const shows =
+      current.season === season && current.year === year
+        ? Object.values(mockSubsPleaseSchedule.schedule)
+            .flat()
+            .filter((show): show is NonNullable<typeof show> => Boolean(show))
+            .map((show, index) => ({
+              id: 900_000 + index,
+              title: { romaji: show.title, userPreferred: show.title },
+              synonyms: [],
+              description: 'Seasonal anime available through SubsPlease.',
+              coverImage: { large: show.image_url },
+              genres: ['Anime'],
+              season,
+              seasonYear: year,
+              format: 'TV',
+              status: 'RELEASING',
+              episodes: 12,
+              popularity: 1_000 - index
+            }))
+        : [];
+    return { season, year, shows };
   } finally {
     window.clearTimeout(timeout);
   }
@@ -328,6 +445,9 @@ export async function callBackend<T>(
       uploaded_bytes: elapsed * 210_000,
       total_bytes: 1_294_727_168,
       finished: false,
+      pieces: Array.from({ length: 1236 }, (_, index) =>
+        index < 105 || (index >= 420 && index < 455)
+      ),
       live: {
         download_speed: { mbps: 3.8, human_readable: '3.80 MiB/s' },
         upload_speed: { mbps: 0.21, human_readable: '0.21 MiB/s' },
@@ -336,11 +456,23 @@ export async function callBackend<T>(
     } as T;
   }
   if (name === 'subsplease_schedule') return mockSubsPleaseSchedule as T;
+  if (name === 'subsplease_index') return mockSubsPleaseIndex as T;
+  if (name === 'anilist_season') {
+    return (await mockAniListSeason(
+      String(args?.season ?? 'SUMMER').toUpperCase() as AnimeSeason,
+      Number(args?.year ?? new Date().getFullYear())
+    )) as T;
+  }
   if (name === 'anilist_search') {
     return (await mockAniListSearch(String(args?.query ?? ''))) as T;
   }
   if (name === 'subsplease_show') {
-    return (await enrichMockShow(mockSubsPleaseShow(String(args?.slug ?? '')))) as T;
+    return (await enrichMockShow(
+      mockSubsPleaseShow(
+        String(args?.slug ?? ''),
+        typeof args?.anilistId === 'number' ? args.anilistId : undefined
+      )
+    )) as T;
   }
   return undefined as T;
 }

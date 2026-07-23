@@ -75,6 +75,19 @@ fn validate_anilist_search(query: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_anilist_season(season: &str, year: i32) -> Result<&'static str, String> {
+    if !(1940..=2200).contains(&year) {
+        return Err("Invalid AniList season year.".into());
+    }
+    match season.trim().to_ascii_uppercase().as_str() {
+        "WINTER" => Ok("WINTER"),
+        "SPRING" => Ok("SPRING"),
+        "SUMMER" => Ok("SUMMER"),
+        "FALL" => Ok("FALL"),
+        _ => Err("Invalid AniList season.".into()),
+    }
+}
+
 async fn subsplease_text(request: reqwest::RequestBuilder) -> Result<String, String> {
     request
         .send()
@@ -235,7 +248,7 @@ async fn anilist_metadata(client: &reqwest::Client, title: &str) -> Option<serde
             fragment Metadata on Media {
                     id
                     idMal
-                    title { romaji english native }
+                    title { romaji english native userPreferred }
                     synonyms
                     description(asHtml: false)
                     trailer { id site thumbnail }
@@ -250,7 +263,18 @@ async fn anilist_metadata(client: &reqwest::Client, title: &str) -> Option<serde
                     relations {
                         edges {
                             relationType
-                            node { type format }
+                            node {
+                                id
+                                type
+                                format
+                                status
+                                season
+                                seasonYear
+                                title { romaji english native userPreferred }
+                                synonyms
+                                coverImage { extraLarge large color }
+                                siteUrl
+                            }
                         }
                     }
             }
@@ -294,6 +318,72 @@ async fn anilist_metadata(client: &reqwest::Client, title: &str) -> Option<serde
         .map(|(_, metadata)| metadata)
 }
 
+async fn anilist_metadata_by_id(client: &reqwest::Client, id: i64) -> Option<serde_json::Value> {
+    if id <= 0 {
+        return None;
+    }
+    let payload = serde_json::json!({
+        "query": r#"
+            query ($id: Int!) {
+                Media(id: $id, type: ANIME) {
+                    id
+                    idMal
+                    title { romaji english native userPreferred }
+                    synonyms
+                    description(asHtml: false)
+                    trailer { id site thumbnail }
+                    coverImage { extraLarge large color }
+                    bannerImage
+                    genres
+                    season
+                    seasonYear
+                    startDate { year month day }
+                    endDate { year month day }
+                    format
+                    status
+                    episodes
+                    duration
+                    siteUrl
+                    nextAiringEpisode { episode airingAt timeUntilAiring }
+                    relations {
+                        edges {
+                            relationType
+                            node {
+                                id
+                                type
+                                format
+                                status
+                                season
+                                seasonYear
+                                title { romaji english native userPreferred }
+                                synonyms
+                                coverImage { extraLarge large color }
+                                siteUrl
+                            }
+                        }
+                    }
+                }
+            }
+        "#,
+        "variables": { "id": id }
+    });
+    let response = client
+        .post("https://graphql.anilist.co")
+        .header("Accept", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?;
+    response
+        .json::<serde_json::Value>()
+        .await
+        .ok()?
+        .pointer("/data/Media")
+        .cloned()
+}
+
 fn first_capture(pattern: &str, html: &str) -> Option<String> {
     Regex::new(pattern)
         .ok()?
@@ -309,6 +399,40 @@ fn strip_html(value: &str) -> String {
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn parse_subsplease_index(html: &str) -> Vec<serde_json::Value> {
+    let Ok(pattern) = Regex::new(r#"(?s)<a[^>]*href=["']/shows/([^"'/?#]+)/?["'][^>]*>(.*?)</a>"#)
+    else {
+        return Vec::new();
+    };
+    let mut seen = HashSet::new();
+    let mut shows = pattern
+        .captures_iter(html)
+        .filter_map(|captures| {
+            let slug = captures.get(1)?.as_str().trim();
+            if !seen.insert(slug.to_owned()) {
+                return None;
+            }
+            let title = strip_html(captures.get(2)?.as_str());
+            if title.is_empty() {
+                return None;
+            }
+            Some(serde_json::json!({ "title": title, "page": slug }))
+        })
+        .collect::<Vec<_>>();
+    shows.sort_by(|left, right| {
+        let left = left
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let right = right
+            .get("title")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        left.to_ascii_lowercase().cmp(&right.to_ascii_lowercase())
+    });
+    shows
 }
 
 #[tauri::command]
@@ -333,6 +457,88 @@ async fn subsplease_schedule(
         return Err("SubsPlease did not return a weekly schedule.".into());
     }
     Ok(data)
+}
+
+#[tauri::command]
+async fn subsplease_index(state: State<'_, TorrentState>) -> Result<serde_json::Value, String> {
+    let page = subsplease_text(
+        state
+            .subsplease_client
+            .get(format!("{SUBSPLEASE_ORIGIN}/shows/")),
+    )
+    .await?;
+    let shows = parse_subsplease_index(&page);
+    if shows.is_empty() {
+        return Err("SubsPlease did not return its show index.".into());
+    }
+    Ok(serde_json::json!({ "shows": shows }))
+}
+
+#[tauri::command]
+async fn anilist_season(
+    state: State<'_, TorrentState>,
+    season: String,
+    year: i32,
+) -> Result<serde_json::Value, String> {
+    let season = validate_anilist_season(&season, year)?;
+    let query = r#"
+        query ($season: MediaSeason!, $year: Int!) {
+            page1: Page(page: 1, perPage: 50) { media(type: ANIME, season: $season, seasonYear: $year, format_in: [TV, TV_SHORT, ONA], isAdult: false, sort: [POPULARITY_DESC, START_DATE]) { ...SeasonCard } }
+            page2: Page(page: 2, perPage: 50) { media(type: ANIME, season: $season, seasonYear: $year, format_in: [TV, TV_SHORT, ONA], isAdult: false, sort: [POPULARITY_DESC, START_DATE]) { ...SeasonCard } }
+            page3: Page(page: 3, perPage: 50) { media(type: ANIME, season: $season, seasonYear: $year, format_in: [TV, TV_SHORT, ONA], isAdult: false, sort: [POPULARITY_DESC, START_DATE]) { ...SeasonCard } }
+        }
+        fragment SeasonCard on Media {
+            id
+            title { romaji english native userPreferred }
+            synonyms
+            coverImage { extraLarge large color }
+            season
+            seasonYear
+            startDate { year month day }
+            endDate { year month day }
+            format
+            status
+            episodes
+            nextAiringEpisode { episode airingAt timeUntilAiring }
+        }
+    "#;
+    let payload = serde_json::json!({
+        "query": query,
+        "variables": { "season": season, "year": year }
+    });
+    let response = state
+        .subsplease_client
+        .post("https://graphql.anilist.co")
+        .header("Accept", "application/json")
+        .json(&payload)
+        .send()
+        .await
+        .map_err(|error| format!("AniList is unreachable: {error}"))?
+        .error_for_status()
+        .map_err(|error| format!("AniList returned an error: {error}"))?;
+    let response = response
+        .json::<serde_json::Value>()
+        .await
+        .map_err(|error| format!("The AniList response could not be read: {error}"))?;
+    if let Some(error) = response
+        .get("errors")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|errors| errors.first())
+        .and_then(|error| error.get("message"))
+        .and_then(serde_json::Value::as_str)
+    {
+        return Err(format!("AniList returned an error: {error}"));
+    }
+    let mut shows = Vec::new();
+    for page in ["page1", "page2", "page3"] {
+        if let Some(page_shows) = response
+            .pointer(&format!("/data/{page}/media"))
+            .and_then(serde_json::Value::as_array)
+        {
+            shows.extend(page_shows.iter().cloned());
+        }
+    }
+    Ok(serde_json::json!({ "season": season, "year": year, "shows": shows }))
 }
 
 #[tauri::command]
@@ -380,6 +586,7 @@ async fn subsplease_show(
     state: State<'_, TorrentState>,
     slug: String,
     timezone: String,
+    anilist_id: Option<i64>,
 ) -> Result<serde_json::Value, String> {
     validate_subsplease_slug(&slug)?;
     validate_timezone(&timezone)?;
@@ -412,7 +619,13 @@ async fn subsplease_show(
         &page,
     )
     .unwrap_or_default();
-    let metadata = anilist_metadata(&state.subsplease_client, &title).await;
+    let mut metadata = match anilist_id {
+        Some(id) => anilist_metadata_by_id(&state.subsplease_client, id).await,
+        None => None,
+    };
+    if metadata.is_none() {
+        metadata = anilist_metadata(&state.subsplease_client, &title).await;
+    }
 
     let releases = subsplease_text(
         state
@@ -434,7 +647,21 @@ async fn subsplease_show(
     object.insert("synopsis".into(), synopsis.into());
     object.insert("image_url".into(), image_url.into());
     object.insert("slug".into(), slug.into());
+    if let Ok(subsplease_id) = sid.parse::<i64>() {
+        object.insert("subsplease_id".into(), subsplease_id.into());
+    }
     if let Some(metadata) = metadata {
+        if let Some(canonical_title) = [
+            "/title/english",
+            "/title/userPreferred",
+            "/title/romaji",
+            "/title/native",
+        ]
+        .into_iter()
+        .find_map(|path| metadata.pointer(path).and_then(serde_json::Value::as_str))
+        {
+            object.insert("title".into(), canonical_title.into());
+        }
         if let Some(description) = metadata
             .get("description")
             .and_then(serde_json::Value::as_str)
@@ -461,6 +688,7 @@ async fn subsplease_show(
             ("status", "status"),
             ("episodes", "episode_count"),
             ("siteUrl", "metadata_url"),
+            ("relations", "relations"),
         ] {
             if let Some(value) = metadata.get(source).filter(|value| !value.is_null()) {
                 object.insert(target.into(), value.clone());
@@ -587,13 +815,49 @@ fn torrent_details(state: State<'_, TorrentState>, id: usize) -> Result<serde_js
     serde_json::to_value(response).map_err(|error| error.to_string())
 }
 
+fn parse_have_pieces(debug_bitfield: &str) -> Vec<bool> {
+    let Some(start) = debug_bitfield.rfind('[') else {
+        return Vec::new();
+    };
+    let Some(end) = debug_bitfield.rfind(']') else {
+        return Vec::new();
+    };
+    if end <= start {
+        return Vec::new();
+    }
+
+    debug_bitfield[start + 1..end]
+        .split(',')
+        .filter_map(|value| match value.trim() {
+            "0" => Some(false),
+            "1" => Some(true),
+            _ => None,
+        })
+        .collect()
+}
+
 #[tauri::command]
 fn torrent_status(state: State<'_, TorrentState>, id: usize) -> Result<serde_json::Value, String> {
     let response = state
         .api
         .api_stats_v1(TorrentIdOrHash::Id(id))
         .map_err(|error| error.to_string())?;
-    serde_json::to_value(response).map_err(|error| error.to_string())
+    let mut value = serde_json::to_value(response).map_err(|error| error.to_string())?;
+
+    if let Ok(debug_bitfield) = state.api.api_dump_haves(TorrentIdOrHash::Id(id)) {
+        let pieces = parse_have_pieces(&debug_bitfield);
+        if !pieces.is_empty() {
+            value
+                .as_object_mut()
+                .ok_or_else(|| "Torrent stats did not serialize to an object.".to_string())?
+                .insert(
+                    "pieces".to_string(),
+                    serde_json::to_value(pieces).map_err(|error| error.to_string())?,
+                );
+        }
+    }
+
+    Ok(value)
 }
 
 #[tauri::command]
@@ -713,7 +977,9 @@ pub fn run() {
             resume_torrent,
             forget_torrent,
             subsplease_schedule,
+            subsplease_index,
             subsplease_show,
+            anilist_season,
             anilist_search,
         ])
         .run(tauri::generate_context!())
@@ -726,7 +992,8 @@ mod tests {
     use super::trailer_runtime_dir;
     use super::{
         anilist_search_queries, anilist_title_similarity, first_capture, has_series_prequel,
-        normalize_anilist_title, strip_html, validate_anilist_search, validate_magnet,
+        normalize_anilist_title, parse_have_pieces, parse_subsplease_index, strip_html,
+        validate_anilist_search, validate_anilist_season, validate_magnet,
         validate_subsplease_slug, validate_timezone,
     };
 
@@ -747,6 +1014,17 @@ mod tests {
     }
 
     #[test]
+    fn parses_librqbit_have_piece_debug_output() {
+        let debug =
+            "BitSlice<u8, bitvec::order::Msb0> { addr: 0x1, head: 000, bits: 5 } [1, 0, 1, 1, 0]";
+        assert_eq!(
+            parse_have_pieces(debug),
+            vec![true, false, true, true, false]
+        );
+        assert!(parse_have_pieces("not a bitfield").is_empty());
+    }
+
+    #[test]
     fn validates_subsplease_inputs() {
         assert!(validate_subsplease_slug("one-piece").is_ok());
         assert!(validate_subsplease_slug("../one-piece").is_err());
@@ -759,6 +1037,13 @@ mod tests {
         assert!(validate_anilist_search("Young Ladies").is_ok());
         assert!(validate_anilist_search("x").is_err());
         assert!(validate_anilist_search("title\nquery").is_err());
+    }
+
+    #[test]
+    fn validates_anilist_season_input() {
+        assert_eq!(validate_anilist_season("summer", 2026), Ok("SUMMER"));
+        assert!(validate_anilist_season("monsoon", 2026).is_err());
+        assert!(validate_anilist_season("spring", 1200).is_err());
     }
 
     #[test]
@@ -777,6 +1062,20 @@ mod tests {
             .as_deref(),
             Some("476")
         );
+    }
+
+    #[test]
+    fn parses_unique_subsplease_archive_entries() {
+        let html = r#"
+            <a href="/shows/mushoku-tensei-s3">Mushoku Tensei S3</a>
+            <a href="/shows/86-eighty-six">86 - Eighty Six</a>
+            <a href="/shows/mushoku-tensei-s3">Duplicate</a>
+        "#;
+        let entries = parse_subsplease_index(html);
+        assert_eq!(entries.len(), 2);
+        assert!(entries.iter().any(|entry| {
+            entry.get("page").and_then(serde_json::Value::as_str) == Some("mushoku-tensei-s3")
+        }));
     }
 
     #[test]

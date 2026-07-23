@@ -215,3 +215,44 @@ select {
 		display: none;
 	}
 }
+
+/*
+ * Images and remote frames reveal only after their own load event. Page
+ * backgrounds and layout containers never participate in these animations.
+ */
+.reveal-image[data-image-state='loading'],
+.reveal-image[data-image-state='waiting'],
+.reveal-image[data-image-state='error'],
+.reveal-frame[data-frame-state='loading'],
+.reveal-frame[data-frame-state='waiting'] {
+	opacity: 0 !important;
+}
+
+.reveal-image[data-image-state='ready'],
+.reveal-frame[data-frame-state='ready'] {
+	animation: loaded-media-fade-in 520ms ease-out both;
+}
+
+.media-placeholder {
+	background-color: color-mix(in srgb, var(--text) 5%, var(--bg));
+}
+
+.text-reveal {
+	animation: text-fade-in 360ms ease-out both;
+}
+
+@keyframes loaded-media-fade-in {
+	from { opacity: 0; }
+}
+
+@keyframes text-fade-in {
+	from { opacity: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+	.reveal-image[data-image-state='ready'],
+	.reveal-frame[data-frame-state='ready'],
+	.text-reveal {
+		animation-duration: 1ms;
+	}
+}

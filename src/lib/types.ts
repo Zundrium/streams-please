@@ -12,7 +12,9 @@ export type DayName = (typeof DAY_ORDER)[number];
 export type Phase = 'idle' | 'connecting' | 'buffering' | 'ready' | 'error';
 export type AppView = 'player' | 'library' | 'discovery' | 'subsplease' | 'account';
 export type PlaybackQuality = '480' | '720' | '1080';
+export type SubtitleLanguage = 'en' | 'ja' | 'nl';
 export type DiscoveryVerdict = 'love' | 'maybe' | 'pass';
+export type AnimeSeason = 'WINTER' | 'SPRING' | 'SUMMER' | 'FALL';
 
 export interface RuntimeInfo {
   engine: string;
@@ -29,6 +31,7 @@ export interface TrailerPlaybackRequest {
   url: string;
   title: string;
   thumbnail?: string;
+  viewport?: HTMLElement;
 }
 
 export interface TorrentFile {
@@ -59,6 +62,7 @@ export interface TorrentStats {
   uploaded_bytes: number;
   total_bytes: number;
   finished: boolean;
+  pieces?: boolean[];
   error?: string;
   live?: {
     download_speed: { mbps: number; human_readable?: string };
@@ -99,6 +103,8 @@ export interface SubsPleaseScheduleShow {
   page: string;
   image_url: string;
   time: string;
+  anilist_id?: number;
+  subsplease_id?: number;
 }
 
 export interface SubsPleaseScheduleResponse {
@@ -114,6 +120,95 @@ export interface AniListSearchResult {
     native?: string;
   };
   synonyms?: string[];
+}
+
+export interface AniListDate {
+  year?: number;
+  month?: number;
+  day?: number;
+}
+
+export interface AniListMediaTitle {
+  romaji?: string;
+  english?: string;
+  native?: string;
+  userPreferred?: string;
+}
+
+export interface AniListMatchableMedia {
+  id: number;
+  title: AniListMediaTitle;
+  synonyms?: string[];
+}
+
+export interface AniListRelationNode extends AniListMatchableMedia {
+  type?: string;
+  format?: string;
+  status?: string;
+  season?: AnimeSeason;
+  seasonYear?: number;
+  coverImage?: {
+    extraLarge?: string;
+    large?: string;
+    color?: string;
+  };
+  siteUrl?: string;
+}
+
+export interface AniListRelationEdge {
+  relationType?: string;
+  node?: AniListRelationNode;
+}
+
+export interface AniListSeasonShow extends AniListMatchableMedia {
+  idMal?: number;
+  description?: string;
+  trailer?: {
+    id: string;
+    site: string;
+    thumbnail?: string;
+  };
+  coverImage?: {
+    extraLarge?: string;
+    large?: string;
+    color?: string;
+  };
+  bannerImage?: string;
+  genres?: string[];
+  season: AnimeSeason;
+  seasonYear: number;
+  startDate?: AniListDate;
+  endDate?: AniListDate;
+  format?: string;
+  status?: string;
+  episodes?: number;
+  duration?: number;
+  averageScore?: number;
+  popularity?: number;
+  siteUrl?: string;
+  nextAiringEpisode?: {
+    episode: number;
+    airingAt: number;
+    timeUntilAiring: number;
+  };
+  relations?: {
+    edges?: AniListRelationEdge[];
+  };
+}
+
+export interface AniListSeasonResponse {
+  season: AnimeSeason;
+  year: number;
+  shows: AniListSeasonShow[];
+}
+
+export interface SubsPleaseIndexShow {
+  title: string;
+  page: string;
+}
+
+export interface SubsPleaseIndexResponse {
+  shows: SubsPleaseIndexShow[];
 }
 
 export interface SubsPleaseDownload {
@@ -137,6 +232,7 @@ export interface SubsPleaseShowResponse {
   image_url: string;
   banner_image_url?: string;
   slug: string;
+  subsplease_id?: number;
   episode: Record<string, SubsPleaseRelease>;
   batch: Record<string, SubsPleaseRelease>;
   trailer?: {
@@ -153,10 +249,15 @@ export interface SubsPleaseShowResponse {
   metadata_url?: string;
   metadata_id?: number;
   has_series_prequel?: boolean;
+  relations?: {
+    edges?: AniListRelationEdge[];
+  };
 }
 
 export interface LibraryEntry {
+  anilistId?: number;
   slug: string;
+  subspleaseId?: number;
   title: string;
   imageUrl: string;
   bannerImageUrl?: string;
@@ -166,6 +267,7 @@ export interface LibraryEntry {
   trailer?: SubsPleaseShowResponse['trailer'];
   metadataId?: number;
   following: boolean;
+  libraryDismissed?: boolean;
   discoveryVerdict?: DiscoveryVerdict;
   checkedAt?: string;
   day?: DayName;
@@ -178,6 +280,7 @@ export interface LibraryEntry {
 }
 
 export interface EpisodePlaybackRequest {
+  anilistId?: number;
   slug: string;
   title: string;
   imageUrl: string;
