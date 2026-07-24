@@ -62,6 +62,8 @@
     secondaryControls?: Snippet;
   } = $props();
 
+  const TIMELINE_STEP = 0.05;
+
   function formatTime(seconds: number): string {
     if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
     const rounded = Math.floor(seconds);
@@ -73,16 +75,32 @@
       : `${minutes}:${String(remainder).padStart(2, '0')}`;
   }
 
-  function seekFromTrackClick(event: MouseEvent) {
-    if (event.detail === 0 || duration <= 0) return;
-    const track = event.currentTarget as HTMLElement;
-    const rect = track.getBoundingClientRect();
-    if (rect.width <= 0) return;
-    const percent = Math.max(
-      0,
-      Math.min(100, ((event.clientX - rect.left) / rect.width) * 100)
-    );
-    void onSeekAbsolute(percent);
+  function normalizeTimelineValue(value: number): number {
+    const clamped = Math.max(0, Math.min(100, value));
+    const stepsPerPercent = 1 / TIMELINE_STEP;
+    return Math.round(clamped * stepsPerPercent) / stepsPerPercent;
+  }
+
+  let timelineValue = $state(0);
+  let scrubbing = $state(false);
+  let displayedTime = $derived(
+    scrubbing && duration > 0 ? (timelineValue / 100) * duration : currentTime
+  );
+
+  $effect(() => {
+    if (!scrubbing) timelineValue = normalizeTimelineValue(progress);
+  });
+
+  function previewSeek(value: number) {
+    timelineValue = normalizeTimelineValue(Number(value));
+    scrubbing = true;
+  }
+
+  function commitSeek(value: number) {
+    const target = normalizeTimelineValue(Number(value));
+    timelineValue = target;
+    void onSeekAbsolute(target);
+    scrubbing = false;
   }
 </script>
 
@@ -92,17 +110,17 @@
   role="presentation"
 >
   <div class="grid grid-cols-[3rem_minmax(0,1fr)_3rem] items-center gap-3 text-xs text-white/55">
-    <span>{formatTime(currentTime)}</span>
+    <span>{formatTime(displayedTime)}</span>
     <Slider
       type="single"
-      value={progress}
+      value={timelineValue}
       {bufferedRanges}
       max={100}
-      step={0.05}
+      step={TIMELINE_STEP}
       aria-label={`${playbackLabel} position`}
       class="[&_[data-slot=slider-track]]:bg-white/20 [&_[data-slot=slider-buffer]]:bg-white/38 [&_[data-slot=slider-range]]:bg-white [&_[data-slot=slider-thumb]]:bg-white"
-      onValueCommit={(value) => void onSeekAbsolute(Number(value))}
-      onclick={seekFromTrackClick}
+      onValueChange={(value) => previewSeek(Number(value))}
+      onValueCommit={(value) => commitSeek(Number(value))}
     />
     <span class="text-right">{formatTime(duration)}</span>
   </div>

@@ -160,9 +160,7 @@
   const MAX_STREAM_FAILURES = 3;
   const PLAYBACK_START_TIMEOUT_MS = 20_000;
   const PLAYBACK_PROBE_INTERVAL_MS = 250;
-  const SEEK_DEBOUNCE_MS = 180;
-  const SEEK_BUFFER_SECONDS = 3;
-  const SEEK_BUFFER_TIMEOUT_MS = 8_000;
+  const SEEK_RECONCILE_TOLERANCE_SECONDS = 1;
   const MEDIA_LOAD_TIMEOUT_MS = 8_000;
   const MPV_WINDOW_LABEL = 'main';
 
@@ -184,8 +182,8 @@
   let streamAttemptGeneration = 0;
   let bufferingWatchdogTimer: number | null = null;
   let mpvPausedForCache = false;
-  let seekTimer: number | null = null;
   let pendingSeekTime: number | null = null;
+  let seekOperation: Promise<void> | null = null;
   let seekGeneration = 0;
   let playerUiTimer: number | null = null;
   let trailerOriginView = $state<AppView | null>(null);
@@ -212,8 +210,6 @@
   let queueOpen = $state(false);
   let tracks = $state<MpvTrack[]>([]);
   let seekTarget = $state<number | null>(null);
-  let isSeeking = $state(false);
-  let seekCacheDuration = $state(0);
   let playback = $state<PlaybackState>({
     paused: true,
     time: 0,
@@ -415,7 +411,6 @@
       window.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('keydown', onKeyDown);
       document.removeEventListener('visibilitychange', onVisibilityChange);
-      if (seekTimer !== null) window.clearTimeout(seekTimer);
       if (playerUiTimer !== null) window.clearTimeout(playerUiTimer);
       rejectMpvLoadWaiter(new Error('The player was closed.'));
       trailerController.dispose();
@@ -569,16 +564,6 @@
     const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
     const value = bytes / 1024 ** index;
     return `${value.toFixed(index > 2 ? 2 : index > 0 ? 1 : 0)} ${units[index]}`;
-  }
-
-  function formatTime(seconds = 0): string {
-    if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
-    const hours = Math.floor(seconds / 3600);
-    const minutes = Math.floor((seconds % 3600) / 60);
-    const remainder = Math.floor(seconds % 60);
-    return hours > 0
-      ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
-      : `${minutes}:${String(remainder).padStart(2, '0')}`;
   }
 
   function readableTitle(filename: string): string {
@@ -769,12 +754,8 @@
     streamAttemptGeneration += 1;
     seekGeneration += 1;
     clearBufferingWatchdog();
-    if (seekTimer !== null) window.clearTimeout(seekTimer);
-    seekTimer = null;
     pendingSeekTime = null;
     seekTarget = null;
-    isSeeking = false;
-    seekCacheDuration = 0;
   }
 
   function trackEpisodeMediaOperation(operation: Promise<void>): Promise<void> {
@@ -1109,8 +1090,16 @@
       return;
     }
     if (event.name === 'pause') playback = { ...playback, paused: Boolean(event.data) };
-    else if (event.name === 'time-pos') playback = { ...playback, time: Number(event.data ?? 0) };
-    else if (event.name === 'duration') playback = { ...playback, duration: Number(event.data ?? 0) };
+    else if (event.name === 'time-pos') {
+      const time = Number(event.data ?? 0);
+      playback = { ...playback, time };
+      if (
+        seekTarget !== null &&
+        Math.abs(time - seekTarget) <= SEEK_RECONCILE_TOLERANCE_SECONDS
+      ) {
+        seekTarget = null;
+      }
+    } else if (event.name === 'duration') playback = { ...playback, duration: Number(event.data ?? 0) };
     else if (event.name === 'volume') playback = { ...playback, volume: Number(event.data ?? 0) };
     else if (event.name === 'mute') playback = { ...playback, muted: Boolean(event.data) };
     else if (event.name === 'speed') playback = { ...playback, speed: Number(event.data ?? 1) };
@@ -1123,7 +1112,6 @@
       if (!currentRef || !streamStarted) return;
       if (Boolean(event.data)) {
         mpvPausedForCache = true;
-        if (isSeeking) return;
         if (phase !== 'buffering') bufferingStartedAt = Date.now();
         phase = 'buffering';
         armBufferingWatchdog();
@@ -1365,15 +1353,11 @@
     streamFailures = 0;
     pendingSeekTime = null;
     seekGeneration += 1;
-    if (seekTimer !== null) window.clearTimeout(seekTimer);
-    seekTimer = null;
     current = null;
     playingEpisode = null;
     stats = null;
     tracks = [];
-    isSeeking = false;
     seekTarget = null;
-    seekCacheDuration = 0;
   }
 
   async function startTorrent(releaseMagnet: string): Promise<boolean> {
@@ -1747,12 +1731,19 @@
   }
 
   function scheduleSeek(time: number) {
-    if (!current) return;
+    if (!current || playback.duration <= 0) return;
     const target = Math.max(0, Math.min(playback.duration, time));
     pendingSeekTime = target;
     seekTarget = target;
-    if (seekTimer !== null) window.clearTimeout(seekTimer);
-    seekTimer = window.setTimeout(() => void flushScheduledSeek(), SEEK_DEBOUNCE_MS);
+
+    if (!isTauri()) {
+      pendingSeekTime = null;
+      playback = { ...playback, time: target };
+      seekTarget = null;
+      return;
+    }
+
+    flushScheduledSeek();
   }
 
   function seekRelative(seconds: number) {
@@ -1762,67 +1753,45 @@
 
   function seekAbsolute(percent: number) {
     if (!current) return;
-    scheduleSeek((percent / 100) * playback.duration);
+    scheduleSeek((Math.max(0, Math.min(100, percent)) / 100) * playback.duration);
   }
 
-  function flushScheduledSeek(): Promise<void> {
-    return trackEpisodeMediaOperation(performScheduledSeek());
+  function flushScheduledSeek() {
+    if (seekOperation || pendingSeekTime === null) return;
+    const generation = seekGeneration;
+    const operation = trackEpisodeMediaOperation(performScheduledSeek(generation));
+    seekOperation = operation;
+    operation.then(
+      () => finishScheduledSeek(operation, generation),
+      () => finishScheduledSeek(operation, generation)
+    );
   }
 
-  async function performScheduledSeek() {
-    if (seekTimer !== null) {
-      window.clearTimeout(seekTimer);
-      seekTimer = null;
-    }
-    const target = pendingSeekTime;
-    pendingSeekTime = null;
-    if (target === null || !current || mpvMediaOwner !== 'episode') return;
+  function finishScheduledSeek(operation: Promise<void>, generation: number) {
+    if (seekOperation !== operation) return;
+    seekOperation = null;
+    if (generation === seekGeneration && pendingSeekTime !== null) flushScheduledSeek();
+  }
 
-    if (!isTauri()) {
-      playback = { ...playback, time: target };
-      seekTarget = null;
-      return;
-    }
-
-    const generation = ++seekGeneration;
-    isSeeking = true;
-    seekCacheDuration = 0;
-    try {
-      await runWithMpv(() =>
-        mpvCommand('seek', [target, 'absolute+keyframes'], MPV_WINDOW_LABEL).then(() => undefined)
-      );
-      const deadline = Date.now() + SEEK_BUFFER_TIMEOUT_MS;
-      while (
-        generation === seekGeneration &&
-        mpvMediaOwner === 'episode' &&
-        Date.now() < deadline
-      ) {
-        const [seeking, cacheDuration] = await Promise.all([
-          runWithMpv(() => getProperty<boolean>('seeking', 'flag', MPV_WINDOW_LABEL)),
-          runWithMpv(() =>
-            getProperty<number | null>('demuxer-cache-duration', 'double', MPV_WINDOW_LABEL)
-          )
-        ]);
-        const bufferedSeconds = Math.max(0, Number(cacheDuration ?? 0));
-        seekCacheDuration = bufferedSeconds;
-        if (!seeking && bufferedSeconds >= SEEK_BUFFER_SECONDS) break;
-        await new Promise((resolve) => window.setTimeout(resolve, 150));
-      }
-      if (generation !== seekGeneration || mpvMediaOwner !== 'episode') return;
-    } catch (reason) {
-      if (generation === seekGeneration) {
-        error = `Seek could not be completed: ${reason instanceof Error ? reason.message : String(reason)}`;
-      }
-    } finally {
-      if (generation === seekGeneration) {
-        isSeeking = false;
-        seekTarget = null;
-        seekCacheDuration = 0;
-        if (mpvPausedForCache) {
-          bufferingStartedAt = Date.now();
-          phase = 'buffering';
-          armBufferingWatchdog();
+  async function performScheduledSeek(generation: number) {
+    while (
+      generation === seekGeneration &&
+      current &&
+      mpvMediaOwner === 'episode' &&
+      pendingSeekTime !== null
+    ) {
+      const target = pendingSeekTime;
+      pendingSeekTime = null;
+      try {
+        await runWithMpv(() =>
+          mpvCommand('seek', [target, 'absolute+exact'], MPV_WINDOW_LABEL).then(() => undefined)
+        );
+      } catch (reason) {
+        if (generation === seekGeneration && seekTarget === target) {
+          seekTarget = null;
+          error = `Seek could not be completed: ${reason instanceof Error ? reason.message : String(reason)}`;
         }
+        return;
       }
     }
   }
@@ -2060,18 +2029,6 @@
                 {#if waitingForPeers}
                   <Button variant="ghost" size="sm" class="pointer-events-auto mt-4 text-white/70 hover:bg-white/10 hover:text-white" onclick={() => void retryPlayback()}>Retry connection</Button>
                 {/if}
-              </div>
-            </div>
-          {/if}
-
-          {#if current && isSeeking && phase === 'ready'}
-            <div class="pointer-events-none absolute inset-0 z-30 grid place-items-center text-white" role="status" aria-live="polite">
-              <div class="flex flex-col items-center text-center">
-                <Spinner class="size-10 border-[3px] border-white/15 border-t-white" />
-                <strong class="mt-4 text-sm font-medium">Buffering</strong>
-                <small class="mt-1 text-[11px] tabular-nums text-white/48">
-                  {seekCacheDuration >= 0.1 ? `${seekCacheDuration.toFixed(1)}s ready at ${formatTime(displayedPlaybackTime)}` : 'Downloading the next video pieces'}
-                </small>
               </div>
             </div>
           {/if}
