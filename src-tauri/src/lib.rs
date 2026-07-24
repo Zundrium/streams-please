@@ -946,7 +946,7 @@ fn create_torrent_state(app: &tauri::AppHandle) -> Result<TorrentState, String> 
             stream_port,
             download_dir,
             subsplease_client: reqwest::Client::builder()
-                .user_agent("Yoru Stream/0.1 (+local desktop client)")
+                .user_agent("StreamsPlease/0.1 (+local desktop client)")
                 .timeout(std::time::Duration::from_secs(20))
                 .build()
                 .map_err(|error| error.to_string())?,
@@ -983,7 +983,7 @@ pub fn run() {
             anilist_search,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Yoru Stream");
+        .expect("error while running StreamsPlease");
 }
 
 #[cfg(test)]

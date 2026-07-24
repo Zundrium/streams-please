@@ -20,7 +20,7 @@ const mockDetails: TorrentDetails = {
   id: 7,
   info_hash: '08ada5a7a6183aae1e09d831df6748d566095a10',
   name: 'Sintel — Open Movie',
-  output_folder: 'Yoru Stream / media',
+  output_folder: 'StreamsPlease / media',
   files: [
     {
       name: 'Sintel.2010.1080p.mkv',
@@ -103,7 +103,7 @@ function mockSubsPleaseShow(slug: string, anilistId?: number): SubsPleaseShowRes
     ),
     image_url: show?.image_url ?? '',
     synopsis:
-      'New episodes appear here according to the current SubsPlease schedule. Select an episode to open it in the Yoru player.',
+      'New episodes appear here according to the current SubsPlease schedule. Select an episode to open it in the StreamsPlease player.',
     batch: {},
     genres: ['Anime', 'Adventure'],
     year: 2026,
@@ -419,7 +419,7 @@ export async function callBackend<T>(
       engine: 'librqbit',
       engineVersion: '8.1.1-demo',
       streamPort: 42420,
-      downloadDir: 'Yoru Stream / media',
+      downloadDir: 'StreamsPlease / media',
       mpvAvailable: true,
       mpvVersion: 'mpv 0.40 (UI preview)',
       trailerAvailable: true,

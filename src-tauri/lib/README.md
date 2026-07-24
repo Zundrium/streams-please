@@ -1,6 +1,6 @@
 # Bundled libmpv runtime
 
-These libraries are loaded into `yoru-stream.exe`; Yoru does not launch `mpv.exe`.
+These libraries are loaded into `streamsplease.exe`; StreamsPlease does not launch `mpv.exe`.
 
 - `libmpv-2.dll`: LGPL x86-64 build from zhongfly/mpv-winbuild, release `20260722-git-8ab3f8b66d` (`mpv v0.41.0-880-g8ab3f8b66`).
 - `libmpv-wrapper.dll`: LGPL-2.1 wrapper v0.1.1 from nini22P/libmpv-wrapper.
@@ -22,12 +22,12 @@ Sources and license information:
 
 ## Bundled trailer resolver
 
-Discovery trailers use libmpv as well, keeping both video and audio inside the Yoru process. The Windows bundle includes:
+Discovery trailers use libmpv as well, keeping both video and audio inside the StreamsPlease process. The Windows bundle includes:
 
 - `yt-dlp.exe`: official x86-64 standalone release `2026.07.04` (Unlicense; the bundled executable also contains third-party components covered by its compiled `THIRD_PARTY_LICENSES.txt`).
 - `deno.exe`: official x86-64 Deno release `v2.9.3` (MIT), used by yt-dlp for YouTube's JavaScript challenges.
 
-Yoru prepends this resource directory to its own process `PATH` before libmpv starts. No system-wide installation is required.
+StreamsPlease prepends this resource directory to its own process `PATH` before libmpv starts. No system-wide installation is required.
 
 SHA-256:
 

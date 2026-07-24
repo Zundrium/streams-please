@@ -1,8 +1,8 @@
-# Yoru Stream agent guide
+# StreamsPlease agent guide
 
 ## Product and priorities
 
-Yoru Stream is a local-first Windows desktop player for legal or personally owned BitTorrent media. The production app is a Tauri v2 shell with a SvelteKit SPA, a Rust/librqbit backend, an in-process libmpv renderer, and a loopback-only HTTP range server.
+StreamsPlease is a local-first Windows desktop player for legal or personally owned BitTorrent media. The production app is a Tauri v2 shell with a SvelteKit SPA, a Rust/librqbit backend, an in-process libmpv renderer, and a loopback-only HTTP range server.
 
 Prioritize, in order:
 
@@ -12,7 +12,7 @@ Prioritize, in order:
 4. browser-preview parity for UI work;
 5. focused, maintainable changes.
 
-Do not replace in-process libmpv with WebView playback or an external player process without an explicit product decision. Keeping video and audio in Yoru's Windows process is required for application-window capture.
+Do not replace in-process libmpv with WebView playback or an external player process without an explicit product decision. Keeping video and audio in StreamsPlease's Windows process is required for application-window capture.
 
 ## Host environment
 
@@ -35,7 +35,7 @@ Apply the same pattern to other commands below.
 ## Source map
 
 - `src/routes/`: static, client-only SvelteKit entry points. SSR is disabled.
-- `src/lib/components/YoruApp.svelte`: app orchestration, native-player lifecycle, torrent playback, and top-level state.
+- `src/lib/components/StreamsPleaseApp.svelte`: app orchestration, native-player lifecycle, torrent playback, and top-level state.
 - `src/lib/components/*Page.svelte`: feature-level UI.
 - `src/lib/components/ui/`: locally installed Lily component source.
 - `src/lib/backend.ts`: typed Tauri invocation boundary plus browser-preview mocks.
@@ -70,7 +70,7 @@ Apply the same pattern to other commands below.
 - Use `$lib` aliases instead of deep relative imports.
 - Keep native calls behind `callBackend` and player-specific calls in the player orchestration layer.
 - Preserve operation generations, cleanup functions, and timeout cancellation around asynchronous playback. Stale async work must not mutate a replacement torrent or trailer session.
-- Avoid expanding `YoruApp.svelte` with unrelated presentation logic. Extract a component or pure domain helper when it gives a clear ownership boundary.
+- Avoid expanding `StreamsPleaseApp.svelte` with unrelated presentation logic. Extract a component or pure domain helper when it gives a clear ownership boundary.
 - Use the local Lily design system in `src/lib/components/ui` and existing Tailwind tokens before creating custom primitives. Use `@lucide/svelte` for icons.
 - Match the established visual language and support keyboard use, focus states, labels, loading, empty, and error states.
 - Use `RevealImage`/`RevealFrame` for remote media where the existing reveal behavior applies. Respect reduced-motion behavior.
@@ -91,7 +91,7 @@ Apply the same pattern to other commands below.
 A Windows exit such as
 
 ```text
-process didn't exit successfully: target\debug\yoru-stream.exe
+process didn't exit successfully: target\debug\streamsplease.exe
 (exit code: 0xc0000005, STATUS_ACCESS_VIOLATION)
 ```
 

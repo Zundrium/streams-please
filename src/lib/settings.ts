@@ -1,6 +1,6 @@
 import type { PlaybackQuality, SubtitleLanguage } from '$lib/types';
 
-const STORAGE_KEY = 'yoru-stream.settings.v1';
+const STORAGE_KEY = 'streamsplease.settings.v1';
 
 export interface AppSettings {
   preferredQuality: PlaybackQuality;

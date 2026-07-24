@@ -1,6 +1,6 @@
-# Yoru Stream
+# StreamsPlease
 
-Yoru Stream is a local Tauri v2 desktop player for legal or personally owned BitTorrent media. A native Rust engine downloads torrent pieces, a local-only HTTP endpoint serves seekable byte ranges, and mpv plays MKV/MP4 files with embedded audio and subtitle tracks.
+StreamsPlease is a local Tauri v2 desktop player for legal or personally owned BitTorrent media. A native Rust engine downloads torrent pieces, a local-only HTTP endpoint serves seekable byte ranges, and mpv plays MKV/MP4 files with embedded audio and subtitle tracks.
 
 ## Features
 
@@ -37,7 +37,7 @@ The stream server binds exclusively to `127.0.0.1`, selects a random available p
 - the Tauri v2 platform prerequisites (on Windows: WebView2 and MSVC build tools);
 - the bundled libmpv, yt-dlp, and Deno runtimes in `src-tauri/lib` (included in this checkout for Windows x86-64).
 
-Yoru loads libmpv into `yoru-stream.exe` instead of playing media in a WebView iframe or launching a separate player process. This keeps episode and trailer audio in Yoru's Windows audio session so application-window streaming tools such as Discord can capture it reliably. yt-dlp and Deno are only used to resolve trailer media URLs; they do not render or output audio.
+StreamsPlease loads libmpv into `streamsplease.exe` instead of playing media in a WebView iframe or launching a separate player process. This keeps episode and trailer audio in StreamsPlease's Windows audio session so application-window streaming tools such as Discord can capture it reliably. yt-dlp and Deno are only used to resolve trailer media URLs; they do not render or output audio.
 
 ## Development
 
@@ -76,8 +76,8 @@ npm run tauri build
 
 ## Usage
 
-1. Start Yoru Stream and paste a magnet link.
-2. Select **Open torrent**. Yoru chooses the largest video file and prioritizes media and subtitles.
+1. Start StreamsPlease and paste a magnet link.
+2. Select **Open torrent**. StreamsPlease chooses the largest video file and prioritizes media and subtitles.
 3. Switch embedded audio and subtitles through the player or details panel.
 4. Use **External subtitle** to add a local subtitle file.
 5. Pause P2P or stop the session when you are done. Stopping forgets the torrent but preserves cache files that have already been written.
@@ -88,7 +88,7 @@ the canonical identity for saved shows; the optional SubsPlease slug and numeric
 retained only for weekly timing and episode retrieval. Selecting an episode passes the
 chosen magnet link to the same local player flow.
 
-Select a trailer from Discovery, Library, or SubsPlease details to open it in Yoru's native player. The desktop app asks yt-dlp for the first YouTube result matching `<series title> trailer English subtitles`; AniList's trailer remains the browser-preview fallback. Discovery trailers start inside the page's trailer frame and can be expanded with the theater or full-screen controls. Closing a trailer restores the active episode at its previous position and leaves it paused.
+Select a trailer from Discovery, Library, or SubsPlease details to open it in StreamsPlease's native player. The desktop app asks yt-dlp for the first YouTube result matching `<series title> trailer English subtitles`; AniList's trailer remains the browser-preview fallback. Discovery trailers start inside the page's trailer frame and can be expanded with the theater or full-screen controls. Closing a trailer restores the active episode at its previous position and leaves it paused.
 
 The **Legal Sintel demo** button enters a Creative Commons/open movie torrent so you can test the flow without commercial content.
 
@@ -99,4 +99,4 @@ The **Legal Sintel demo** button enters a Creative Commons/open movie torrent so
 - Clearing the cache and configuring the download directory do not have a UI yet.
 - Tracker reach and startup speed depend on available peers and network or firewall settings.
 
-Use Yoru Stream only for content you are authorized to access. BitTorrent generally also uploads received pieces to other peers while the session is active.
+Use StreamsPlease only for content you are authorized to access. BitTorrent generally also uploads received pieces to other peers while the session is active.

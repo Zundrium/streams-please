@@ -7,10 +7,10 @@ import type {
   SubsPleaseIndexShow
 } from '$lib/types';
 
-const PROVIDER_MAP_KEY = 'yoru-stream.provider-map.v1';
-const PROVIDER_INDEX_CACHE_KEY = 'yoru-stream.provider-index.v1';
-const SEASON_CACHE_KEY = 'yoru-stream.season-cache.v1';
-const AVAILABILITY_CACHE_KEY = 'yoru-stream.availability-cache.v1';
+const PROVIDER_MAP_KEY = 'streamsplease.provider-map.v1';
+const PROVIDER_INDEX_CACHE_KEY = 'streamsplease.provider-index.v1';
+const SEASON_CACHE_KEY = 'streamsplease.season-cache.v1';
+const AVAILABILITY_CACHE_KEY = 'streamsplease.availability-cache.v1';
 const MAX_CACHED_SEASONS = 8;
 const SEASON_ORDER: AnimeSeason[] = ['WINTER', 'SPRING', 'SUMMER', 'FALL'];
 

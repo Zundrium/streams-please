@@ -6,8 +6,7 @@ import type {
   SubsPleaseShowResponse
 } from '$lib/types';
 
-const STORAGE_KEY = 'yoru-stream.library.v2';
-const LEGACY_STORAGE_KEY = 'yoru-stream.library.v1';
+const STORAGE_KEY = 'streamsplease.library.v2';
 
 function unique(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
@@ -25,10 +24,7 @@ export function sortEpisodeNumbers(values: string[]): string[] {
 export function loadLibrary(): LibraryEntry[] {
   if (typeof window === 'undefined') return [];
   try {
-    const source =
-      window.localStorage.getItem(STORAGE_KEY) ??
-      window.localStorage.getItem(LEGACY_STORAGE_KEY) ??
-      '[]';
+    const source = window.localStorage.getItem(STORAGE_KEY) ?? '[]';
     const parsed = JSON.parse(source);
     if (!Array.isArray(parsed)) return [];
     return parsed.flatMap((value): LibraryEntry[] => {

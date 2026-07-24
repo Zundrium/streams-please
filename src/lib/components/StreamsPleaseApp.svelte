@@ -72,6 +72,7 @@
   import PlayerTransport from '$lib/components/PlayerTransport.svelte';
   import RevealImage from '$lib/components/RevealImage.svelte';
   import SubsPleasePage from '$lib/components/SubsPleasePage.svelte';
+  import StreamsPleaseLogo from '$lib/components/StreamsPleaseLogo.svelte';
   import TasteIndicator from '$lib/components/TasteIndicator.svelte';
   import type {
     AddTorrentResponse,
@@ -1384,7 +1385,7 @@
       return false;
     }
     if (isTauri() && runtime && !runtime.mpvAvailable) {
-      error = 'The bundled libmpv runtime is missing. Reinstall Yoru Stream or run the libmpv setup step.';
+      error = 'The bundled libmpv runtime is missing. Reinstall StreamsPlease or run the libmpv setup step.';
       phase = 'error';
       return false;
     }
@@ -1910,9 +1911,8 @@
 <div class="grid h-screen min-h-0 overflow-hidden text-(--text) {immersiveMode ? 'grid-rows-[minmax(0,1fr)]' : 'grid-rows-[4rem_minmax(0,1fr)]'}">
   {#if !immersiveMode}
   <header class="flex items-stretch gap-4 border-b border-(--text)/8 bg-(--bg) px-4" data-tauri-drag-region>
-    <div class="flex min-w-0 shrink-0 items-center gap-2 px-2" data-tauri-drag-region>
-      <span class="grid size-8 place-items-center rounded-full bg-(--text) text-(--bg)"><Play class="size-3.5" fill="currentColor" /></span>
-      <strong class="text-sm tracking-[0.16em]">YORU</strong><span class="text-sm text-(--text)/38">STREAM</span>
+    <div class="flex min-w-0 shrink-0 items-center px-2" data-tauri-drag-region>
+      <StreamsPleaseLogo />
     </div>
 
     <Tabs
