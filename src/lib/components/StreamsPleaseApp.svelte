@@ -152,6 +152,7 @@
     ['speed', 'double'],
     ['track-list', 'node'],
     ['media-title', 'string', 'none'],
+    ['path', 'string', 'none'],
     ['paused-for-cache', 'flag']
   ] as const satisfies readonly MpvObservableProperty[];
   const VIDEO_EXTENSIONS = ['.mkv', '.mk3d', '.mp4', '.m4v', '.mov', '.webm', '.avi', '.ts', '.m2ts'];
@@ -219,6 +220,8 @@
     speed: 1
   });
   let trailerPlayback = $state<TrailerPlaybackState | null>(null);
+  let trailerLoadedPath = $state('');
+  let trailerOutgoingPath = '';
   const trailerController = new TrailerPlayerController<TrailerSessionContext>(
     {
       open: openTrailerSession,
@@ -234,11 +237,17 @@
       setMuted: (muted) => runWithMpv(() => setProperty('mute', muted, MPV_WINDOW_LABEL))
     },
     (state) => {
+      const startedLoading =
+        state?.status === 'searching' && trailerPlayback?.status !== 'searching';
       const becameReady =
         (state?.status === 'ready' || state?.status === 'buffering') &&
         trailerPlayback?.status === 'searching';
       trailerPlayback = state;
-      if (becameReady) scheduleVideoViewportSync();
+      if (startedLoading) {
+        trailerOutgoingPath = trailerLoadedPath;
+        trailerLoadedPath = '';
+      }
+      if (startedLoading || becameReady) scheduleVideoViewportSync();
     },
     (message) => {
       phase = 'error';
@@ -269,7 +278,8 @@
       : 0
   );
   let trailerReady = $derived(
-    trailerPlayback?.status === 'ready' || trailerPlayback?.status === 'buffering'
+    (trailerPlayback?.status === 'ready' || trailerPlayback?.status === 'buffering') &&
+      Boolean(trailerLoadedPath)
   );
   let immersiveMode = $derived(theaterMode || fullscreenMode);
   let trailerInlineMode = $derived(
@@ -435,13 +445,16 @@
     const host = contentViewport;
     if (!playerOpen || !anchor || !host) return;
 
-    const closeIfDetached = () => {
-      if (anchor.isConnected || trailerPlayback?.status === 'closing') return;
-      void closeTrailer();
+    const syncOrClose = () => {
+      if (anchor.isConnected) {
+        scheduleVideoViewportSync();
+        return;
+      }
+      if (trailerPlayback?.status !== 'closing') void closeTrailer();
     };
-    const observer = new MutationObserver(closeIfDetached);
+    const observer = new MutationObserver(syncOrClose);
     observer.observe(host, { childList: true, subtree: true });
-    closeIfDetached();
+    syncOrClose();
     return () => observer.disconnect();
   });
 
@@ -730,6 +743,7 @@
       window.requestAnimationFrame(sync);
     });
     window.setTimeout(sync, 180);
+    window.setTimeout(sync, 320);
   }
 
   function isSupportedTrailerUrl(value: string): boolean {
@@ -838,8 +852,19 @@
   async function loadTrailerMedia(
     request: TrailerPlaybackRequest,
     initial: TrailerPlaybackState,
-    cancelled: () => boolean
+    cancelled: () => boolean,
+    replacing: boolean
   ): Promise<void> {
+    if (replacing) {
+      mpvMediaOwner = 'transition';
+      await tick();
+      if (cancelled()) return;
+      await runWithMpv(() =>
+        setVideoMarginRatio({ top: 1 }, MPV_WINDOW_LABEL)
+      );
+      if (cancelled()) return;
+    }
+
     mpvMediaOwner = 'trailer';
     await runWithMpv(async () => {
       await setProperty('speed', 1, MPV_WINDOW_LABEL);
@@ -854,7 +879,7 @@
           request.url,
           'replace',
           -1,
-          'pause=no,start=0,speed=1,sid=no,secondary-sid=no'
+          'pause=no,start=0,speed=1,vid=auto,aid=auto,sid=no,secondary-sid=no'
         ],
         MPV_WINDOW_LABEL
       );
@@ -1080,7 +1105,16 @@
   function onMpvProperty(event: MpvEventFromProperties<(typeof OBSERVED_PROPERTIES)[number]>) {
     if (mpvMediaOwner === 'transition') return;
     if (mpvMediaOwner === 'trailer') {
-      if (event.name !== 'track-list' && event.name !== 'speed') {
+      if (event.name === 'path') {
+        if (
+          typeof event.data === 'string' &&
+          event.data !== trailerOutgoingPath &&
+          isSupportedTrailerUrl(event.data)
+        ) {
+          trailerLoadedPath = event.data;
+          scheduleVideoViewportSync();
+        }
+      } else if (event.name !== 'track-list' && event.name !== 'speed') {
         trailerController.handleProperty(event.name, event.data);
       }
       return;
@@ -1168,6 +1202,7 @@
 
     if (mpvMediaOwner === 'transition') return;
     if (mpvMediaOwner === 'trailer') {
+      if (event.event === 'video-reconfig') scheduleVideoViewportSync();
       trailerController.handleEvent(event);
       return;
     }
@@ -1560,13 +1595,12 @@
     commitLibrary(next);
   }
 
-  async function decideDiscoveryShow(
+  function decideDiscoveryShow(
     details: SubsPleaseShowResponse,
     show: SubsPleaseScheduleShow,
     day: DayName | undefined,
     verdict: DiscoveryVerdict
   ) {
-    await closeTrailer();
     setDiscoveryVerdict(details, show, day, verdict);
   }
 
@@ -1948,6 +1982,7 @@
       onDecide={decideDiscoveryShow}
       onOpenLibrary={() => void changeActiveView('library')}
       onPlayTrailer={playTrailer}
+      onCloseTrailer={closeTrailer}
     />
   {:else if activeView === 'subsplease'}
     <SubsPleasePage

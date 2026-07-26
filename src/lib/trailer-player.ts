@@ -30,7 +30,8 @@ export interface TrailerPlayerDriver<TContext> {
   load: (
     request: TrailerPlaybackRequest,
     initial: TrailerPlaybackState,
-    cancelled: () => boolean
+    cancelled: () => boolean,
+    replacing: boolean
   ) => Promise<void>;
   abort: (context: TContext, mediaWasReplaced: boolean) => Promise<void>;
   teardown: (context: TContext, mediaWasReplaced: boolean) => Promise<void>;
@@ -42,11 +43,22 @@ export interface TrailerPlayerDriver<TContext> {
 
 type TrailerSession<TContext> = {
   context: TContext;
+  mediaVersion: number;
   fileStarted: boolean;
+  fileLoaded: boolean;
+  playbackRestarted: boolean;
   playlistEntryId: number | null;
+  outgoingPlaylistEntryId: number | null;
   mediaWasReplaced: boolean;
   aborted: boolean;
   autoplay: boolean;
+};
+
+type PendingTrailerStart = {
+  request: TrailerPlaybackRequest;
+  volume: number;
+  muted: boolean;
+  version: number;
 };
 
 type TrailerPropertyName =
@@ -65,6 +77,7 @@ export class TrailerPlayerController<TContext> {
   private session: TrailerSession<TContext> | null = null;
   private queue: Promise<void> = Promise.resolve();
   private cancellationVersion = 0;
+  private pendingStart: PendingTrailerStart | null = null;
   private startTimer: ReturnType<typeof setTimeout> | null = null;
 
   constructor(
@@ -80,20 +93,70 @@ export class TrailerPlayerController<TContext> {
   start(request: TrailerPlaybackRequest, volume: number, muted: boolean): Promise<void> {
     const version = this.cancellationVersion;
     return this.enqueue(async () => {
-      if (this.session || version !== this.cancellationVersion) return;
+      if (version !== this.cancellationVersion) return;
 
-      const { viewport: _, ...media } = request;
-      const initial: TrailerPlaybackState = {
-        ...media,
-        status: 'searching',
-        error: '',
-        paused: false,
-        time: 0,
-        duration: 0,
-        volume,
-        muted
-      };
+      const activeSession = this.session;
+      const activeState = this.state;
+      if (
+        activeSession &&
+        activeState &&
+        activeState.url === request.url &&
+        activeState.status !== 'closing' &&
+        activeState.status !== 'error' &&
+        !activeSession.aborted
+      ) {
+        activeSession.autoplay = true;
+        if (this.isControllable(activeState) && activeState.paused) {
+          this.update({ paused: false });
+          try {
+            await this.driver.setPaused(false);
+          } catch (reason) {
+            const message = this.message(reason);
+            this.fail(message);
+            await this.abort(activeSession, message);
+          }
+        }
+        return;
+      }
+      if (activeSession && activeState?.status === 'searching' && !activeSession.aborted) {
+        this.pendingStart = { request, volume, muted, version };
+        return;
+      }
+      if (
+        activeSession &&
+        activeState &&
+        this.isControllable(activeState) &&
+        !activeSession.aborted
+      ) {
+        this.pendingStart = null;
+        const replacement = this.initialState(
+          request,
+          activeState.volume,
+          activeState.muted
+        );
+        await this.loadMedia(activeSession, request, replacement, version);
+        return;
+      }
+      if (activeSession && activeState?.status === 'closing') return;
+      if (activeSession) {
+        this.clearStartTimeout();
+        try {
+          await this.driver.teardown(activeSession.context, activeSession.mediaWasReplaced);
+        } catch (reason) {
+          const message = this.message(reason);
+          this.onError(message);
+          this.update({
+            status: 'error',
+            paused: true,
+            error: `The trailer player could not recover: ${message}`
+          });
+          return;
+        }
+        if (this.session === activeSession) this.session = null;
+      }
 
+      this.pendingStart = null;
+      const initial = this.initialState(request, volume, muted);
       let context: TContext;
       try {
         context = this.driver.open(request);
@@ -109,8 +172,12 @@ export class TrailerPlayerController<TContext> {
 
       const session: TrailerSession<TContext> = {
         context,
+        mediaVersion: 0,
         fileStarted: false,
+        fileLoaded: false,
+        playbackRestarted: false,
         playlistEntryId: null,
+        outgoingPlaylistEntryId: null,
         mediaWasReplaced: false,
         aborted: false,
         autoplay: true
@@ -126,17 +193,9 @@ export class TrailerPlayerController<TContext> {
           () => !this.isCurrent(session, version)
         );
         if (!this.isCurrent(session, version)) return;
-
-        session.mediaWasReplaced = true;
-        this.armStartTimeout(session);
-        await this.driver.load(
-          request,
-          initial,
-          () => !this.isCurrent(session, version)
-        );
+        await this.loadMedia(session, request, initial, version);
       } catch (reason) {
         if (!this.isCurrent(session, version)) return;
-        this.clearStartTimeout();
         const message = this.message(reason);
         this.fail(message);
         await this.abort(session, message);
@@ -146,6 +205,7 @@ export class TrailerPlayerController<TContext> {
 
   close(): Promise<void> {
     this.cancellationVersion += 1;
+    this.pendingStart = null;
     if (this.state) this.update({ status: 'closing', paused: true, error: '' });
     return this.enqueue(async () => {
       const session = this.session;
@@ -259,13 +319,26 @@ export class TrailerPlayerController<TContext> {
     const state = this.state;
     if (!session || !state || state.status === 'closing' || state.status === 'error') return;
 
+    if (
+      event.event === 'end-file' &&
+      session.outgoingPlaylistEntryId !== null &&
+      event.playlist_entry_id === session.outgoingPlaylistEntryId
+    ) {
+      session.outgoingPlaylistEntryId = null;
+      return;
+    }
+    if (session.outgoingPlaylistEntryId !== null) return;
+
     if (event.event === 'start-file' && state.status === 'searching') {
+      this.resetMediaEvents(session);
       session.fileStarted = true;
       session.playlistEntryId = event.playlist_entry_id;
+      this.update({ time: 0, duration: 0, error: '' });
       return;
     }
 
     if (event.event === 'file-loaded' && session.fileStarted && state.status === 'searching') {
+      session.fileLoaded = true;
       if (session.autoplay) {
         this.update({ paused: false });
         void this.runControl(session, () => this.driver.setPaused(false));
@@ -273,12 +346,14 @@ export class TrailerPlayerController<TContext> {
       return;
     }
 
-    if (event.event === 'playback-restart' && session.fileStarted && state.status === 'searching') {
-      this.clearStartTimeout();
-      this.update({ status: 'ready', paused: !session.autoplay, error: '' });
-      if (!session.autoplay) {
-        void this.runControl(session, () => this.driver.setPaused(true));
-      }
+    if (
+      event.event === 'playback-restart' &&
+      session.fileStarted &&
+      session.fileLoaded &&
+      state.status === 'searching'
+    ) {
+      session.playbackRestarted = true;
+      this.markReadyIfLoaded(session);
       return;
     }
 
@@ -290,24 +365,27 @@ export class TrailerPlayerController<TContext> {
       return;
     }
     if (event.reason === 'redirect') {
-      session.fileStarted = false;
-      session.playlistEntryId = null;
+      this.resetMediaEvents(session);
       return;
     }
     if (event.reason === 'stop') return;
 
     this.clearStartTimeout();
     if (event.reason === 'error' || state.status === 'searching') {
+      this.resetMediaEvents(session);
+      if (this.queuePendingStart(session)) return;
       const message =
         'This trailer could not be opened. YouTube may have changed its playback requirements.';
       this.failAndAbort(session, message);
       return;
     }
+    this.resetMediaEvents(session);
     this.update({ status: 'ready', paused: true, time: state.duration || state.time });
   }
 
   dispose(): void {
     this.cancellationVersion += 1;
+    this.pendingStart = null;
     this.clearStartTimeout();
     this.session = null;
     this.state = null;
@@ -322,9 +400,107 @@ export class TrailerPlayerController<TContext> {
     return operation;
   }
 
+  private initialState(
+    request: TrailerPlaybackRequest,
+    volume: number,
+    muted: boolean
+  ): TrailerPlaybackState {
+    const { viewport: _, ...media } = request;
+    return {
+      ...media,
+      status: 'searching',
+      error: '',
+      paused: false,
+      time: 0,
+      duration: 0,
+      volume,
+      muted
+    };
+  }
+
+  private async loadMedia(
+    session: TrailerSession<TContext>,
+    request: TrailerPlaybackRequest,
+    initial: TrailerPlaybackState,
+    version: number
+  ): Promise<void> {
+    const replacing = session.mediaWasReplaced;
+    session.mediaVersion += 1;
+    session.outgoingPlaylistEntryId = session.fileStarted
+      ? session.playlistEntryId
+      : null;
+    this.resetMediaEvents(session);
+    session.aborted = false;
+    session.autoplay = true;
+    session.mediaWasReplaced = true;
+    this.setState(initial);
+    this.armStartTimeout(session);
+
+    try {
+      await this.driver.load(
+        request,
+        initial,
+        () => !this.isCurrent(session, version),
+        replacing
+      );
+    } catch (reason) {
+      if (!this.isCurrent(session, version)) return;
+      const message = this.message(reason);
+      this.fail(message);
+      await this.abort(session, message);
+    }
+  }
+
+  private resetMediaEvents(session: TrailerSession<TContext>): void {
+    session.fileStarted = false;
+    session.fileLoaded = false;
+    session.playbackRestarted = false;
+    session.playlistEntryId = null;
+  }
+
+  private queuePendingStart(session: TrailerSession<TContext>): boolean {
+    const pending = this.pendingStart;
+    if (
+      !pending ||
+      this.session !== session ||
+      pending.version !== this.cancellationVersion
+    ) {
+      return false;
+    }
+
+    void this.enqueue(async () => {
+      const state = this.state;
+      if (
+        !state ||
+        !this.isCurrent(session, pending.version) ||
+        state.status === 'closing'
+      ) {
+        if (this.pendingStart === pending) this.pendingStart = null;
+        return;
+      }
+      if (state.status === 'error' || session.aborted) {
+        if (this.pendingStart === pending) this.pendingStart = null;
+        void this.start(pending.request, pending.volume, pending.muted);
+        return;
+      }
+      if (this.pendingStart !== pending) return;
+      this.pendingStart = null;
+      const replacement = this.initialState(pending.request, state.volume, state.muted);
+      await this.loadMedia(session, pending.request, replacement, pending.version);
+    });
+    return true;
+  }
+
   private runControl(session: TrailerSession<TContext>, task: () => Promise<void>): Promise<void> {
+    const mediaVersion = session.mediaVersion;
     return this.enqueue(async () => {
-      if (this.session !== session || this.state?.status === 'closing') return;
+      if (
+        this.session !== session ||
+        session.mediaVersion !== mediaVersion ||
+        this.state?.status === 'closing'
+      ) {
+        return;
+      }
       try {
         await task();
       } catch (reason) {
@@ -335,9 +511,17 @@ export class TrailerPlayerController<TContext> {
 
   private armStartTimeout(session: TrailerSession<TContext>): void {
     this.clearStartTimeout();
+    const mediaVersion = session.mediaVersion;
     this.startTimer = setTimeout(() => {
       this.startTimer = null;
-      if (this.session !== session || this.state?.status !== 'searching') return;
+      if (
+        this.session !== session ||
+        session.mediaVersion !== mediaVersion ||
+        this.state?.status !== 'searching'
+      ) {
+        return;
+      }
+      if (this.queuePendingStart(session)) return;
       const message = 'The trailer search timed out before playback could start.';
       this.failAndAbort(session, message);
     }, START_TIMEOUT_MS);
@@ -345,7 +529,19 @@ export class TrailerPlayerController<TContext> {
 
   private failAndAbort(session: TrailerSession<TContext>, message: string): void {
     this.fail(message);
-    void this.enqueue(() => this.abort(session, message));
+    void this.enqueue(async () => {
+      await this.abort(session, message);
+      const pending = this.pendingStart;
+      if (
+        !pending ||
+        this.session !== session ||
+        pending.version !== this.cancellationVersion
+      ) {
+        return;
+      }
+      this.pendingStart = null;
+      void this.start(pending.request, pending.volume, pending.muted);
+    });
   }
 
   private async abort(session: TrailerSession<TContext>, message: string): Promise<void> {
@@ -369,6 +565,30 @@ export class TrailerPlayerController<TContext> {
   private clearStartTimeout(): void {
     if (this.startTimer !== null) clearTimeout(this.startTimer);
     this.startTimer = null;
+  }
+
+  private markReadyIfLoaded(session: TrailerSession<TContext>): void {
+    const state = this.state;
+    if (
+      this.session !== session ||
+      !state ||
+      state.status !== 'searching' ||
+      !session.fileStarted ||
+      !session.fileLoaded ||
+      !session.playbackRestarted
+    ) {
+      return;
+    }
+
+    this.clearStartTimeout();
+    this.update({
+      status: 'ready',
+      paused: !session.autoplay,
+      time: 0,
+      error: ''
+    });
+    if (this.queuePendingStart(session) || session.autoplay) return;
+    void this.runControl(session, () => this.driver.setPaused(true));
   }
 
   private isCurrent(session: TrailerSession<TContext>, version: number): boolean {

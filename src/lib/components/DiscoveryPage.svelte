@@ -1,5 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { crossfade } from 'svelte/transition';
   import {
     Check,
     CheckCircle2,
@@ -19,6 +20,7 @@
   import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert';
   import { Badge } from '$lib/components/ui/badge';
   import { Button } from '$lib/components/ui/button';
+  import { Switch } from '$lib/components/ui/switch';
   import AnimatedProgress from '$lib/components/AnimatedProgress.svelte';
   import ContextToolbar from '$lib/components/ContextToolbar.svelte';
   import RevealFrame from '$lib/components/RevealFrame.svelte';
@@ -55,6 +57,8 @@
   interface DiscoveryCandidate {
     anime: AniListSeasonShow;
     show: SubsPleaseScheduleShow;
+    season: AnimeSeason;
+    year: number;
     day?: DayName;
   }
 
@@ -66,7 +70,8 @@
     libraryEntries,
     onDecide,
     onOpenLibrary,
-    onPlayTrailer
+    onPlayTrailer,
+    onCloseTrailer
   }: {
     loadSeason: (season: AnimeSeason, year: number) => Promise<AniListSeasonResponse>;
     loadIndex: () => Promise<SubsPleaseIndexResponse>;
@@ -85,7 +90,15 @@
     ) => void | Promise<void>;
     onOpenLibrary: () => void;
     onPlayTrailer: (request: TrailerPlaybackRequest) => void | Promise<void>;
+    onCloseTrailer: () => void | Promise<void>;
   } = $props();
+
+  const [sendCandidate, receiveCandidate] = crossfade({
+    duration: () =>
+      typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches
+        ? 0
+        : 280
+  });
 
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Amsterdam';
   const weekday = new Intl.DateTimeFormat('en-US', { weekday: 'long', timeZone: timezone }).format(
@@ -108,19 +121,24 @@
   let providerLoading = $state(true);
   let catalogError = $state('');
   let providerError = $state('');
+  let presentedCandidate = $state<DiscoveryCandidate | null>(null);
   let details = $state<SubsPleaseShowResponse | null>(null);
-  let loadedCandidatePage = $state('');
-  let mediaRevealCandidatePage = $state('');
+  let loadedCandidateKey = $state('');
+  let mediaRevealCandidateKey = $state('');
   let detailsLoading = $state(false);
   let detailsError = $state('');
-  let failedCandidatePage = $state('');
+  let failedCandidateKey = $state('');
   let detailsRetry = $state(0);
   let trailerTheaterMode = $state(false);
+  let autoplay = $state(false);
+  let autoplayedCandidateKey = $state('');
+  let autoplayingCandidateKey = $state('');
   let metadataSequelSlugs = $state<string[]>([]);
   let discoveryPageElement = $state<HTMLElement | null>(null);
   let trailerSurface = $state<HTMLElement | null>(null);
   let decisionPending = $state(false);
   let seasonRequestId = 0;
+  const detailsRequests = new Map<string, Promise<SubsPleaseShowResponse>>();
 
   let selectedIsCurrentSeason = $derived(
     selectedSeason === initialSeason.season && selectedYear === initialSeason.year
@@ -156,6 +174,8 @@
           anilist_id: anime.id,
           subsplease_id: scheduled?.show.subsplease_id
         },
+        season: selectedSeason,
+        year: selectedYear,
         day: scheduled?.day
       }];
     });
@@ -171,27 +191,31 @@
     );
   });
   let currentCandidate = $derived(candidates[0]);
+  let currentCandidateKey = $derived(candidateKey(currentCandidate));
+  let presentedCandidateKey = $derived(candidateKey(presentedCandidate));
+  let presentedDetailsReady = $derived(
+    Boolean(presentedCandidate) && loadedCandidateKey === presentedCandidateKey && details !== null
+  );
   let detailsReady = $derived(
     !detailsLoading &&
-      Boolean(currentCandidate) &&
-      loadedCandidatePage === currentCandidate?.show.page &&
-      details !== null
+      presentedDetailsReady &&
+      Boolean(currentCandidateKey) &&
+      currentCandidateKey === presentedCandidateKey
+  );
+  let candidateTransitioning = $derived(
+    Boolean(currentCandidateKey) && currentCandidateKey !== presentedCandidateKey
   );
   let visibleDetailsError = $derived(
-    failedCandidatePage === currentCandidate?.show.page ? detailsError : ''
+    failedCandidateKey === currentCandidateKey ? detailsError : ''
   );
   let mediaRevealReady = $derived(
-    detailsReady && mediaRevealCandidatePage === currentCandidate?.show.page
+    presentedDetailsReady && mediaRevealCandidateKey === presentedCandidateKey
   );
   let reviewedCount = $derived(eligibleCandidates.length - candidates.length);
   let progressRevealReady = $derived(
-    !discoveryLoading &&
-      !discoveryError &&
-      !visibleDetailsError &&
-      eligibleCandidates.length > 0 &&
-      (!currentCandidate || detailsReady)
+    !discoveryLoading && !discoveryError && eligibleCandidates.length > 0
   );
-  let embedUrl = $derived.by(() => {
+  let baseEmbedUrl = $derived.by(() => {
     const trailer = details?.trailer;
     if (!trailer?.id) return '';
     const site = trailer.site.toLowerCase();
@@ -208,6 +232,11 @@
     }
     return '';
   });
+  let embedUrl = $derived(
+    baseEmbedUrl && autoplayedCandidateKey === presentedCandidateKey
+      ? `${baseEmbedUrl}${baseEmbedUrl.includes('?') ? '&' : '?'}autoplay=1&mute=1`
+      : baseEmbedUrl
+  );
   let trailerUrl = $derived.by(() => {
     if (!details) return '';
     if (isTauri()) return youtubeTrailerSearchPlaybackUrl(details.title);
@@ -246,9 +275,6 @@
     const page = discoveryPageElement;
     selectedSeason;
     selectedYear;
-    currentCandidate?.show.page;
-    detailsReady;
-    mediaRevealReady;
     if (!page) return;
 
     page.scrollTop = 0;
@@ -260,67 +286,151 @@
 
   $effect(() => {
     const candidate = currentCandidate;
+    const key = currentCandidateKey;
     detailsRetry;
     trailerTheaterMode = false;
-    if (!candidate) {
+
+    if (!candidate || !key) {
+      const hadPresentedCandidate = Boolean(presentedCandidate);
+      presentedCandidate = null;
       details = null;
-      loadedCandidatePage = '';
+      loadedCandidateKey = '';
       detailsLoading = false;
       detailsError = '';
-      failedCandidatePage = '';
+      failedCandidateKey = '';
+      if (hadPresentedCandidate) void onCloseTrailer();
+      return;
+    }
+
+    if (key === presentedCandidateKey && presentedDetailsReady) {
+      presentedCandidate = candidate;
+      detailsLoading = false;
+      detailsError = '';
+      failedCandidateKey = '';
       return;
     }
 
     let cancelled = false;
-    details = null;
-    loadedCandidatePage = '';
     detailsLoading = true;
     detailsError = '';
-    failedCandidatePage = '';
-    loadShow(candidate.show.page, timezone, candidate.anime.id)
+    failedCandidateKey = '';
+    requestCandidateDetails(candidate)
       .then((nextDetails) => {
-        if (cancelled) return;
+        if (cancelled || currentCandidateKey !== key) return;
         if (nextDetails.has_series_prequel) {
-          if (!metadataSequelSlugs.includes(candidate.show.page)) {
-            metadataSequelSlugs = [...metadataSequelSlugs, candidate.show.page];
-          }
+          excludeMetadataSequel(candidate.show.page);
           return;
         }
+        presentedCandidate = candidate;
         details = nextDetails;
-        loadedCandidatePage = candidate.show.page;
+        loadedCandidateKey = key;
       })
       .catch((reason) => {
-        if (!cancelled) {
+        if (!cancelled && currentCandidateKey === key) {
           detailsError = reason instanceof Error ? reason.message : String(reason);
-          failedCandidatePage = candidate.show.page;
+          failedCandidateKey = key;
         }
       })
       .finally(() => {
-        if (!cancelled) detailsLoading = false;
+        if (!cancelled && currentCandidateKey === key) detailsLoading = false;
       });
+
     return () => {
       cancelled = true;
     };
   });
 
   $effect(() => {
-    const candidatePage = currentCandidate?.show.page;
-    if (!detailsReady || !candidatePage) {
-      mediaRevealCandidatePage = '';
+    const nextCandidate = candidates[1];
+    if (!nextCandidate) return;
+
+    void requestCandidateDetails(nextCandidate)
+      .then((nextDetails) => {
+        if (nextDetails.has_series_prequel) excludeMetadataSequel(nextCandidate.show.page);
+      })
+      .catch(() => undefined);
+  });
+
+  $effect(() => {
+    const key = presentedCandidateKey;
+    if (!presentedDetailsReady || !key) {
+      mediaRevealCandidateKey = '';
       return;
     }
 
     const timer = window.setTimeout(() => {
-      if (
-        currentCandidate?.show.page === candidatePage &&
-        loadedCandidatePage === candidatePage
-      ) {
-        mediaRevealCandidatePage = candidatePage;
+      if (presentedCandidateKey === key && loadedCandidateKey === key) {
+        mediaRevealCandidateKey = key;
       }
     }, TEXT_REVEAL_DURATION_MS);
 
     return () => window.clearTimeout(timer);
   });
+
+  $effect(() => {
+    const key = presentedCandidateKey;
+    const desktop = isTauri();
+    if (
+      !autoplay ||
+      !detailsReady ||
+      !details ||
+      !key ||
+      autoplayedCandidateKey === key ||
+      autoplayingCandidateKey === key ||
+      (desktop ? !trailerUrl || !trailerSurface?.isConnected : !baseEmbedUrl)
+    ) {
+      return;
+    }
+
+    if (!desktop) {
+      autoplayedCandidateKey = key;
+      return;
+    }
+
+    autoplayingCandidateKey = key;
+    void Promise.resolve(
+      onPlayTrailer({
+        url: trailerUrl,
+        title: `${decodeEntities(details.title)} · Trailer`,
+        thumbnail: trailerThumbnail || undefined,
+        viewport: trailerSurface || undefined
+      })
+    )
+      .then(() => {
+        if (presentedCandidateKey === key) autoplayedCandidateKey = key;
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (autoplayingCandidateKey === key) autoplayingCandidateKey = '';
+      });
+  });
+
+  function candidateKey(candidate: DiscoveryCandidate | null | undefined): string {
+    return candidate
+      ? `${candidate.season}:${candidate.year}:${candidate.anime.id}:${candidate.show.page}`
+      : '';
+  }
+
+  function requestCandidateDetails(
+    candidate: DiscoveryCandidate
+  ): Promise<SubsPleaseShowResponse> {
+    const key = candidateKey(candidate);
+    let request = detailsRequests.get(key);
+    if (request) return request;
+
+    request = loadShow(candidate.show.page, timezone, candidate.anime.id).catch((reason) => {
+      detailsRequests.delete(key);
+      throw reason;
+    });
+    detailsRequests.set(key, request);
+    return request;
+  }
+
+  function excludeMetadataSequel(slug: string): void {
+    if (!metadataSequelSlugs.includes(slug)) {
+      metadataSequelSlugs = [...metadataSequelSlugs, slug];
+    }
+  }
 
   async function refreshSchedule() {
     try {
@@ -438,7 +548,7 @@
         year: 'numeric'
       }).format(new Date(year, month - 1, day));
     }
-    return `${seasonLabel(selectedSeason)} ${selectedYear}`;
+    return `${seasonLabel(candidate.season)} ${candidate.year}`;
   }
 
   function isObviousSequelTitle(value: string): boolean {
@@ -463,11 +573,17 @@
   }
 
   async function decide(verdict: DiscoveryVerdict) {
-    if (!currentCandidate || !details || detailsLoading || decisionPending) return;
+    const candidate = presentedCandidate;
+    const selectedDetails = details;
+    if (!candidate || !selectedDetails || !detailsReady || decisionPending) return;
+
     decisionPending = true;
-    saveProviderMapping(currentCandidate.anime.id, currentCandidate.show.page);
+    saveProviderMapping(candidate.anime.id, candidate.show.page);
     try {
-      await onDecide(details, currentCandidate.show, currentCandidate.day, verdict);
+      await Promise.all([
+        onDecide(selectedDetails, candidate.show, candidate.day, verdict),
+        !autoplay && isTauri() ? onCloseTrailer() : undefined
+      ]);
     } finally {
       decisionPending = false;
     }
@@ -504,7 +620,7 @@
 >
   <ContextToolbar class="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] gap-4 sm:gap-8">
     <div class="col-start-1 row-start-1 min-w-0 w-full max-w-sm justify-self-start">
-      {#if !discoveryError && !visibleDetailsError && (discoveryLoading || eligibleCandidates.length)}
+      {#if !discoveryError && (discoveryLoading || eligibleCandidates.length)}
         <AnimatedProgress
           value={reviewedCount}
           max={eligibleCandidates.length}
@@ -544,7 +660,15 @@
       </Button>
     </nav>
 
-    <span class="col-start-3 row-start-1" aria-hidden="true"></span>
+    <label class="col-start-3 row-start-1 flex items-center gap-2.5 justify-self-end text-sm font-medium text-(--text)/70">
+      <span>Autoplay</span>
+      <Switch
+        class="focus-visible:ring-2 focus-visible:ring-(--text)/24"
+        checked={autoplay}
+        aria-label="Autoplay trailers"
+        onCheckedChange={(checked) => (autoplay = checked)}
+      />
+    </label>
   </ContextToolbar>
 
   <div class="relative mx-auto flex min-h-[calc(100%_-_4rem)] max-w-[100rem] flex-col px-5 py-7 lg:px-10 lg:py-8">
@@ -566,11 +690,11 @@
           ><RefreshCw class="size-3.5" /> Try again</Button>
         </Alert>
       </section>
-    {:else if currentCandidate && (detailsLoading || (!detailsReady && !visibleDetailsError))}
+    {:else if currentCandidate && !presentedDetailsReady && !visibleDetailsError}
       <section class="min-h-[60vh]" aria-busy="true" role="status">
         <span class="sr-only">Loading the next show</span>
       </section>
-    {:else if currentCandidate && visibleDetailsError}
+    {:else if currentCandidate && !presentedDetailsReady && visibleDetailsError}
       <section class="grid min-h-[60vh] place-items-center">
         <Alert variant="destructive" class="max-w-xl">
           <Tv2 class="size-5" />
@@ -594,30 +718,43 @@
           {/if}
         </div>
       </section>
-    {:else if detailsReady && details}
-      {#key currentCandidate.show.page}
-      <article class="flex flex-1 flex-col py-3 lg:py-5">
-        <header class="text-reveal flex items-start gap-4" aria-labelledby="discovery-title">
-          <div class="media-placeholder aspect-[3/4] w-14 shrink-0 overflow-hidden rounded-lg sm:w-16">
-            {#if details.image_url}
-              <RevealImage class="size-full object-cover" src={posterUrl(details.image_url)} alt="" loading="eager" fetchpriority="high" reveal={mediaRevealReady} />
-            {:else}
-              <span class="grid size-full place-items-center"><Film class="size-5 text-(--text)/20" /></span>
-            {/if}
-          </div>
-          <div class="min-w-0 pt-0.5">
-            <h2 id="discovery-title" class="text-3xl font-semibold leading-[1.02] tracking-[-0.055em] lg:text-4xl">{decodeEntities(details.title)}</h2>
-            <div class="mt-3 flex flex-wrap gap-2" aria-label="Show tags and details">
-              {#each details.genres?.slice(0, 4) ?? [] as genre (genre)}
-                <Badge class="bg-blue-500/12 text-blue-600 ring-1 ring-inset ring-blue-500/15 dark:text-blue-300">{genre}</Badge>
-              {/each}
-              {#if details.year}<Badge class="bg-(--text)/6 text-(--text)/58">{details.year}</Badge>{/if}
-              {#if details.format}<Badge class="bg-(--text)/6 text-(--text)/58">{metadataLabel(details.format)}</Badge>{/if}
-              {#if details.status}<Badge class="bg-(--text)/6 text-(--text)/58">{metadataLabel(details.status)}</Badge>{/if}
-              <Badge class="bg-(--text)/6 text-(--text)/58"><Clock3 class="size-3" /> {candidateTiming(currentCandidate)}</Badge>
-            </div>
-          </div>
-        </header>
+    {:else if presentedDetailsReady && presentedCandidate && details}
+      <article class="flex flex-1 flex-col py-3 lg:py-5" aria-busy={candidateTransitioning}>
+        <div class="grid">
+          {#key presentedCandidateKey}
+            {@const titleId = `discovery-title-${presentedCandidate.anime.id}`}
+            <header
+              class="col-start-1 row-start-1 flex items-start gap-4"
+              aria-labelledby={titleId}
+              in:receiveCandidate={{ key: 'candidate-header' }}
+              out:sendCandidate={{ key: 'candidate-header' }}
+            >
+              <div class="media-placeholder aspect-[3/4] w-14 shrink-0 overflow-hidden rounded-lg sm:w-16">
+                {#if details.image_url}
+                  <RevealImage class="size-full object-cover" src={posterUrl(details.image_url)} alt="" loading="eager" fetchpriority="high" reveal={mediaRevealReady} />
+                {:else}
+                  <span class="grid size-full place-items-center"><Film class="size-5 text-(--text)/20" /></span>
+                {/if}
+              </div>
+              <div class="min-w-0 pt-0.5">
+                <h2 id={titleId} class="text-3xl font-semibold leading-[1.02] tracking-[-0.055em] lg:text-4xl">{decodeEntities(details.title)}</h2>
+                <div class="mt-3 flex flex-wrap gap-2" aria-label="Show tags and details">
+                  {#each details.genres?.slice(0, 4) ?? [] as genre (genre)}
+                    <Badge class="bg-blue-500/12 text-blue-600 ring-1 ring-inset ring-blue-500/15 dark:text-blue-300">{genre}</Badge>
+                  {/each}
+                  {#if details.year}<Badge class="bg-(--text)/6 text-(--text)/58">{details.year}</Badge>{/if}
+                  {#if details.format}<Badge class="bg-(--text)/6 text-(--text)/58">{metadataLabel(details.format)}</Badge>{/if}
+                  {#if details.status}<Badge class="bg-(--text)/6 text-(--text)/58">{metadataLabel(details.status)}</Badge>{/if}
+                  <Badge class="bg-(--text)/6 text-(--text)/58"><Clock3 class="size-3" /> {candidateTiming(presentedCandidate)}</Badge>
+                </div>
+              </div>
+            </header>
+          {/key}
+        </div>
+
+        {#if candidateTransitioning}
+          <span class="sr-only" role="status">Loading the next show</span>
+        {/if}
 
         <div
           bind:this={trailerSurface}
@@ -679,11 +816,19 @@
           </section>
         </div>
 
+        {#if visibleDetailsError}
+          <Alert variant="destructive" class="mt-6">
+            <Tv2 class="size-5" />
+            <AlertTitle>The next show could not load</AlertTitle>
+            <AlertDescription>{visibleDetailsError}</AlertDescription>
+            <Button variant="ghost" size="sm" class="mt-3 gap-2" onclick={() => (detailsRetry += 1)}><RefreshCw class="size-3.5" /> Try again</Button>
+          </Alert>
+        {:else}
         <div class="mt-6 grid w-full grid-cols-1 gap-3 sm:grid-cols-3">
           <Button
             size="lg"
             class="reaction-button love-button group relative h-20 justify-start overflow-hidden rounded-full bg-emerald-500 px-5 text-white shadow-[0_18px_42px_-24px_rgba(16,185,129,0.95)] hover:bg-emerald-400 sm:h-[5.25rem] sm:px-6 dark:bg-emerald-500 dark:hover:bg-emerald-400"
-            disabled={decisionPending}
+            disabled={decisionPending || candidateTransitioning}
             onclick={() => void decide('love')}
           >
             <span class="love-heart grid size-11 shrink-0 place-items-center rounded-full bg-white text-pink-500 shadow-sm"><Heart class="size-6" fill="currentColor" strokeWidth={2.5} /></span>
@@ -697,7 +842,7 @@
             variant="ghost"
             size="lg"
             class="reaction-button maybe-button group relative h-20 justify-start overflow-hidden rounded-full bg-amber-400 px-5 text-white shadow-[0_18px_42px_-24px_rgba(245,158,11,0.95)] hover:bg-amber-300 hover:text-white sm:h-[5.25rem] sm:px-6 dark:bg-amber-400 dark:text-white dark:hover:bg-amber-300"
-            disabled={decisionPending}
+            disabled={decisionPending || candidateTransitioning}
             onclick={() => void decide('maybe')}
           >
             <span class="maybe-face grid size-11 shrink-0 place-items-center rounded-full bg-white text-amber-400 shadow-sm"><Meh class="size-6" strokeWidth={2.5} /></span>
@@ -716,7 +861,7 @@
             variant="ghost"
             size="lg"
             class="reaction-button pass-button group relative h-20 justify-start overflow-hidden rounded-full bg-red-500 px-5 text-white shadow-[0_18px_42px_-24px_rgba(239,68,68,0.95)] hover:bg-red-400 hover:text-white sm:h-[5.25rem] sm:px-6 dark:bg-red-500 dark:text-white dark:hover:bg-red-400"
-            disabled={decisionPending}
+            disabled={decisionPending || candidateTransitioning}
             onclick={() => void decide('pass')}
           >
             <span class="pass-thumb grid size-11 shrink-0 place-items-center rounded-full bg-white text-red-500 shadow-sm"><ThumbsDown class="size-6" strokeWidth={2.5} /></span>
@@ -726,8 +871,8 @@
             </span>
           </Button>
         </div>
+        {/if}
       </article>
-      {/key}
     {/if}
   </div>
 </main>

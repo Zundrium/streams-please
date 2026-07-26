@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import { cn } from '$lib/utils';
 
   const REVEAL_DELAY_MS = 110;
@@ -32,6 +33,7 @@
   let displayedRemaining = $state(0);
   let displayedProgress = $state(0);
   let copyVisible = $state(false);
+  let hasRevealed = false;
 
   let normalizedMax = $derived(Math.max(0, Math.round(max)));
   let normalizedValue = $derived(
@@ -54,12 +56,20 @@
     const targetRemaining = normalizedRemaining;
     const targetPercentage = targetProgress;
 
-    displayedValue = 0;
-    displayedRemaining = 0;
-    displayedProgress = 0;
-    copyVisible = false;
+    if (!reveal || typeof window === 'undefined') {
+      displayedValue = 0;
+      displayedRemaining = 0;
+      displayedProgress = 0;
+      copyVisible = false;
+      hasRevealed = false;
+      return;
+    }
 
-    if (!reveal || typeof window === 'undefined') return;
+    const startValue = untrack(() => displayedValue);
+    const startRemaining = untrack(() => displayedRemaining);
+    const startPercentage = untrack(() => displayedProgress);
+    const firstReveal = !hasRevealed;
+    hasRevealed = true;
 
     let frame = window.requestAnimationFrame((firstFrameTime) => {
       copyVisible = true;
@@ -71,15 +81,18 @@
         return;
       }
 
-      const animationStart = firstFrameTime + REVEAL_DELAY_MS;
+      const animationStart = firstFrameTime + (firstReveal ? REVEAL_DELAY_MS : 0);
+      const animationDuration = firstReveal ? REVEAL_DURATION_MS : 420;
       const animate = (time: number) => {
         const elapsed = Math.max(0, time - animationStart);
-        const fraction = Math.min(1, elapsed / REVEAL_DURATION_MS);
+        const fraction = Math.min(1, elapsed / animationDuration);
         const eased = 1 - Math.pow(1 - fraction, 4);
 
-        displayedValue = Math.round(targetValue * eased);
-        displayedRemaining = Math.round(targetRemaining * eased);
-        displayedProgress = targetPercentage * eased;
+        displayedValue = Math.round(startValue + (targetValue - startValue) * eased);
+        displayedRemaining = Math.round(
+          startRemaining + (targetRemaining - startRemaining) * eased
+        );
+        displayedProgress = startPercentage + (targetPercentage - startPercentage) * eased;
 
         if (fraction < 1) {
           frame = window.requestAnimationFrame(animate);
