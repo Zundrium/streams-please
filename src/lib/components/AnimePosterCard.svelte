@@ -13,6 +13,7 @@
     bottomRight = '',
     notice = '',
     onOpen,
+    bottomLeftContent,
     posterOverlay,
     footer
   }: {
@@ -23,6 +24,7 @@
     bottomRight?: string;
     notice?: string;
     onOpen: () => void;
+    bottomLeftContent?: Snippet;
     posterOverlay?: Snippet;
     footer?: Snippet;
   } = $props();
@@ -66,7 +68,13 @@
     />
 
     <span class="absolute inset-x-3 {posterOverlay ? 'bottom-16' : 'bottom-3'} flex items-end justify-between gap-2 text-[10px] font-medium text-white/78">
-      <span class="min-w-0 truncate">{bottomLeft}</span>
+      <span class="min-w-0">
+        {#if bottomLeftContent}
+          {@render bottomLeftContent()}
+        {:else}
+          <span class="block truncate">{bottomLeft}</span>
+        {/if}
+      </span>
       <span class="min-w-0 truncate text-right">{bottomRight}</span>
     </span>
 
