@@ -69,6 +69,7 @@
   import AccountSettingsPage from '$lib/components/AccountSettingsPage.svelte';
   import DiscoveryPage from '$lib/components/DiscoveryPage.svelte';
   import LibraryPage from '$lib/components/LibraryPage.svelte';
+  import NextEpisodePrompt from '$lib/components/NextEpisodePrompt.svelte';
   import PlayerTransport from '$lib/components/PlayerTransport.svelte';
   import RevealImage from '$lib/components/RevealImage.svelte';
   import SubsPleasePage from '$lib/components/SubsPleasePage.svelte';
@@ -90,7 +91,9 @@
     PlaybackState,
     RuntimeInfo,
     SubtitleLanguage,
+    SubsPleaseDownload,
     SubsPleaseIndexResponse,
+    SubsPleaseRelease,
     SubsPleaseScheduleResponse,
     SubsPleaseScheduleShow,
     SubsPleaseShowResponse,
@@ -163,6 +166,7 @@
   const PLAYBACK_PROBE_INTERVAL_MS = 250;
   const SEEK_RECONCILE_TOLERANCE_SECONDS = 1;
   const MEDIA_LOAD_TIMEOUT_MS = 8_000;
+  const NEXT_EPISODE_PROMPT_SECONDS = 35;
   const MPV_WINDOW_LABEL = 'main';
 
   let contentViewport = $state<HTMLElement | null>(null);
@@ -197,6 +201,10 @@
   let activeViewRequestGeneration = 0;
   let libraryEntries = $state<LibraryEntry[]>([]);
   let playingEpisode = $state<EpisodePlaybackRequest | null>(null);
+  let nextEpisode = $state<EpisodePlaybackRequest | null>(null);
+  let nextEpisodeStarting = $state(false);
+  let nextEpisodeDismissedFor = $state('');
+  let nextEpisodeGeneration = 0;
   let requestedShowSlug = $state('');
   let theaterMode = $state(false);
   let fullscreenMode = $state(false);
@@ -330,6 +338,22 @@
         playingLibraryEntry?.watchedEpisodes.includes(playingEpisode.episode)
     )
   );
+  let nextEpisodePromptVisible = $derived.by(() => {
+    if (
+      activeView !== 'player' ||
+      phase !== 'ready' ||
+      trailerPlayback !== null ||
+      !current ||
+      !playingEpisode ||
+      !nextEpisode ||
+      playback.duration <= 0 ||
+      playback.time <= 0 ||
+      nextEpisodeDismissedFor === episodePlaybackKey(playingEpisode)
+    ) {
+      return false;
+    }
+    return playback.duration - playback.time <= NEXT_EPISODE_PROMPT_SECONDS;
+  });
 
   onMount(() => {
     libraryEntries = loadLibrary();
@@ -1636,14 +1660,107 @@
     commitLibrary(next);
   }
 
+  function episodePlaybackKey(request: EpisodePlaybackRequest): string {
+    return `${request.slug}:${request.episode}`;
+  }
+
+  function sameEpisode(left: string, right: string): boolean {
+    if (left === right) return true;
+    const leftNumber = Number.parseFloat(left);
+    const rightNumber = Number.parseFloat(right);
+    return Number.isFinite(leftNumber) && Number.isFinite(rightNumber) && leftNumber === rightNumber;
+  }
+
+  function nextRelease(
+    details: SubsPleaseShowResponse,
+    currentEpisode: string
+  ): SubsPleaseRelease | undefined {
+    const releases = Object.values(details.episode ?? {});
+    const episodeOrder = sortEpisodeNumbers(releases.map((release) => release.episode));
+    const currentIndex = episodeOrder.findIndex((episode) => sameEpisode(episode, currentEpisode));
+    if (currentIndex < 0) return undefined;
+    const nextEpisodeNumber = episodeOrder[currentIndex + 1];
+    return nextEpisodeNumber
+      ? releases.find((release) => release.episode === nextEpisodeNumber)
+      : undefined;
+  }
+
+  function nextEpisodeDownload(
+    release: SubsPleaseRelease,
+    currentQuality: string
+  ): SubsPleaseDownload | undefined {
+    return (
+      release.downloads.find((download) => download.res === currentQuality) ??
+      release.downloads.find((download) => download.res === preferredQuality) ??
+      [...release.downloads].sort((left, right) => Number(right.res) - Number(left.res))[0]
+    );
+  }
+
+  async function prepareNextEpisode(
+    request: EpisodePlaybackRequest,
+    generation: number
+  ): Promise<void> {
+    const sourceKey = episodePlaybackKey(request);
+    try {
+      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Amsterdam';
+      const details = await loadSubsPleaseShow(request.slug, timezone, request.anilistId);
+      if (
+        generation !== nextEpisodeGeneration ||
+        !playingEpisode ||
+        episodePlaybackKey(playingEpisode) !== sourceKey
+      ) {
+        return;
+      }
+
+      const release = nextRelease(details, request.episode);
+      const download = release ? nextEpisodeDownload(release, request.quality) : undefined;
+      nextEpisode =
+        release && download?.magnet
+          ? {
+              anilistId: details.metadata_id ?? request.anilistId,
+              slug: details.slug || request.slug,
+              title: details.title || request.title,
+              imageUrl: details.image_url || request.imageUrl,
+              episode: release.episode,
+              magnet: download.magnet,
+              quality: download.res,
+              day: request.day,
+              airingTime: request.airingTime
+            }
+          : null;
+    } catch {
+      if (generation === nextEpisodeGeneration) nextEpisode = null;
+    }
+  }
+
   async function playSubsPleaseRelease(request: EpisodePlaybackRequest) {
+    const generation = ++nextEpisodeGeneration;
+    nextEpisode = null;
+    nextEpisodeDismissedFor = '';
     await changeActiveView('player');
-    if (activeView !== 'player') return;
+    if (activeView !== 'player' || generation !== nextEpisodeGeneration) return;
     queueOpen = false;
     playingEpisode = null;
     autoMarkedPlaybackKey = '';
     const started = await startTorrent(request.magnet);
-    if (started) playingEpisode = request;
+    if (!started || generation !== nextEpisodeGeneration) return;
+    playingEpisode = request;
+    void prepareNextEpisode(request, generation);
+  }
+
+  function dismissNextEpisode(): void {
+    if (playingEpisode) nextEpisodeDismissedFor = episodePlaybackKey(playingEpisode);
+  }
+
+  async function playNextEpisode(): Promise<void> {
+    const request = nextEpisode;
+    if (!request || nextEpisodeStarting) return;
+    nextEpisodeStarting = true;
+    try {
+      await playSubsPleaseRelease(request);
+    } finally {
+      nextEpisodeStarting = false;
+    }
   }
 
   function returnToShowDetails() {
@@ -2131,6 +2248,16 @@
                 {/if}
               </div>
             </div>
+            {#if nextEpisodePromptVisible && nextEpisode}
+              <NextEpisodePrompt
+                title={nextEpisode.title}
+                episode={nextEpisode.episode}
+                imageUrl={posterUrl(nextEpisode.imageUrl)}
+                busy={nextEpisodeStarting}
+                onDismiss={dismissNextEpisode}
+                onWatch={playNextEpisode}
+              />
+            {/if}
             {#snippet episodeSecondaryControls()}
               <Button
                 variant="ghost"
