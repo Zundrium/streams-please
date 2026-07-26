@@ -255,10 +255,24 @@ async fn anilist_metadata(client: &reqwest::Client, title: &str) -> Option<serde
                     coverImage { extraLarge large }
                     bannerImage
                     genres
+                    season
                     seasonYear
+                    startDate { year month day }
+                    endDate { year month day }
                     format
                     status
                     episodes
+                    duration
+                    averageScore
+                    popularity
+                    source(version: 3)
+                    countryOfOrigin
+                    tags { id name rank isGeneralSpoiler isMediaSpoiler }
+                    studios(isMain: true) {
+                        nodes { id name isAnimationStudio siteUrl }
+                    }
+                    nextAiringEpisode { episode airingAt timeUntilAiring }
+                    streamingEpisodes { title thumbnail site }
                     siteUrl
                     relations {
                         edges {
@@ -343,8 +357,17 @@ async fn anilist_metadata_by_id(client: &reqwest::Client, id: i64) -> Option<ser
                     status
                     episodes
                     duration
-                    siteUrl
+                    averageScore
+                    popularity
+                    source(version: 3)
+                    countryOfOrigin
+                    tags { id name rank isGeneralSpoiler isMediaSpoiler }
+                    studios(isMain: true) {
+                        nodes { id name isAnimationStudio siteUrl }
+                    }
                     nextAiringEpisode { episode airingAt timeUntilAiring }
+                    streamingEpisodes { title thumbnail site }
+                    siteUrl
                     relations {
                         edges {
                             relationType
@@ -683,10 +706,22 @@ async fn subsplease_show(
             ("trailer", "trailer"),
             ("bannerImage", "banner_image_url"),
             ("genres", "genres"),
+            ("season", "season"),
             ("seasonYear", "year"),
+            ("startDate", "start_date"),
+            ("endDate", "end_date"),
             ("format", "format"),
             ("status", "status"),
             ("episodes", "episode_count"),
+            ("duration", "duration"),
+            ("averageScore", "average_score"),
+            ("popularity", "popularity"),
+            ("source", "source"),
+            ("countryOfOrigin", "country_of_origin"),
+            ("tags", "tags"),
+            ("studios", "studios"),
+            ("nextAiringEpisode", "next_airing_episode"),
+            ("streamingEpisodes", "streaming_episodes"),
             ("siteUrl", "metadata_url"),
             ("relations", "relations"),
         ] {

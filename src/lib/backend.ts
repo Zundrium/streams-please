@@ -94,6 +94,12 @@ function mockSubsPleaseShow(slug: string, anilistId?: number): SubsPleaseShowRes
       magnet: SINTEL_MAGNET
     }))
   });
+  const releases = [makeRelease('03', 0), makeRelease('02', 7), makeRelease('01', 14)];
+  const episodeTitles: Record<string, string> = {
+    '01': 'A New Beginning',
+    '02': 'The Road Ahead',
+    '03': 'An Unexpected Visitor'
+  };
 
   return {
     title,
@@ -107,15 +113,30 @@ function mockSubsPleaseShow(slug: string, anilistId?: number): SubsPleaseShowRes
     batch: {},
     genres: ['Anime', 'Adventure'],
     year: 2026,
+    season: 'SUMMER',
+    start_date: { year: 2026, month: 7, day: 6 },
     format: 'TV',
     status: 'RELEASING',
+    episode_count: 12,
+    duration: 24,
+    average_score: 78,
+    popularity: 24_800,
+    source: 'MANGA',
+    country_of_origin: 'JP',
+    tags: [
+      { id: 1, name: 'Found Family', rank: 82 },
+      { id: 2, name: 'Coming of Age', rank: 74 },
+      { id: 3, name: 'Urban Fantasy', rank: 68 }
+    ],
+    studios: { nodes: [{ id: 1, name: 'Studio Preview', isAnimationStudio: true }] },
+    streaming_episodes: releases.map((release) => ({
+      title: `Episode ${Number(release.episode)} - ${episodeTitles[release.episode]}`,
+      site: 'Crunchyroll'
+    })),
     metadata_source: 'AniList',
     metadata_id: anilistId,
     episode: Object.fromEntries(
-      [makeRelease('03', 0), makeRelease('02', 7), makeRelease('01', 14)].map((release) => [
-        `${title} - ${release.episode}`,
-        release
-      ])
+      releases.map((release) => [`${title} - ${release.episode}`, release])
     )
   };
 }
@@ -155,10 +176,24 @@ async function enrichMockShow(show: SubsPleaseShowResponse): Promise<SubsPleaseS
             coverImage { extraLarge large }
             bannerImage
             genres
+            season
             seasonYear
+            startDate { year month day }
+            endDate { year month day }
             format
             status
             episodes
+            duration
+            averageScore
+            popularity
+            source(version: 3)
+            countryOfOrigin
+            tags { id name rank isGeneralSpoiler isMediaSpoiler }
+            studios(isMain: true) {
+              nodes { id name isAnimationStudio siteUrl }
+            }
+            nextAiringEpisode { episode airingAt timeUntilAiring }
+            streamingEpisodes { title thumbnail site }
             siteUrl
             relations {
               edges {
@@ -218,9 +253,24 @@ async function enrichMockShow(show: SubsPleaseShowResponse): Promise<SubsPleaseS
       trailer: media.trailer || undefined,
       genres: media.genres || show.genres,
       year: media.seasonYear || show.year,
+      season: media.season || show.season,
+      start_date: media.startDate || show.start_date,
+      end_date: media.endDate || show.end_date,
       format: media.format || show.format,
       status: media.status || show.status,
-      episode_count: media.episodes || undefined,
+      episode_count: media.episodes || show.episode_count,
+      duration: media.duration || show.duration,
+      average_score: media.averageScore || show.average_score,
+      popularity: media.popularity || show.popularity,
+      source: media.source || show.source,
+      country_of_origin: media.countryOfOrigin || show.country_of_origin,
+      tags: media.tags || show.tags,
+      studios: media.studios || show.studios,
+      next_airing_episode: media.nextAiringEpisode || show.next_airing_episode,
+      streaming_episodes:
+        Array.isArray(media.streamingEpisodes) && media.streamingEpisodes.length
+          ? media.streamingEpisodes
+          : show.streaming_episodes,
       relations: media.relations || undefined,
       has_series_prequel: (media.relations?.edges ?? []).some(
         (edge: Record<string, any>) =>

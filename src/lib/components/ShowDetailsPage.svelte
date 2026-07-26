@@ -7,12 +7,14 @@
     CalendarDays,
     CheckCircle2,
     CircleHelp,
+    Clock3,
     ExternalLink,
     Film,
     Heart,
     Meh,
     Play,
     Search,
+    Star,
     ThumbsDown,
     Tv2,
     X
@@ -38,11 +40,13 @@
   import ContextToolbar from '$lib/components/ContextToolbar.svelte';
   import TasteIndicator from '$lib/components/TasteIndicator.svelte';
   import { isTauri } from '$lib/backend';
+  import { buildEpisodeSupplements, episodeNumberKey } from '$lib/episodeMetadata';
   import {
     youtubeTrailerSearchPageUrl,
     youtubeTrailerSearchPlaybackUrl
   } from '$lib/trailers';
   import type {
+    AniListDate,
     AniListRelationNode,
     DayName,
     DiscoveryVerdict,
@@ -142,12 +146,30 @@
   let mediaRevealReady = $derived(
     detailsReady && mediaRevealShowPage === show.page
   );
+  let episodeSupplements = $derived(buildEpisodeSupplements(details));
+  let prominentTags = $derived.by(() =>
+    [...(details?.tags ?? [])]
+      .filter((tag) => !tag.isGeneralSpoiler && !tag.isMediaSpoiler)
+      .sort((left, right) => (right.rank ?? 0) - (left.rank ?? 0))
+      .slice(0, 6)
+  );
+  let primaryStudios = $derived.by(() =>
+    (details?.studios?.nodes ?? [])
+      .filter((studio) => studio.isAnimationStudio !== false)
+      .map((studio) => studio.name)
+      .slice(0, 2)
+  );
 
   let episodes = $derived.by(() => {
     const all = Object.values(details?.episode ?? {});
     const term = episodeQuery.trim().toLowerCase();
     return (term
-      ? all.filter((release) => `${release.show} ${release.episode}`.toLowerCase().includes(term))
+      ? all.filter((release) => {
+          const supplement = episodeSupplements.get(episodeNumberKey(release.episode));
+          return `${release.show} ${release.episode} ${supplement?.title ?? ''}`
+            .toLowerCase()
+            .includes(term);
+        })
       : all
     ).sort((left, right) => {
       const leftEpisode = Number.parseFloat(left.episode);
@@ -254,6 +276,70 @@
       month: 'short',
       year: 'numeric'
     }).format(date);
+  }
+
+  function airingDate(value: number): string {
+    const date = new Date(value * 1000);
+    if (Number.isNaN(date.getTime())) return '';
+    return new Intl.DateTimeFormat('en-US', {
+      weekday: 'short',
+      day: 'numeric',
+      month: 'short',
+      hour: '2-digit',
+      minute: '2-digit',
+      timeZone: timezone
+    }).format(date);
+  }
+
+  function animeDate(value?: AniListDate): string {
+    if (!value?.year) return '';
+    if (!value.month) return String(value.year);
+    const date = new Date(Date.UTC(value.year, value.month - 1, value.day ?? 1));
+    return new Intl.DateTimeFormat('en-US', {
+      month: 'short',
+      ...(value.day ? { day: 'numeric' as const } : {}),
+      year: 'numeric',
+      timeZone: 'UTC'
+    }).format(date);
+  }
+
+  function originalRun(): string {
+    const start = animeDate(details?.start_date);
+    const end = animeDate(details?.end_date);
+    if (!start) return end;
+    return `${start} – ${end || (details?.status === 'RELEASING' ? 'present' : 'TBA')}`;
+  }
+
+  function seasonLabel(): string {
+    if (!details?.season) return details?.year ? String(details.year) : '';
+    return `${metadataLabel(details.season)}${details.year ? ` ${details.year}` : ''}`;
+  }
+
+  function countryLabel(value: string): string {
+    try {
+      return new Intl.DisplayNames(['en'], { type: 'region' }).of(value) ?? value;
+    } catch {
+      return value;
+    }
+  }
+
+  function popularityLabel(value: number): string {
+    return new Intl.NumberFormat('en-US', { notation: 'compact', maximumFractionDigits: 1 }).format(
+      value
+    );
+  }
+
+  function qualityLabel(release: SubsPleaseRelease): string {
+    return [...new Set(release.downloads.map((download) => download.res))]
+      .sort((left, right) => Number(left) - Number(right))
+      .map((quality) => `${quality}p`)
+      .join(' · ');
+  }
+
+  function nextAiringLabel(): string {
+    const airing = details?.next_airing_episode;
+    if (!airing?.airingAt) return '';
+    return `Episode ${airing.episode} airs ${airingDate(airing.airingAt)}`;
   }
 
   function wasReleasedToday(value: string): boolean {
@@ -476,6 +562,9 @@
             {#if details?.year}<Badge class="bg-(--bg-elevated)/75 text-(--text)/70 backdrop-blur">{details.year}</Badge>{/if}
             {#if details?.format}<Badge class="bg-(--bg-elevated)/75 text-(--text)/70 backdrop-blur">{metadataLabel(details.format)}</Badge>{/if}
             {#if details?.status}<Badge class="bg-(--bg-elevated)/75 text-(--text)/70 backdrop-blur">{metadataLabel(details.status)}</Badge>{/if}
+            {#if details?.episode_count}<Badge class="bg-(--bg-elevated)/75 text-(--text)/70 backdrop-blur">{details.episode_count} episodes</Badge>{/if}
+            {#if details?.duration}<Badge class="bg-(--bg-elevated)/75 text-(--text)/70 backdrop-blur"><Clock3 class="size-3" /> {details.duration} min</Badge>{/if}
+            {#if details?.average_score}<Badge class="bg-(--bg-elevated)/75 text-(--text)/70 backdrop-blur"><Star class="size-3" fill="currentColor" /> {details.average_score}%</Badge>{/if}
           </div>
           <div class="mt-7 flex flex-wrap gap-2">
             <Button size="lg" class="gap-2" disabled={detailsLoading} onclick={() => void openTrailer()}>
@@ -538,12 +627,28 @@
         {:else}
           <p class="mt-6 text-base leading-8 text-(--text)/45">No description has been found for this show yet.</p>
         {/if}
+        {#if prominentTags.length}
+          <div class="mt-8" aria-label="Show themes">
+            <p class="mb-3 text-[10px] font-medium uppercase tracking-[0.18em] text-(--text)/32">Themes</p>
+            <div class="flex flex-wrap gap-2">
+              {#each prominentTags as tag (tag.id)}
+                <Badge class="bg-(--text)/6 text-(--text)/52">{tag.name}{#if tag.rank}<span class="text-(--text)/28">{tag.rank}%</span>{/if}</Badge>
+              {/each}
+            </div>
+          </div>
+        {/if}
       </div>
       <dl class="text-reveal grid content-start grid-cols-2 gap-x-5 gap-y-6 border-t border-(--text)/8 pt-7 text-sm md:grid-cols-1 md:border-l md:border-t-0 md:pl-8 md:pt-1">
         {#if day}<div><dt class="text-(--text)/35">Airs</dt><dd class="mt-1 font-medium">{DAY_LABELS[day]} at {show.time}</dd></div>{/if}
-        <div><dt class="text-(--text)/35">Available</dt><dd class="mt-1 font-medium">{Object.keys(details?.episode ?? {}).length} episodes</dd></div>
+        <div><dt class="text-(--text)/35">Available</dt><dd class="mt-1 font-medium">{Object.keys(details?.episode ?? {}).length}{details?.episode_count ? ` of ${details.episode_count}` : ''} episodes</dd></div>
         {#if libraryEntry}<div><dt class="text-(--text)/35">Watched</dt><dd class="mt-1 font-medium">{libraryEntry.watchedEpisodes.length} episodes</dd></div>{/if}
-        {#if details?.year}<div><dt class="text-(--text)/35">Year</dt><dd class="mt-1 font-medium">{details.year}</dd></div>{/if}
+        {#if seasonLabel()}<div><dt class="text-(--text)/35">Season</dt><dd class="mt-1 font-medium">{seasonLabel()}</dd></div>{/if}
+        {#if originalRun()}<div><dt class="text-(--text)/35">Original run</dt><dd class="mt-1 font-medium">{originalRun()}</dd></div>{/if}
+        {#if details?.duration}<div><dt class="text-(--text)/35">Episode length</dt><dd class="mt-1 font-medium">About {details.duration} minutes</dd></div>{/if}
+        {#if primaryStudios.length}<div><dt class="text-(--text)/35">Studio</dt><dd class="mt-1 font-medium">{primaryStudios.join(', ')}</dd></div>{/if}
+        {#if details?.source}<div><dt class="text-(--text)/35">Source</dt><dd class="mt-1 font-medium">{metadataLabel(details.source)}</dd></div>{/if}
+        {#if details?.country_of_origin}<div><dt class="text-(--text)/35">Origin</dt><dd class="mt-1 font-medium">{countryLabel(details.country_of_origin)}</dd></div>{/if}
+        {#if details?.popularity}<div><dt class="text-(--text)/35">Popularity</dt><dd class="mt-1 font-medium">{popularityLabel(details.popularity)} AniList users</dd></div>{/if}
         {#if details?.metadata_source}<div><dt class="text-(--text)/35">Show data</dt><dd class="mt-1 font-medium">{details.metadata_source}</dd></div>{/if}
       </dl>
     </section>
@@ -553,7 +658,9 @@
         <div class="text-reveal">
           <p class="mb-2 text-[10px] font-medium uppercase tracking-[0.2em] text-(--text)/35">Ready to watch?</p>
           <h2 id="episodes-title" class="text-3xl font-semibold tracking-[-0.05em]">Episodes</h2>
-          <p class="mt-3 text-sm text-(--text)/45">{Object.keys(details?.episode ?? {}).length} available · watched episodes are tracked automatically</p>
+          <p class="mt-3 text-sm text-(--text)/45">
+            {Object.keys(details?.episode ?? {}).length} available{details?.episode_count ? ` of ${details.episode_count}` : ''} · watched episodes are tracked automatically{nextAiringLabel() ? ` · ${nextAiringLabel()}` : ''}
+          </p>
         </div>
         <InputGroup class="w-full md:w-64">
           <InputGroupAddon><Search class="size-4" /></InputGroupAddon>
@@ -574,7 +681,7 @@
             <thead class="bg-(--text)/[0.035] text-[10px] font-semibold uppercase tracking-[0.14em] text-(--text)/36">
               <tr>
                 <th class="px-5 py-3.5">Episode</th>
-                <th class="hidden px-5 py-3.5 sm:table-cell">Date</th>
+                <th class="hidden px-5 py-3.5 sm:table-cell">Release</th>
                 <th class="px-5 py-3.5">Watched</th>
                 <th class="px-5 py-3.5 text-right"><span class="sr-only">Action</span></th>
               </tr>
@@ -585,16 +692,34 @@
                 {@const releaseKey = `${release.show}-${release.episode}`}
                 {@const watched = isWatched(release.episode)}
                 {@const releasedToday = wasReleasedToday(release.release_date)}
+                {@const supplement = episodeSupplements.get(episodeNumberKey(release.episode))}
+                {@const image = supplement?.thumbnail ?? ''}
                 <tr class="border-t border-(--text)/7 transition-colors hover:bg-(--text)/[0.025]">
-                  <td class="px-5 py-3.5">
-                    <span class="flex flex-wrap items-center gap-2">
-                      <strong class="block text-sm">Episode {release.episode}</strong>
-                      {#if releasedToday}<CheckCircle2 class="size-4 text-chart-1" aria-label="Released today" />{/if}
-                    </span>
-                    <small class="mt-0.5 block text-(--text)/38 sm:hidden">{releaseDate(release.release_date)}</small>
+                  <td class="px-5 py-4">
+                    <div class="flex min-w-0 items-center gap-4">
+                      <div class="relative hidden aspect-video w-28 shrink-0 overflow-hidden rounded-lg bg-(--text)/6 sm:block lg:w-32">
+                        <Film class="absolute left-1/2 top-1/2 size-5 -translate-x-1/2 -translate-y-1/2 text-(--text)/18" />
+                        {#if image}
+                          <RevealImage class="absolute inset-0 size-full object-cover" src={image} alt="" loading="lazy" reveal={mediaRevealReady} />
+                        {/if}
+                      </div>
+                      <div class="min-w-0">
+                        <span class="flex flex-wrap items-center gap-2">
+                          <strong class="block text-sm">Episode {release.episode}</strong>
+                          {#if releasedToday}<CheckCircle2 class="size-4 text-chart-1" aria-label="Released today" />{/if}
+                        </span>
+                        {#if supplement?.title}
+                          <p class="mt-1 max-w-lg truncate text-sm text-(--text)/58" title={supplement.title}>{supplement.title}</p>
+                        {/if}
+                        <small class="mt-1 block text-[11px] text-(--text)/34">
+                          {qualityLabel(release)}{supplement?.site ? ` · ${supplement.site} episode data` : ''}
+                        </small>
+                        <small class="mt-1 block text-(--text)/38 sm:hidden">{releaseDate(release.release_date)}</small>
+                      </div>
+                    </div>
                   </td>
-                  <td class="hidden px-5 py-3.5 text-sm text-(--text)/48 sm:table-cell">{releaseDate(release.release_date)}</td>
-                  <td class="px-5 py-3.5">
+                  <td class="hidden px-5 py-4 text-sm text-(--text)/48 sm:table-cell">{releaseDate(release.release_date)}</td>
+                  <td class="px-5 py-4">
                     {#if libraryEntry}
                       <label class="inline-flex items-center gap-2.5 text-xs font-medium text-(--text)/55">
                         <Switch
@@ -608,7 +733,7 @@
                       <span class="text-xs text-(--text)/30">—</span>
                     {/if}
                   </td>
-                  <td class="px-5 py-3.5 text-right">
+                  <td class="px-5 py-4 text-right">
                     <Button
                       variant="ghost"
                       size="sm"

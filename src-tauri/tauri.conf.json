@@ -21,7 +21,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://localhost:1420 http://127.0.0.1:*; img-src 'self' asset: http://asset.localhost https://subsplease.org https://s4.anilist.co https://s.anilist.co https://img.youtube.com https://i.ytimg.com data: blob:; frame-src https://www.youtube-nocookie.com https://www.youtube.com https://www.dailymotion.com; style-src 'self' 'unsafe-inline'; media-src http://127.0.0.1:* blob:; font-src 'self' data:"
+      "csp": "default-src 'self'; connect-src ipc: http://ipc.localhost http://localhost:1420 http://127.0.0.1:*; img-src 'self' asset: http://asset.localhost https://subsplease.org https://s4.anilist.co https://s.anilist.co https://img1.ak.crunchyroll.com https://img.youtube.com https://i.ytimg.com data: blob:; frame-src https://www.youtube-nocookie.com https://www.youtube.com https://www.dailymotion.com; style-src 'self' 'unsafe-inline'; media-src http://127.0.0.1:* blob:; font-src 'self' data:"
     }
   },
   "bundle": {

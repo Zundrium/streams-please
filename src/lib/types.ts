@@ -135,6 +135,33 @@ export interface AniListMediaTitle {
   userPreferred?: string;
 }
 
+export interface AniListStreamingEpisode {
+  title?: string;
+  thumbnail?: string;
+  site?: string;
+}
+
+export interface AniListAiringEpisode {
+  episode: number;
+  airingAt: number;
+  timeUntilAiring?: number;
+}
+
+export interface AniListMediaTag {
+  id: number;
+  name: string;
+  rank?: number;
+  isGeneralSpoiler?: boolean;
+  isMediaSpoiler?: boolean;
+}
+
+export interface AniListStudio {
+  id: number;
+  name: string;
+  isAnimationStudio?: boolean;
+  siteUrl?: string;
+}
+
 export interface AniListMatchableMedia {
   id: number;
   title: AniListMediaTitle;
@@ -242,9 +269,23 @@ export interface SubsPleaseShowResponse {
   };
   genres?: string[];
   year?: number;
+  season?: AnimeSeason;
+  start_date?: AniListDate;
+  end_date?: AniListDate;
   format?: string;
   status?: string;
   episode_count?: number;
+  duration?: number;
+  average_score?: number;
+  popularity?: number;
+  source?: string;
+  country_of_origin?: string;
+  tags?: AniListMediaTag[];
+  studios?: {
+    nodes?: AniListStudio[];
+  };
+  next_airing_episode?: AniListAiringEpisode;
+  streaming_episodes?: AniListStreamingEpisode[];
   metadata_source?: string;
   metadata_url?: string;
   metadata_id?: number;
