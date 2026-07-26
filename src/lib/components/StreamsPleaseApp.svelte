@@ -57,6 +57,7 @@
     entryFromShow,
     libraryEntryMatches,
     loadLibrary,
+    nextUnwatchedEpisode,
     saveLibrary,
     sortEpisodeNumbers
   } from '$lib/library';
@@ -166,7 +167,7 @@
   const PLAYBACK_PROBE_INTERVAL_MS = 250;
   const SEEK_RECONCILE_TOLERANCE_SECONDS = 1;
   const MEDIA_LOAD_TIMEOUT_MS = 8_000;
-  const NEXT_EPISODE_PROMPT_SECONDS = 35;
+  const NEXT_EPISODE_PROMPT_SECONDS = 80;
   const MPV_WINDOW_LABEL = 'main';
 
   let contentViewport = $state<HTMLElement | null>(null);
@@ -202,6 +203,7 @@
   let libraryEntries = $state<LibraryEntry[]>([]);
   let playingEpisode = $state<EpisodePlaybackRequest | null>(null);
   let nextEpisode = $state<EpisodePlaybackRequest | null>(null);
+  let nextEpisodeFromLibrary = $state(false);
   let nextEpisodeStarting = $state(false);
   let nextEpisodeDismissedFor = $state('');
   let nextEpisodeGeneration = 0;
@@ -1696,6 +1698,62 @@
     );
   }
 
+  function recommendationPreparationMatches(sourceKey: string, generation: number): boolean {
+    return Boolean(
+      generation === nextEpisodeGeneration &&
+        playingEpisode &&
+        episodePlaybackKey(playingEpisode) === sourceKey
+    );
+  }
+
+  function libraryRecommendationCandidates(request: EpisodePlaybackRequest): LibraryEntry[] {
+    const candidates = libraryEntries.filter(
+      (entry) =>
+        entry.following &&
+        !libraryEntryMatches(entry, request.anilistId, request.slug) &&
+        Boolean(nextUnwatchedEpisode(entry))
+    );
+    return [
+      ...candidates.filter((entry) => entry.watchedEpisodes.length > 0),
+      ...candidates.filter((entry) => entry.watchedEpisodes.length === 0)
+    ];
+  }
+
+  async function prepareLibraryRecommendation(
+    request: EpisodePlaybackRequest,
+    generation: number,
+    timezone: string
+  ): Promise<EpisodePlaybackRequest | null> {
+    const sourceKey = episodePlaybackKey(request);
+    for (const entry of libraryRecommendationCandidates(request)) {
+      const episode = nextUnwatchedEpisode(entry);
+      if (!episode) continue;
+      try {
+        const details = await loadSubsPleaseShow(entry.slug, timezone, entry.anilistId);
+        if (!recommendationPreparationMatches(sourceKey, generation)) return null;
+        const release = Object.values(details.episode ?? {}).find((item) =>
+          sameEpisode(item.episode, episode)
+        );
+        const download = release ? nextEpisodeDownload(release, request.quality) : undefined;
+        if (!release || !download?.magnet) continue;
+        return {
+          anilistId: details.metadata_id ?? entry.anilistId,
+          slug: details.slug || entry.slug,
+          title: details.title || entry.title,
+          imageUrl: details.image_url || entry.imageUrl,
+          episode: release.episode,
+          magnet: download.magnet,
+          quality: download.res,
+          day: entry.day,
+          airingTime: entry.airingTime
+        };
+      } catch {
+        if (!recommendationPreparationMatches(sourceKey, generation)) return null;
+      }
+    }
+    return null;
+  }
+
   async function prepareNextEpisode(
     request: EpisodePlaybackRequest,
     generation: number
@@ -1704,38 +1762,42 @@
     try {
       const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Amsterdam';
       const details = await loadSubsPleaseShow(request.slug, timezone, request.anilistId);
-      if (
-        generation !== nextEpisodeGeneration ||
-        !playingEpisode ||
-        episodePlaybackKey(playingEpisode) !== sourceKey
-      ) {
-        return;
-      }
+      if (!recommendationPreparationMatches(sourceKey, generation)) return;
 
       const release = nextRelease(details, request.episode);
       const download = release ? nextEpisodeDownload(release, request.quality) : undefined;
-      nextEpisode =
-        release && download?.magnet
-          ? {
-              anilistId: details.metadata_id ?? request.anilistId,
-              slug: details.slug || request.slug,
-              title: details.title || request.title,
-              imageUrl: details.image_url || request.imageUrl,
-              episode: release.episode,
-              magnet: download.magnet,
-              quality: download.res,
-              day: request.day,
-              airingTime: request.airingTime
-            }
-          : null;
+      if (release && download?.magnet) {
+        nextEpisodeFromLibrary = false;
+        nextEpisode = {
+          anilistId: details.metadata_id ?? request.anilistId,
+          slug: details.slug || request.slug,
+          title: details.title || request.title,
+          imageUrl: details.image_url || request.imageUrl,
+          episode: release.episode,
+          magnet: download.magnet,
+          quality: download.res,
+          day: request.day,
+          airingTime: request.airingTime
+        };
+        return;
+      }
+
+      const recommendation = await prepareLibraryRecommendation(request, generation, timezone);
+      if (!recommendationPreparationMatches(sourceKey, generation)) return;
+      nextEpisodeFromLibrary = Boolean(recommendation);
+      nextEpisode = recommendation;
     } catch {
-      if (generation === nextEpisodeGeneration) nextEpisode = null;
+      if (recommendationPreparationMatches(sourceKey, generation)) {
+        nextEpisode = null;
+        nextEpisodeFromLibrary = false;
+      }
     }
   }
 
   async function playSubsPleaseRelease(request: EpisodePlaybackRequest) {
     const generation = ++nextEpisodeGeneration;
     nextEpisode = null;
+    nextEpisodeFromLibrary = false;
     nextEpisodeDismissedFor = '';
     await changeActiveView('player');
     if (activeView !== 'player' || generation !== nextEpisodeGeneration) return;
@@ -2253,6 +2315,8 @@
                 title={nextEpisode.title}
                 episode={nextEpisode.episode}
                 imageUrl={posterUrl(nextEpisode.imageUrl)}
+                eyebrow={nextEpisodeFromLibrary ? 'From your library' : 'Up next'}
+                actionLabel={nextEpisodeFromLibrary ? 'Watch episode' : 'Watch next'}
                 busy={nextEpisodeStarting}
                 onDismiss={dismissNextEpisode}
                 onWatch={playNextEpisode}

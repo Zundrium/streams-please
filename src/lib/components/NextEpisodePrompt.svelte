@@ -9,6 +9,8 @@
     title,
     episode,
     imageUrl,
+    eyebrow = 'Up next',
+    actionLabel = 'Watch next',
     busy = false,
     onDismiss,
     onWatch
@@ -16,6 +18,8 @@
     title: string;
     episode: string;
     imageUrl: string;
+    eyebrow?: string;
+    actionLabel?: string;
     busy?: boolean;
     onDismiss: () => void;
     onWatch: () => void | Promise<void>;
@@ -23,7 +27,7 @@
 </script>
 
 <aside
-  class="next-episode-prompt pointer-events-auto absolute bottom-28 right-5 z-40 w-[calc(100%_-_2.5rem)] max-w-md"
+  class="next-episode-prompt pointer-events-auto absolute right-5 top-24 z-40 w-[calc(100%_-_2.5rem)] max-w-md"
   aria-labelledby="next-episode-title"
   aria-live="polite"
 >
@@ -38,7 +42,7 @@
       </div>
 
       <div class="flex min-w-0 flex-col p-4">
-        <span class="text-[10px] font-semibold uppercase tracking-[0.16em] text-white/48">Up next</span>
+        <span class="text-[10px] font-semibold uppercase tracking-[0.16em] text-white/48">{eyebrow}</span>
         <h2 id="next-episode-title" class="mt-1 truncate text-sm font-semibold">{title}</h2>
         <p class="mt-1 text-xs text-white/58">Episode {episode}</p>
 
@@ -57,7 +61,7 @@
             onclick={() => void onWatch()}
           >
             {#if busy}<Spinner class="size-3.5 border-black/20 border-t-black" />{:else}<Play class="size-3.5" fill="currentColor" />{/if}
-            Watch next
+            {actionLabel}
           </Button>
         </div>
       </div>
