@@ -524,5 +524,7 @@ export async function callBackend<T>(
       )
     )) as T;
   }
+  if (name === 'export_library_file') return false as T;
+  if (name === 'import_library_file') return null as T;
   return undefined as T;
 }

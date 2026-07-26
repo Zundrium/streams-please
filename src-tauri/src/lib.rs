@@ -1,4 +1,8 @@
-use std::{collections::HashSet, path::PathBuf};
+use std::{
+    collections::HashSet,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+};
 
 use librqbit::{
     api::{Api, TorrentIdOrHash},
@@ -8,9 +12,13 @@ use librqbit::{
 use regex::Regex;
 use serde::Serialize;
 use tauri::{Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use tokio::net::TcpListener;
 
 const SUBSPLEASE_ORIGIN: &str = "https://subsplease.org";
+const LIBRARY_EXPORT_FORMAT: &str = "streamsplease-library";
+const LIBRARY_EXPORT_VERSION: u64 = 1;
+const MAX_LIBRARY_FILE_BYTES: usize = 5_000_000;
 
 struct TorrentState {
     api: Api,
@@ -942,6 +950,142 @@ async fn forget_torrent(state: State<'_, TorrentState>, id: usize) -> Result<(),
         .map_err(|error| error.to_string())
 }
 
+fn validate_library_export(source: &str) -> Result<(), String> {
+    if source.len() > MAX_LIBRARY_FILE_BYTES {
+        return Err("The library export is too large.".into());
+    }
+    let value: serde_json::Value =
+        serde_json::from_str(source).map_err(|_| "The library export is not valid JSON.")?;
+    if value.get("format").and_then(serde_json::Value::as_str) != Some(LIBRARY_EXPORT_FORMAT)
+        || value.get("version").and_then(serde_json::Value::as_u64) != Some(LIBRARY_EXPORT_VERSION)
+    {
+        return Err("The library export has an invalid format.".into());
+    }
+    let entries = value
+        .get("entries")
+        .and_then(serde_json::Value::as_array)
+        .filter(|entries| entries.len() <= 10_000)
+        .ok_or("The library export has an invalid entries list.")?;
+
+    let mut anilist_ids = HashSet::new();
+    let mut slugs = HashSet::new();
+    for entry in entries {
+        let object = entry
+            .as_object()
+            .ok_or("The library export contains an invalid entry.")?;
+        let slug = object
+            .get("slug")
+            .and_then(serde_json::Value::as_str)
+            .ok_or("The library export contains an invalid entry.")?;
+        validate_subsplease_slug(slug)?;
+        if !slugs.insert(slug) {
+            return Err("The library export contains duplicate shows.".into());
+        }
+        if let Some(value) = object.get("anilistId") {
+            let id = value
+                .as_u64()
+                .filter(|id| *id > 0 && *id <= 9_007_199_254_740_991)
+                .ok_or("The library export contains an invalid AniList ID.")?;
+            if !anilist_ids.insert(id) {
+                return Err("The library export contains duplicate shows.".into());
+            }
+        }
+    }
+    Ok(())
+}
+
+fn json_file_path(mut path: PathBuf, add_extension: bool) -> Result<PathBuf, String> {
+    match path.extension().and_then(|extension| extension.to_str()) {
+        Some(extension) if extension.eq_ignore_ascii_case("json") => Ok(path),
+        None if add_extension => {
+            path.set_extension("json");
+            Ok(path)
+        }
+        _ => Err("Choose a JSON file.".into()),
+    }
+}
+
+fn write_library_export(path: &Path, contents: &str) -> Result<(), String> {
+    let directory = path
+        .parent()
+        .ok_or("The library export location is unavailable.")?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)
+        .map_err(|error| format!("The temporary library export could not be created: {error}"))?;
+    file.write_all(contents.as_bytes())
+        .map_err(|error| format!("The library export could not be written: {error}"))?;
+    file.as_file()
+        .sync_all()
+        .map_err(|error| format!("The library export could not be finalized: {error}"))?;
+    file.persist(path)
+        .map_err(|error| format!("The library export could not be saved: {}", error.error))?;
+    Ok(())
+}
+
+fn read_library_source(path: &Path) -> Result<String, String> {
+    let metadata = std::fs::metadata(path)
+        .map_err(|error| format!("The selected library file could not be inspected: {error}"))?;
+    if metadata.len() > MAX_LIBRARY_FILE_BYTES as u64 {
+        return Err("The selected library file is too large.".into());
+    }
+
+    let file = std::fs::File::open(path)
+        .map_err(|error| format!("The selected library file could not be opened: {error}"))?;
+    let mut source = String::new();
+    file.take(MAX_LIBRARY_FILE_BYTES as u64 + 1)
+        .read_to_string(&mut source)
+        .map_err(|error| format!("The selected library file could not be read: {error}"))?;
+    if source.len() > MAX_LIBRARY_FILE_BYTES {
+        return Err("The selected library file is too large.".into());
+    }
+    Ok(source)
+}
+
+#[tauri::command]
+async fn export_library_file(app: tauri::AppHandle, contents: String) -> Result<bool, String> {
+    validate_library_export(&contents)?;
+    let Some(path) = app
+        .dialog()
+        .file()
+        .set_title("Export StreamsPlease library")
+        .set_file_name("streamsplease-library.json")
+        .add_filter("JSON", &["json"])
+        .blocking_save_file()
+    else {
+        return Ok(false);
+    };
+    let path = json_file_path(
+        path.into_path()
+            .map_err(|error| format!("The export location is unavailable: {error}"))?,
+        true,
+    )?;
+    tauri::async_runtime::spawn_blocking(move || write_library_export(&path, &contents))
+        .await
+        .map_err(|error| format!("The library export could not be completed: {error}"))??;
+    Ok(true)
+}
+
+#[tauri::command]
+async fn import_library_file(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    let Some(path) = app
+        .dialog()
+        .file()
+        .set_title("Import StreamsPlease library")
+        .add_filter("JSON", &["json"])
+        .blocking_pick_file()
+    else {
+        return Ok(None);
+    };
+    let path = json_file_path(
+        path.into_path()
+            .map_err(|error| format!("The selected file is unavailable: {error}"))?,
+        false,
+    )?;
+    tauri::async_runtime::spawn_blocking(move || read_library_source(&path))
+        .await
+        .map_err(|error| format!("The library import could not be completed: {error}"))?
+        .map(Some)
+}
+
 fn create_torrent_state(app: &tauri::AppHandle) -> Result<TorrentState, String> {
     let download_dir = app
         .path()
@@ -1011,6 +1155,8 @@ pub fn run() {
             pause_torrent,
             resume_torrent,
             forget_torrent,
+            export_library_file,
+            import_library_file,
             subsplease_schedule,
             subsplease_index,
             subsplease_show,
@@ -1028,7 +1174,7 @@ mod tests {
     use super::{
         anilist_search_queries, anilist_title_similarity, first_capture, has_series_prequel,
         normalize_anilist_title, parse_have_pieces, parse_subsplease_index, strip_html,
-        validate_anilist_search, validate_anilist_season, validate_magnet,
+        validate_anilist_search, validate_anilist_season, validate_library_export, validate_magnet,
         validate_subsplease_slug, validate_timezone,
     };
 
@@ -1046,6 +1192,27 @@ mod tests {
     #[test]
     fn rejects_non_magnet_input() {
         assert!(validate_magnet("https://example.com/video.mkv").is_err());
+    }
+
+    #[test]
+    fn validates_library_export_envelope() {
+        assert!(validate_library_export(
+            r#"{"format":"streamsplease-library","version":1,"entries":[]}"#
+        )
+        .is_ok());
+        assert!(validate_library_export(
+            r#"{"format":"streamsplease-library","version":1,"entries":[{"anilistId":1,"subspleaseId":2,"slug":"example-show","following":true,"watchedEpisodes":["01"],"addedAt":"2026-01-01T00:00:00.000Z","updatedAt":"2026-01-01T00:00:00.000Z"}]}"#
+        )
+        .is_ok());
+        assert!(validate_library_export(r#"{"version":1,"entries":[]}"#).is_err());
+        assert!(validate_library_export(
+            r#"{"format":"streamsplease-library","version":2,"entries":[]}"#
+        )
+        .is_err());
+        assert!(validate_library_export(
+            r#"{"format":"streamsplease-library","version":1,"entries":[null]}"#
+        )
+        .is_err());
     }
 
     #[test]

@@ -12,7 +12,6 @@
     "core:window:allow-start-dragging",
     "core:window:allow-toggle-maximize",
     "opener:default",
-    "libmpv:default",
-    "dialog:default"
+    "libmpv:default"
   ]
 }

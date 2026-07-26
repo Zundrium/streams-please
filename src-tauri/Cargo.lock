@@ -4244,6 +4244,7 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-libmpv",
  "tauri-plugin-opener",
+ "tempfile",
  "tokio",
 ]
 

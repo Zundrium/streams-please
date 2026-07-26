@@ -1,15 +1,185 @@
-import type {
-  DayName,
-  DiscoveryVerdict,
-  LibraryEntry,
-  SubsPleaseScheduleShow,
-  SubsPleaseShowResponse
+import {
+  DAY_ORDER,
+  type DayName,
+  type DiscoveryVerdict,
+  type LibraryBackupEntry,
+  type LibraryEntry,
+  type SubsPleaseScheduleShow,
+  type SubsPleaseShowResponse
 } from '$lib/types';
 
 const STORAGE_KEY = 'streamsplease.library.v2';
+const EXPORT_FORMAT = 'streamsplease-library';
+const EXPORT_VERSION = 1;
+const MAX_LIBRARY_ENTRIES = 10_000;
+const MAX_EPISODES_PER_ENTRY = 10_000;
+export const MAX_LIBRARY_FILE_BYTES = 5_000_000;
 
 function unique(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
+}
+
+function optionalString(value: unknown): string | undefined {
+  return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function optionalDate(value: unknown): string | undefined {
+  const source = optionalString(value);
+  return source && Number.isFinite(Date.parse(source)) ? source : undefined;
+}
+
+function optionalNumber(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function optionalId(value: unknown): number | undefined {
+  return typeof value === 'number' && Number.isSafeInteger(value) && value > 0
+    ? value
+    : undefined;
+}
+
+function optionalBoolean(value: unknown): boolean | undefined {
+  return typeof value === 'boolean' ? value : undefined;
+}
+
+function stringArray(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((item): item is string => typeof item === 'string' && item.length > 0)
+    : [];
+}
+
+function optionalStringArray(value: unknown): string[] | undefined {
+  return Array.isArray(value) ? stringArray(value) : undefined;
+}
+
+function dayName(value: unknown): DayName | undefined {
+  return typeof value === 'string' && DAY_ORDER.some((day) => day === value)
+    ? (value as DayName)
+    : undefined;
+}
+
+function subspleaseSlug(value: unknown): string | undefined {
+  const slug = optionalString(value);
+  return slug && slug.length <= 160 && /^[a-z0-9-]+$/.test(slug) ? slug : undefined;
+}
+
+function discoveryVerdict(value: unknown): DiscoveryVerdict | undefined {
+  return value === 'love' || value === 'maybe' || value === 'pass' ? value : undefined;
+}
+
+function trailer(value: unknown): SubsPleaseShowResponse['trailer'] | undefined {
+  if (!isRecord(value)) return undefined;
+  const id = optionalString(value.id);
+  const site = optionalString(value.site);
+  if (!id || !site) return undefined;
+  return { id, site, thumbnail: optionalString(value.thumbnail) };
+}
+
+function optionalField(
+  value: Record<string, unknown>,
+  key: string,
+  validate: (field: unknown) => boolean
+): boolean {
+  return !(key in value) || value[key] === undefined || validate(value[key]);
+}
+
+function isLibraryBackupEntry(value: unknown): value is LibraryBackupEntry {
+  if (!isRecord(value)) return false;
+  const validId = (field: unknown) => optionalId(field) !== undefined;
+  const validBoolean = (field: unknown) => typeof field === 'boolean';
+  const validDate = (field: unknown) => optionalDate(field) !== undefined;
+  const validEpisodes = (field: unknown) =>
+    Array.isArray(field) &&
+    field.length <= MAX_EPISODES_PER_ENTRY &&
+    field.every((item) => {
+      const episode = optionalString(item);
+      return Boolean(episode && episode.length <= 64 && !/\p{Cc}/u.test(episode));
+    });
+
+  return Boolean(subspleaseSlug(value.slug)) &&
+    validBoolean(value.following) &&
+    validEpisodes(value.watchedEpisodes) &&
+    validDate(value.addedAt) &&
+    validDate(value.updatedAt) &&
+    optionalField(value, 'anilistId', validId) &&
+    optionalField(value, 'subspleaseId', validId) &&
+    optionalField(value, 'libraryDismissed', validBoolean) &&
+    optionalField(value, 'discoveryVerdict', (field) => discoveryVerdict(field) !== undefined) &&
+    optionalField(value, 'checkedAt', validDate);
+}
+
+function normalizeLibraryEntry(value: unknown, now: string): LibraryEntry | undefined {
+  if (!isRecord(value)) return undefined;
+  const slug = subspleaseSlug(value.slug);
+  const title = optionalString(value.title);
+  if (!slug || !title) return undefined;
+
+  const metadataId = optionalId(value.metadataId);
+  const verdict = discoveryVerdict(value.discoveryVerdict);
+  const libraryDismissed = optionalBoolean(value.libraryDismissed);
+  return {
+    anilistId: optionalId(value.anilistId) ?? metadataId,
+    slug,
+    subspleaseId: optionalId(value.subspleaseId),
+    title,
+    imageUrl: typeof value.imageUrl === 'string' ? value.imageUrl : '',
+    bannerImageUrl: optionalString(value.bannerImageUrl),
+    synopsis: optionalString(value.synopsis),
+    genres: optionalStringArray(value.genres),
+    year: optionalNumber(value.year),
+    trailer: trailer(value.trailer),
+    metadataId,
+    following:
+      verdict === 'love' && libraryDismissed !== true
+        ? true
+        : optionalBoolean(value.following) ?? true,
+    libraryDismissed,
+    discoveryVerdict: verdict,
+    checkedAt: optionalDate(value.checkedAt),
+    day: dayName(value.day),
+    airingTime: optionalString(value.airingTime),
+    episodeCount: optionalNumber(value.episodeCount),
+    availableEpisodes: sortEpisodeNumbers(unique(stringArray(value.availableEpisodes))),
+    watchedEpisodes: sortEpisodeNumbers(unique(stringArray(value.watchedEpisodes))),
+    addedAt: optionalDate(value.addedAt) ?? now,
+    updatedAt: optionalDate(value.updatedAt) ?? now
+  };
+}
+
+function normalizeLibraryEntries(value: unknown): LibraryEntry[] {
+  if (!Array.isArray(value)) return [];
+  const now = new Date().toISOString();
+  return value.flatMap((entry) => {
+    const normalized = normalizeLibraryEntry(entry, now);
+    return normalized ? [normalized] : [];
+  });
+}
+
+function mergeLibraryEntry(current: LibraryEntry, imported: LibraryEntry): LibraryEntry {
+  const currentUpdatedAt = Date.parse(current.updatedAt);
+  const importedUpdatedAt = Date.parse(imported.updatedAt);
+  const newer = importedUpdatedAt >= currentUpdatedAt ? imported : current;
+  const older = newer === imported ? current : imported;
+  return {
+    ...older,
+    ...newer,
+    anilistId: newer.anilistId ?? older.anilistId,
+    subspleaseId: newer.subspleaseId ?? older.subspleaseId,
+    metadataId: newer.metadataId ?? older.metadataId,
+    availableEpisodes: newer.availableEpisodes,
+    watchedEpisodes: sortEpisodeNumbers(unique([
+      ...current.watchedEpisodes,
+      ...imported.watchedEpisodes
+    ])),
+    addedAt:
+      Date.parse(current.addedAt) <= Date.parse(imported.addedAt)
+        ? current.addedAt
+        : imported.addedAt
+  };
 }
 
 export function sortEpisodeNumbers(values: string[]): string[] {
@@ -25,40 +195,7 @@ export function loadLibrary(): LibraryEntry[] {
   if (typeof window === 'undefined') return [];
   try {
     const source = window.localStorage.getItem(STORAGE_KEY) ?? '[]';
-    const parsed = JSON.parse(source);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.flatMap((value): LibraryEntry[] => {
-      if (!value || typeof value !== 'object') return [];
-      const entry = value as Partial<LibraryEntry>;
-      if (!entry.slug || !entry.title) return [];
-      return [{
-        anilistId: entry.anilistId ?? entry.metadataId,
-        slug: entry.slug,
-        subspleaseId: entry.subspleaseId,
-        title: entry.title,
-        imageUrl: entry.imageUrl ?? '',
-        bannerImageUrl: entry.bannerImageUrl,
-        synopsis: entry.synopsis,
-        genres: entry.genres,
-        year: entry.year,
-        trailer: entry.trailer,
-        metadataId: entry.metadataId,
-        following:
-          entry.discoveryVerdict === 'love' && !entry.libraryDismissed
-            ? true
-            : entry.following ?? true,
-        libraryDismissed: entry.libraryDismissed,
-        discoveryVerdict: entry.discoveryVerdict,
-        checkedAt: entry.checkedAt,
-        day: entry.day,
-        airingTime: entry.airingTime,
-        episodeCount: entry.episodeCount,
-        availableEpisodes: sortEpisodeNumbers(unique(entry.availableEpisodes ?? [])),
-        watchedEpisodes: sortEpisodeNumbers(unique(entry.watchedEpisodes ?? [])),
-        addedAt: entry.addedAt ?? new Date().toISOString(),
-        updatedAt: entry.updatedAt ?? new Date().toISOString()
-      }];
-    });
+    return normalizeLibraryEntries(JSON.parse(source));
   } catch {
     return [];
   }
@@ -67,6 +204,138 @@ export function loadLibrary(): LibraryEntry[] {
 export function saveLibrary(entries: LibraryEntry[]): void {
   if (typeof window === 'undefined') return;
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+}
+
+export function createLibraryExport(entries: LibraryEntry[]): string {
+  if (entries.length > MAX_LIBRARY_ENTRIES) {
+    throw new Error('The current library contains too many entries.');
+  }
+  const backups: LibraryBackupEntry[] = entries.map((entry) => ({
+    anilistId: entry.anilistId,
+    subspleaseId: entry.subspleaseId,
+    slug: entry.slug,
+    following: entry.following,
+    libraryDismissed: entry.libraryDismissed,
+    discoveryVerdict: entry.discoveryVerdict,
+    checkedAt: entry.checkedAt,
+    watchedEpisodes: sortEpisodeNumbers(unique(entry.watchedEpisodes)),
+    addedAt: entry.addedAt,
+    updatedAt: entry.updatedAt
+  }));
+  if (!backups.every(isLibraryBackupEntry)) {
+    throw new Error('The current library contains data that cannot be exported.');
+  }
+  return JSON.stringify({
+    format: EXPORT_FORMAT,
+    version: EXPORT_VERSION,
+    exportedAt: new Date().toISOString(),
+    entries: backups
+  }, null, 2);
+}
+
+export function parseLibraryExport(source: string): LibraryBackupEntry[] {
+  if (new TextEncoder().encode(source).byteLength > MAX_LIBRARY_FILE_BYTES) {
+    throw new Error('The selected library file is too large.');
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(source);
+  } catch {
+    throw new Error('The selected file is not valid JSON.');
+  }
+
+  if (!isRecord(parsed) || parsed.format !== EXPORT_FORMAT) {
+    throw new Error('Choose a StreamsPlease library JSON file.');
+  }
+  if (parsed.version !== EXPORT_VERSION) {
+    throw new Error('This library export version is not supported.');
+  }
+  if (!Array.isArray(parsed.entries)) {
+    throw new Error('The library file does not contain an entries list.');
+  }
+  if (parsed.entries.length > MAX_LIBRARY_ENTRIES) {
+    throw new Error('The library file contains too many entries.');
+  }
+  if (!parsed.entries.every(isLibraryBackupEntry)) {
+    throw new Error('The library file contains an invalid entry.');
+  }
+
+  const anilistIds = new Set<number>();
+  const slugs = new Set<string>();
+  for (const entry of parsed.entries) {
+    if ((entry.anilistId && anilistIds.has(entry.anilistId)) || slugs.has(entry.slug)) {
+      throw new Error('The library file contains duplicate shows.');
+    }
+    if (entry.anilistId) anilistIds.add(entry.anilistId);
+    slugs.add(entry.slug);
+  }
+  return parsed.entries;
+}
+
+export function mergeLibraryEntries(
+  current: LibraryEntry[],
+  imported: LibraryEntry[]
+): LibraryEntry[] {
+  if (current.length > MAX_LIBRARY_ENTRIES) {
+    throw new Error('The current library contains too many entries.');
+  }
+  const merged = [...current];
+  const anilistIds = new Map<number, number>();
+  const slugs = new Map<string, number>();
+
+  for (const [index, entry] of merged.entries()) {
+    if (
+      (entry.anilistId && anilistIds.has(entry.anilistId)) ||
+      slugs.has(entry.slug)
+    ) {
+      throw new Error('The current library contains conflicting show identities.');
+    }
+    if (entry.anilistId) anilistIds.set(entry.anilistId, index);
+    slugs.set(entry.slug, index);
+  }
+
+  for (const entry of imported) {
+    const anilistIndex = entry.anilistId ? anilistIds.get(entry.anilistId) : undefined;
+    const slugIndex = slugs.get(entry.slug);
+    if (
+      anilistIndex !== undefined &&
+      slugIndex !== undefined &&
+      anilistIndex !== slugIndex
+    ) {
+      throw new Error(`The imported identity for ${entry.title} conflicts with this library.`);
+    }
+
+    const index = anilistIndex ?? slugIndex;
+    if (index === undefined) {
+      if (merged.length >= MAX_LIBRARY_ENTRIES) {
+        throw new Error('The imported library would contain too many entries.');
+      }
+      const nextIndex = merged.length;
+      merged.push(entry);
+      if (entry.anilistId) anilistIds.set(entry.anilistId, nextIndex);
+      slugs.set(entry.slug, nextIndex);
+      continue;
+    }
+
+    const previous = merged[index];
+    if (
+      previous.anilistId &&
+      entry.anilistId &&
+      previous.anilistId !== entry.anilistId
+    ) {
+      throw new Error(`The imported identity for ${entry.title} conflicts with this library.`);
+    }
+
+    const next = mergeLibraryEntry(previous, entry);
+    if (previous.slug !== next.slug && slugs.get(previous.slug) === index) {
+      slugs.delete(previous.slug);
+    }
+    merged[index] = next;
+    if (next.anilistId) anilistIds.set(next.anilistId, index);
+    slugs.set(next.slug, index);
+  }
+  return merged;
 }
 
 export function libraryEntryMatches(

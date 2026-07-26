@@ -57,6 +57,7 @@
     entryFromShow,
     libraryEntryMatches,
     loadLibrary,
+    mergeLibraryEntries,
     nextUnwatchedEpisode,
     saveLibrary,
     sortEpisodeNumbers
@@ -77,6 +78,7 @@
   import StreamsPleaseLogo from '$lib/components/StreamsPleaseLogo.svelte';
   import TasteIndicator from '$lib/components/TasteIndicator.svelte';
   import WindowControls from '$lib/components/WindowControls.svelte';
+  import { DAY_ORDER } from '$lib/types';
   import type {
     AddTorrentResponse,
     AnimeSeason,
@@ -86,6 +88,7 @@
     DayName,
     DiscoveryVerdict,
     EpisodePlaybackRequest,
+    LibraryBackupEntry,
     LibraryEntry,
     MpvTrack,
     Phase,
@@ -1492,8 +1495,72 @@
   }
 
   function commitLibrary(entries: LibraryEntry[]) {
-    libraryEntries = entries;
     saveLibrary(entries);
+    libraryEntries = entries;
+  }
+
+  async function hydrateLibraryBackup(
+    backup: LibraryBackupEntry,
+    timezone: string,
+    scheduledShows: Map<string, { day: DayName; show: SubsPleaseScheduleShow }>
+  ): Promise<LibraryEntry> {
+    try {
+      const details = await loadSubsPleaseShow(backup.slug, timezone, backup.anilistId);
+      const scheduled = scheduledShows.get(backup.slug);
+      const show = scheduled?.show ?? {
+        title: details.title,
+        page: details.slug || backup.slug,
+        image_url: details.image_url,
+        time: '',
+        anilist_id: details.metadata_id ?? backup.anilistId,
+        subsplease_id: details.subsplease_id ?? backup.subspleaseId
+      };
+      return {
+        ...entryFromShow(details, show, scheduled?.day),
+        anilistId: details.metadata_id ?? backup.anilistId,
+        subspleaseId: details.subsplease_id ?? backup.subspleaseId,
+        following: backup.following,
+        libraryDismissed: backup.libraryDismissed,
+        discoveryVerdict: backup.discoveryVerdict,
+        checkedAt: backup.checkedAt,
+        watchedEpisodes: backup.watchedEpisodes,
+        addedAt: backup.addedAt,
+        updatedAt: backup.updatedAt
+      };
+    } catch (reason) {
+      const message = reason instanceof Error ? reason.message : String(reason);
+      throw new Error(`Could not refresh ${backup.slug}: ${message}`);
+    }
+  }
+
+  async function importLibrary(backups: LibraryBackupEntry[]) {
+    if (backups.length === 0) return;
+    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
+    const scheduledShows = new Map<
+      string,
+      { day: DayName; show: SubsPleaseScheduleShow }
+    >();
+    try {
+      const schedule = await loadSubsPleaseSchedule(timezone);
+      for (const day of DAY_ORDER) {
+        for (const show of schedule.schedule[day] ?? []) {
+          scheduledShows.set(show.page, { day, show });
+        }
+      }
+    } catch {
+      scheduledShows.clear();
+    }
+
+    const entries: LibraryEntry[] = [];
+    for (let index = 0; index < backups.length; index += 4) {
+      const batch = await Promise.all(
+        backups
+          .slice(index, index + 4)
+          .map((backup) => hydrateLibraryBackup(backup, timezone, scheduledShows))
+      );
+      entries.push(...batch);
+    }
+    commitLibrary(mergeLibraryEntries(libraryEntries, entries));
   }
 
   function updatePreferredQuality(quality: PlaybackQuality) {
@@ -2188,8 +2255,10 @@
     <AccountSettingsPage
       {preferredQuality}
       {preferredSubtitleLanguage}
+      {libraryEntries}
       onQualityChange={updatePreferredQuality}
       onSubtitleLanguageChange={updatePreferredSubtitleLanguage}
+      onLibraryImport={importLibrary}
     />
   {:else}
     <main class="h-full min-h-0 {current && phase !== 'error' && isTauri() ? 'bg-transparent' : 'bg-black'}">

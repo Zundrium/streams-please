@@ -320,6 +320,19 @@ export interface LibraryEntry {
   updatedAt: string;
 }
 
+export interface LibraryBackupEntry {
+  anilistId?: number;
+  subspleaseId?: number;
+  slug: string;
+  following: boolean;
+  libraryDismissed?: boolean;
+  discoveryVerdict?: DiscoveryVerdict;
+  checkedAt?: string;
+  watchedEpisodes: string[];
+  addedAt: string;
+  updatedAt: string;
+}
+
 export interface EpisodePlaybackRequest {
   anilistId?: number;
   slug: string;
