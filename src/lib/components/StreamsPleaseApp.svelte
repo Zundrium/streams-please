@@ -76,6 +76,7 @@
   import SubsPleasePage from '$lib/components/SubsPleasePage.svelte';
   import StreamsPleaseLogo from '$lib/components/StreamsPleaseLogo.svelte';
   import TasteIndicator from '$lib/components/TasteIndicator.svelte';
+  import WindowControls from '$lib/components/WindowControls.svelte';
   import type {
     AddTorrentResponse,
     AnimeSeason,
@@ -2119,6 +2120,9 @@
       aria-current={activeView === 'account' ? 'page' : undefined}
       onclick={() => void changeActiveView('account')}
     ><CircleUserRound class="size-5" /></Button>
+    {#if isTauri()}
+      <WindowControls />
+    {/if}
   </header>
   {/if}
 
