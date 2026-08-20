@@ -15,6 +15,8 @@ use tauri::{Manager, State};
 use tauri_plugin_dialog::DialogExt;
 use tokio::net::TcpListener;
 
+mod updates;
+
 const SUBSPLEASE_ORIGIN: &str = "https://subsplease.org";
 const LIBRARY_EXPORT_FORMAT: &str = "streamsplease-library";
 const LIBRARY_EXPORT_VERSION: u64 = 1;
@@ -1140,14 +1142,20 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_libmpv::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
         .setup(|app| {
             let state = create_torrent_state(app.handle())
                 .map_err(|error| format!("initializing torrent engine: {error}"))?;
+            let update_state = updates::UpdateState::new()
+                .map_err(|error| format!("initializing app updates: {error}"))?;
             app.manage(state);
+            app.manage(update_state);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             runtime_info,
+            updates::check_for_update,
+            updates::install_update,
             add_magnet,
             torrent_details,
             torrent_status,

@@ -15,6 +15,7 @@ StreamsPlease is a local Tauri v2 desktop player for legal or personally owned B
 - AniList-first seasonal browsing with previous/next season navigation;
 - SubsPlease availability filtering, weekly release times, and historical episode access;
 - Discord-capturable YouTube trailer search through the same in-process libmpv player;
+- signed startup updates from private GitHub releases;
 - a browser preview mode for UI development without native Tauri APIs.
 
 ## Architecture
@@ -68,11 +69,18 @@ controls and surfaces come from the locally installed Lily component source in
 
 Playback uses `tauri-plugin-libmpv` and its MPL-2.0 wrapper. The Windows runtime is an LGPL libmpv build and is bundled from `src-tauri/lib`; Tauri copies that directory, including the pinned trailer resolver, into desktop packages. The frontend serializes initialization and retries once if the native player instance is recreated.
 
-To build a desktop bundle:
+To build a desktop bundle with updater artifacts, provide the Tauri signing key and private-repository token through the process environment:
 
 ```powershell
+$env:TAURI_SIGNING_PRIVATE_KEY = 'C:\path\to\streamsplease.key'
+$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
+$env:STREAMSPLEASE_GITHUB_TOKEN = (Get-Content 'C:\path\to\github-token.txt' -Raw).Trim()
 npm run tauri build
 ```
+
+The public updater key is bundled in `src-tauri/tauri.conf.json`. Keep the corresponding private key outside the repository and configure it as the `TAURI_SIGNING_PRIVATE_KEY` GitHub Actions secret. Configure `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` too when the key is password-protected.
+
+Set `STREAMSPLEASE_GITHUB_TOKEN` as a GitHub Actions secret containing a fine-grained token limited to `Zundrium/streams-please` with **Contents: read** permission. Release builds compile that token into the executable so startup checks need no user configuration. GitHub has no releases-only permission, and anyone with the executable can extract the token and read the private repository. Revoking or expiring it also prevents existing builds from downloading later updates. The Windows release workflow signs the installers and publishes `latest.json`; the app verifies, passively installs, and restarts for newer releases.
 
 ## Usage
 

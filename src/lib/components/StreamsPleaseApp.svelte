@@ -77,11 +77,14 @@
   import SubsPleasePage from '$lib/components/SubsPleasePage.svelte';
   import StreamsPleaseLogo from '$lib/components/StreamsPleaseLogo.svelte';
   import TasteIndicator from '$lib/components/TasteIndicator.svelte';
+  import UpdateStatus from '$lib/components/UpdateStatus.svelte';
   import WindowControls from '$lib/components/WindowControls.svelte';
+  import { checkForUpdate, installPendingUpdate } from '$lib/updates';
   import { DAY_ORDER } from '$lib/types';
   import type {
     AddTorrentResponse,
     AnimeSeason,
+    AppUpdateStatus,
     AniListSeasonResponse,
     AppView,
     CurrentTorrent,
@@ -103,7 +106,8 @@
     SubsPleaseScheduleShow,
     SubsPleaseShowResponse,
     TrailerPlaybackRequest,
-    TorrentStats
+    TorrentStats,
+    UpdateDownloadEvent
   } from '$lib/types';
 
   type TrailerResumeState = {
@@ -199,6 +203,7 @@
   let trailerOriginView = $state<AppView | null>(null);
   let mpvMediaOwner: MpvMediaOwner = 'episode';
   let mpvLoadWaiter: MpvLoadWaiter | null = null;
+  let updateOperation: Promise<void> | null = null;
   const pendingEpisodeMediaOperations = new Set<Promise<void>>();
 
   let runtime = $state<RuntimeInfo | null>(null);
@@ -220,6 +225,7 @@
   let autoMarkedPlaybackKey = '';
   let phase = $state<Phase>('idle');
   let error = $state('');
+  let updateStatus = $state<AppUpdateStatus | null>(null);
   let current = $state<CurrentTorrent | null>(null);
   let stats = $state<TorrentStats | null>(null);
   let queueOpen = $state(false);
@@ -365,6 +371,7 @@
     const settings = loadSettings();
     preferredQuality = settings.preferredQuality;
     preferredSubtitleLanguage = settings.preferredSubtitleLanguage;
+    startAppUpdate();
     void callBackend<RuntimeInfo>('runtime_info')
       .then((nextRuntime) => (runtime = nextRuntime))
       .catch((reason) => (error = String(reason)));
@@ -2155,6 +2162,44 @@
     }
   }
 
+  function startAppUpdate() {
+    if (!isTauri() || updateOperation) return;
+    updateOperation = runAppUpdate().finally(() => (updateOperation = null));
+  }
+
+  async function runAppUpdate() {
+    updateStatus = null;
+    try {
+      const result = await checkForUpdate();
+      if (result.status !== 'available') return;
+      updateStatus = {
+        phase: 'downloading',
+        version: result.version,
+        downloadedBytes: 0
+      };
+      await installPendingUpdate((event) => updateDownloadProgress(result.version, event));
+    } catch (reason) {
+      updateStatus = {
+        phase: 'error',
+        message: reason instanceof Error ? reason.message : String(reason)
+      };
+    }
+  }
+
+  function updateDownloadProgress(version: string, event: UpdateDownloadEvent) {
+    if (!updateStatus || updateStatus.phase !== 'downloading') return;
+    if (event.event === 'started') {
+      updateStatus = { ...updateStatus, totalBytes: event.data.contentLength };
+    } else if (event.event === 'progress') {
+      updateStatus = {
+        ...updateStatus,
+        downloadedBytes: updateStatus.downloadedBytes + event.data.chunkLength
+      };
+    } else if (updateStatus.totalBytes) {
+      updateStatus = { ...updateStatus, downloadedBytes: updateStatus.totalBytes, version };
+    }
+  }
+
 </script>
 
 <div class="grid h-screen min-h-0 overflow-hidden text-(--text) {immersiveMode ? 'grid-rows-[minmax(0,1fr)]' : 'grid-rows-[4rem_minmax(0,1fr)]'}">
@@ -2560,6 +2605,14 @@
   {/if}
   </div>
 </div>
+
+{#if updateStatus}
+  <UpdateStatus
+    status={updateStatus}
+    onRetry={startAppUpdate}
+    onDismiss={() => (updateStatus = null)}
+  />
+{/if}
 
 <style>
   .video-surface {

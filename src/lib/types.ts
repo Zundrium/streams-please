@@ -27,6 +27,30 @@ export interface RuntimeInfo {
   trailerRuntimeVersion?: string;
 }
 
+export type UpdateCheckResult =
+  | { status: 'notConfigured' }
+  | { status: 'upToDate' }
+  | {
+      status: 'available';
+      version: string;
+      currentVersion: string;
+      notes?: string;
+    };
+
+export type UpdateDownloadEvent =
+  | { event: 'started'; data: { contentLength?: number } }
+  | { event: 'progress'; data: { chunkLength: number } }
+  | { event: 'finished' };
+
+export type AppUpdateStatus =
+  | {
+      phase: 'downloading';
+      version: string;
+      downloadedBytes: number;
+      totalBytes?: number;
+    }
+  | { phase: 'error'; message: string };
+
 export interface TrailerPlaybackRequest {
   url: string;
   title: string;

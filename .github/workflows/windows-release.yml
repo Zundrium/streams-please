@@ -30,12 +30,14 @@ jobs:
       - name: Check frontend
         run: npm run check
 
-      - name: Build Windows installers
-        run: npm run tauri build
-
-      - name: Upload installers to the release
-        uses: softprops/action-gh-release@v2
+      - name: Build and upload signed Windows update
+        uses: tauri-apps/tauri-action@v1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          STREAMSPLEASE_GITHUB_TOKEN: ${{ secrets.STREAMSPLEASE_GITHUB_TOKEN }}
         with:
-          files: |
-            src-tauri/target/release/bundle/msi/*.msi
-            src-tauri/target/release/bundle/nsis/*.exe
+          releaseId: ${{ github.event.release.id }}
+          tagName: ${{ github.event.release.tag_name }}
+          updaterJsonPreferNsis: true

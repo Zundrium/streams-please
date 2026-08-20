@@ -6,7 +6,8 @@ import type {
   SubsPleaseIndexResponse,
   SubsPleaseScheduleResponse,
   SubsPleaseShowResponse,
-  TorrentDetails
+  TorrentDetails,
+  UpdateCheckResult
 } from '$lib/types';
 
 export const SINTEL_MAGNET =
@@ -476,6 +477,10 @@ export async function callBackend<T>(
       trailerRuntimeVersion: 'Browser embed (UI preview)'
     } as T;
   }
+  if (name === 'check_for_update') {
+    return { status: 'upToDate' } as UpdateCheckResult as T;
+  }
+  if (name === 'install_update') return undefined as T;
   if (name === 'add_magnet') {
     const magnet = String(args?.magnet ?? '');
     if (!magnet.startsWith('magnet:?')) throw new Error('Enter a valid magnet link.');
