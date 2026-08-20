@@ -204,7 +204,7 @@
   let runtime = $state<RuntimeInfo | null>(null);
   let activeView = $state<AppView>('library');
   let activeViewRequestGeneration = 0;
-  let libraryEntries = $state<LibraryEntry[]>([]);
+  let libraryEntries = $state<LibraryEntry[]>(loadLibrary());
   let playingEpisode = $state<EpisodePlaybackRequest | null>(null);
   let nextEpisode = $state<EpisodePlaybackRequest | null>(null);
   let nextEpisodeFromLibrary = $state(false);
@@ -362,7 +362,6 @@
   });
 
   onMount(() => {
-    libraryEntries = loadLibrary();
     const settings = loadSettings();
     preferredQuality = settings.preferredQuality;
     preferredSubtitleLanguage = settings.preferredSubtitleLanguage;
