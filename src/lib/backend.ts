@@ -425,6 +425,27 @@ function anilistCandidateScore(source: string, candidate: Record<string, any>): 
   );
 }
 
+function fallbackAniListSearch(query: string): AniListSearchResult[] {
+  const term = normalizeAniListTitle(query);
+  return Object.values(mockSubsPleaseSchedule.schedule)
+    .flat()
+    .filter((show): show is NonNullable<typeof show> => Boolean(show))
+    .map((show, index) => ({ show, id: 900_000 + index }))
+    .filter(({ show }) => normalizeAniListTitle(show.title).includes(term))
+    .slice(0, 10)
+    .map(({ show, id }) => ({
+      id,
+      title: { romaji: show.title, userPreferred: show.title },
+      synonyms: [],
+      coverImage: { large: `https://subsplease.org${show.image_url}` },
+      season: 'SUMMER',
+      seasonYear: 2026,
+      format: 'TV',
+      status: 'RELEASING',
+      episodes: 12
+    }));
+}
+
 async function mockAniListSearch(query: string): Promise<AniListSearchResult[]> {
   const controller = new AbortController();
   const timeout = window.setTimeout(() => controller.abort(), 5_000);
@@ -436,21 +457,29 @@ async function mockAniListSearch(query: string): Promise<AniListSearchResult[]> 
       body: JSON.stringify({
         query: `query ($search: String!) {
           Page(page: 1, perPage: 10) {
-            media(search: $search, type: ANIME) {
+            media(search: $search, type: ANIME, isAdult: false) {
               id
-              title { romaji english native }
+              title { romaji english native userPreferred }
               synonyms
+              coverImage { extraLarge large color }
+              season
+              seasonYear
+              format
+              status
+              episodes
             }
           }
         }`,
         variables: { search: query.trim() }
       })
     });
-    if (!response.ok) return [];
+    if (!response.ok) return fallbackAniListSearch(query);
     const payload = await response.json();
-    return Array.isArray(payload?.data?.Page?.media) ? payload.data.Page.media : [];
+    return Array.isArray(payload?.data?.Page?.media)
+      ? payload.data.Page.media
+      : fallbackAniListSearch(query);
   } catch {
-    return [];
+    return fallbackAniListSearch(query);
   } finally {
     window.clearTimeout(timeout);
   }

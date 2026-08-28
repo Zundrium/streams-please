@@ -10,7 +10,7 @@ export const DAY_ORDER = [
 
 export type DayName = (typeof DAY_ORDER)[number];
 export type Phase = 'idle' | 'connecting' | 'buffering' | 'ready' | 'error';
-export type AppView = 'player' | 'library' | 'discovery' | 'subsplease' | 'account';
+export type AppView = 'player' | 'library' | 'search' | 'discovery' | 'subsplease' | 'account';
 export type PlaybackQuality = '480' | '720' | '1080';
 export type SubtitleLanguage = 'en' | 'ja' | 'nl';
 export type DiscoveryVerdict = 'love' | 'maybe' | 'pass';
@@ -136,16 +136,6 @@ export interface SubsPleaseScheduleResponse {
   schedule: Partial<Record<DayName, SubsPleaseScheduleShow[]>>;
 }
 
-export interface AniListSearchResult {
-  id: number;
-  title: {
-    romaji?: string;
-    english?: string;
-    native?: string;
-  };
-  synonyms?: string[];
-}
-
 export interface AniListDate {
   year?: number;
   month?: number;
@@ -190,6 +180,19 @@ export interface AniListMatchableMedia {
   id: number;
   title: AniListMediaTitle;
   synonyms?: string[];
+}
+
+export interface AniListSearchResult extends AniListMatchableMedia {
+  coverImage?: {
+    extraLarge?: string;
+    large?: string;
+    color?: string;
+  };
+  season?: AnimeSeason;
+  seasonYear?: number;
+  format?: string;
+  status?: string;
+  episodes?: number;
 }
 
 export interface AniListRelationNode extends AniListMatchableMedia {

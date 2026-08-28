@@ -584,10 +584,16 @@ async fn anilist_search(
         "query": r#"
             query ($search: String!) {
                 Page(page: 1, perPage: 10) {
-                    media(search: $search, type: ANIME) {
+                    media(search: $search, type: ANIME, isAdult: false) {
                         id
-                        title { romaji english native }
+                        title { romaji english native userPreferred }
                         synonyms
+                        coverImage { extraLarge large color }
+                        season
+                        seasonYear
+                        format
+                        status
+                        episodes
                     }
                 }
             }
@@ -608,6 +614,15 @@ async fn anilist_search(
         .json::<serde_json::Value>()
         .await
         .map_err(|error| format!("The AniList response could not be read: {error}"))?;
+    if let Some(error) = response
+        .get("errors")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|errors| errors.first())
+        .and_then(|error| error.get("message"))
+        .and_then(serde_json::Value::as_str)
+    {
+        return Err(format!("AniList returned an error: {error}"));
+    }
     Ok(response
         .pointer("/data/Page/media")
         .cloned()

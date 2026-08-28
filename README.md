@@ -13,6 +13,7 @@ StreamsPlease is a local Tauri v2 desktop player for legal or personally owned B
 - live download, upload, and peer status, plus pausing P2P and stopping the session;
 - a local media cache in the OS-specific app cache directory;
 - AniList-first seasonal browsing with previous/next season navigation;
+- global AniList title search with SubsPlease archive availability checks;
 - SubsPlease availability filtering, weekly release times, and historical episode access;
 - Discord-capturable YouTube trailer search through the same in-process libmpv player;
 - signed startup updates from private GitHub releases;
@@ -89,6 +90,10 @@ Set `STREAMSPLEASE_GITHUB_TOKEN` as a GitHub Actions secret containing a fine-gr
 3. Switch embedded audio and subtitles through the player or details panel.
 4. Use **External subtitle** to add a local subtitle file.
 5. Pause P2P or stop the session when you are done. Stopping forgets the torrent but preserves cache files that have already been written.
+
+The **Search** tab searches AniList across seasons and checks every result against the
+SubsPlease show archive. Confirmed and possible title matches identify the corresponding
+SubsPlease entry, while unmatched results remain visible so availability is explicit.
 
 The **SubsPlease** tab starts with an AniList season and filters it against the SubsPlease
 show archive. Use the previous and next controls to browse other seasons. AniList IDs are

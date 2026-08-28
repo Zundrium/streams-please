@@ -25,6 +25,7 @@
     Languages,
     MonitorPlay,
     Play,
+    Search,
     Sparkles,
     X
   } from '@lucide/svelte';
@@ -74,6 +75,7 @@
   import NextEpisodePrompt from '$lib/components/NextEpisodePrompt.svelte';
   import PlayerTransport from '$lib/components/PlayerTransport.svelte';
   import RevealImage from '$lib/components/RevealImage.svelte';
+  import SearchPage from '$lib/components/SearchPage.svelte';
   import SubsPleasePage from '$lib/components/SubsPleasePage.svelte';
   import StreamsPleaseLogo from '$lib/components/StreamsPleaseLogo.svelte';
   import TasteIndicator from '$lib/components/TasteIndicator.svelte';
@@ -85,6 +87,7 @@
     AddTorrentResponse,
     AnimeSeason,
     AppUpdateStatus,
+    AniListSearchResult,
     AniListSeasonResponse,
     AppView,
     CurrentTorrent,
@@ -208,6 +211,7 @@
 
   let runtime = $state<RuntimeInfo | null>(null);
   let activeView = $state<AppView>('library');
+  let episodeOriginView = $state<AppView>('subsplease');
   let activeViewRequestGeneration = 0;
   let libraryEntries = $state<LibraryEntry[]>(loadLibrary());
   let playingEpisode = $state<EpisodePlaybackRequest | null>(null);
@@ -1870,11 +1874,13 @@
 
   async function playSubsPleaseRelease(request: EpisodePlaybackRequest) {
     const generation = ++nextEpisodeGeneration;
+    const originView = activeView === 'player' ? episodeOriginView : activeView;
     nextEpisode = null;
     nextEpisodeFromLibrary = false;
     nextEpisodeDismissedFor = '';
     await changeActiveView('player');
     if (activeView !== 'player' || generation !== nextEpisodeGeneration) return;
+    episodeOriginView = originView;
     queueOpen = false;
     playingEpisode = null;
     autoMarkedPlaybackKey = '';
@@ -1903,14 +1909,18 @@
     if (!playingEpisode) return;
     requestedShowSlug = playingEpisode.slug;
     theaterMode = false;
-    activeView = libraryEntries.some(
+    activeView = episodeDetailsView();
+    window.setTimeout(() => void syncVideoViewport(), 120);
+  }
+
+  function episodeDetailsView(): AppView {
+    const inLibrary = libraryEntries.some(
       (entry) =>
         entry.following &&
         libraryEntryMatches(entry, playingEpisode?.anilistId, playingEpisode?.slug)
-    )
-      ? 'library'
-      : 'subsplease';
-    window.setTimeout(() => void syncVideoViewport(), 120);
+    );
+    if (inLibrary) return 'library';
+    return episodeOriginView === 'search' ? 'search' : 'subsplease';
   }
 
   function consumeShowRequest() {
@@ -1947,6 +1957,10 @@
     return requestedIndex < currentIndex
       ? PAST_SEASON_CACHE_MAX_AGE_MS
       : FUTURE_SEASON_CACHE_MAX_AGE_MS;
+  }
+
+  function loadAniListSearch(query: string) {
+    return callBackend<AniListSearchResult[]>('anilist_search', { query });
   }
 
   function loadAniListSeason(season: AnimeSeason, year: number) {
@@ -2217,6 +2231,7 @@
       <TabsList class="h-full gap-0 rounded-none bg-transparent p-0">
         <TabsTrigger value="player" class="h-full gap-2 rounded-none border-b-2 border-transparent px-5 py-0 shadow-none data-[state=active]:border-(--text) data-[state=active]:bg-(--text)/4 data-[state=active]:shadow-none"><MonitorPlay class="size-4" /> Player</TabsTrigger>
         <TabsTrigger value="library" class="h-full gap-2 rounded-none border-b-2 border-transparent px-5 py-0 shadow-none data-[state=active]:border-(--text) data-[state=active]:bg-(--text)/4 data-[state=active]:shadow-none"><BookOpen class="size-4" /> Library</TabsTrigger>
+        <TabsTrigger value="search" class="h-full gap-2 rounded-none border-b-2 border-transparent px-5 py-0 shadow-none data-[state=active]:border-(--text) data-[state=active]:bg-(--text)/4 data-[state=active]:shadow-none"><Search class="size-4" /> Search</TabsTrigger>
         <TabsTrigger value="discovery" class="h-full gap-2 rounded-none border-b-2 border-transparent px-5 py-0 shadow-none data-[state=active]:border-(--text) data-[state=active]:bg-(--text)/4 data-[state=active]:shadow-none"><Sparkles class="size-4" /> Discovery</TabsTrigger>
         <TabsTrigger value="subsplease" class="h-full gap-2 rounded-none border-b-2 border-transparent px-5 py-0 shadow-none data-[state=active]:border-(--text) data-[state=active]:bg-(--text)/4 data-[state=active]:shadow-none"><CalendarDays class="size-4" /> SubsPlease</TabsTrigger>
       </TabsList>
@@ -2261,6 +2276,22 @@
       onSetDiscoveryVerdict={setDiscoveryVerdict}
       onToggleWatched={toggleEpisodeWatched}
       onSetProgress={setEpisodeProgress}
+      onShowLoaded={syncLibraryShow}
+      {preferredQuality}
+      openSlug={requestedShowSlug}
+      onOpenConsumed={consumeShowRequest}
+    />
+  {:else if activeView === 'search'}
+    <SearchPage
+      loadSearch={loadAniListSearch}
+      loadIndex={loadSubsPleaseIndex}
+      loadShow={loadSubsPleaseShow}
+      onPlay={playSubsPleaseRelease}
+      onPlayTrailer={playTrailer}
+      {libraryEntries}
+      onToggleLibrary={toggleLibraryShow}
+      onSetDiscoveryVerdict={setDiscoveryVerdict}
+      onToggleWatched={toggleEpisodeWatched}
       onShowLoaded={syncLibraryShow}
       {preferredQuality}
       openSlug={requestedShowSlug}
