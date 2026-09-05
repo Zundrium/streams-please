@@ -207,7 +207,8 @@ function previewShow(slug: string, anilistId?: number, includeMetadata = true): 
 
 const catalogProviders: CatalogProvider[] = [
   { id: 'anilist', label: 'AniList', capabilities: ['search', 'season'] },
-  { id: 'jikan', label: 'Jikan', capabilities: ['search', 'season'] }
+  { id: 'jikan', label: 'Jikan', capabilities: ['search', 'season'] },
+  { id: 'kitsu', label: 'Kitsu', capabilities: ['search', 'season'] }
 ];
 
 function catalogPreviewMode(): string | null {
@@ -220,10 +221,12 @@ function previewCatalog(provider: string, request: CatalogRequest): unknown {
     || (request.kind === 'search' && typeof request.query !== 'string')
     || !validCatalogRequest(request)) throw new Error('Invalid preview catalog request.');
   const mode = catalogPreviewMode();
-  if (mode === 'offline' || (mode === 'anilist-offline' && provider === 'anilist')) {
+  if (mode === 'offline' || mode === `${provider}-offline`) {
     throw new Error('Provider unavailable in this preview scenario.');
   }
-  const warnings = provider === 'jikan' ? ['Preview alternative-provider fixture; identities remain unchanged.'] : [];
+  const warnings = provider === 'anilist'
+    ? []
+    : ['Preview alternative-provider fixture; identities remain unchanged.'];
   if (request.kind === 'search') return { provider, items: previewSearch(request.query), warnings };
   const season = previewSeason(request.season, request.year);
   return { provider, items: season.shows, season: season.season, year: season.year, warnings };

@@ -1,10 +1,11 @@
 <script lang="ts">
-  import { AlertCircle, Check, Database, Download, Languages, MonitorCog, Upload, UserRound } from '@lucide/svelte';
+  import { AlertCircle, Check, ChevronDown, ChevronUp, Database, Download, Languages, MonitorCog, Upload, UserRound } from '@lucide/svelte';
   import ContextToolbar from '$lib/components/shared/ContextToolbar.svelte';
   import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert';
   import { Button } from '$lib/components/ui/button';
   import { createLibraryExport, parseLibraryExport } from '$lib/library';
   import { readLibraryFile, writeLibraryFile } from '$lib/library-transfer';
+  import { CATALOG_PROVIDERS, loadSettings, saveSettings, type CatalogProviderId } from '$lib/settings';
   import type {
     LibraryBackupEntry,
     LibraryEntry,
@@ -56,6 +57,19 @@
 
   let transferOperation = $state<'export' | 'import' | null>(null);
   let transferStatus = $state<TransferStatus | null>(null);
+  let catalogProviderOrder = $state<CatalogProviderId[]>(loadSettings().catalogProviderOrder);
+  let catalogProviderStatus = $state('');
+
+  function moveCatalogProvider(provider: CatalogProviderId, direction: -1 | 1): void {
+    const index = catalogProviderOrder.indexOf(provider);
+    const destination = index + direction;
+    if (index < 0 || destination < 0 || destination >= catalogProviderOrder.length) return;
+    const next = [...catalogProviderOrder];
+    [next[index], next[destination]] = [next[destination], next[index]];
+    catalogProviderOrder = next;
+    catalogProviderStatus = `${CATALOG_PROVIDERS.find((item) => item.id === provider)?.label ?? provider} moved to position ${destination + 1}.`;
+    saveSettings({ catalogProviderOrder: next });
+  }
 
   function errorMessage(reason: unknown): string {
     return reason instanceof Error ? reason.message : String(reason);
@@ -180,6 +194,48 @@
           </button>
         {/each}
       </div>
+    </section>
+
+    <section class="mt-10 grid gap-8 border-t border-(--text)/8 pt-10 md:grid-cols-[14rem_minmax(0,1fr)]" aria-labelledby="catalog-provider-order-title">
+      <div class="text-reveal">
+        <span class="mb-3 grid size-9 place-items-center rounded-full bg-(--text)/6 text-(--text)/55"><Database class="size-4" /></span>
+        <h2 id="catalog-provider-order-title" class="font-semibold">Catalog provider order</h2>
+        <p class="mt-2 text-sm leading-6 text-(--text)/42">Try providers in this order when new catalog data is needed. Saved results remain available first.</p>
+      </div>
+
+      <ol class="overflow-hidden rounded-3xl border border-(--text)/8 bg-(--bg-elevated)" aria-label="Catalog provider order">
+        {#each catalogProviderOrder as providerId, index (providerId)}
+          {@const provider = CATALOG_PROVIDERS.find((item) => item.id === providerId)!}
+          <li class="flex items-center gap-3 px-5 py-4 {index ? 'border-t border-(--text)/8' : ''}">
+            <span class="grid size-7 shrink-0 place-items-center rounded-full bg-(--text)/5 text-xs font-medium text-(--text)/50" aria-hidden="true">{index + 1}</span>
+            <span class="min-w-0 flex-1">
+              <strong class="block text-sm">{provider.label}</strong>
+              <small class="mt-0.5 block text-(--text)/40">{index === 0 ? 'First choice for new requests' : 'Fallback provider'}</small>
+            </span>
+            <span class="flex shrink-0 gap-1">
+              <Button
+                variant="ghost"
+                size="icon"
+                class="size-9 rounded-full"
+                aria-label={`Move ${provider.label} up`}
+                title={`Move ${provider.label} up`}
+                disabled={index === 0}
+                onclick={() => moveCatalogProvider(providerId, -1)}
+              ><ChevronUp class="size-4" /></Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                class="size-9 rounded-full"
+                aria-label={`Move ${provider.label} down`}
+                title={`Move ${provider.label} down`}
+                disabled={index === catalogProviderOrder.length - 1}
+                onclick={() => moveCatalogProvider(providerId, 1)}
+              ><ChevronDown class="size-4" /></Button>
+            </span>
+          </li>
+        {/each}
+      </ol>
+      <p class="sr-only" aria-live="polite">{catalogProviderStatus}</p>
     </section>
 
     <section class="mt-10 grid gap-8 border-t border-(--text)/8 pt-10 md:grid-cols-[14rem_minmax(0,1fr)]" aria-labelledby="library-data-title">

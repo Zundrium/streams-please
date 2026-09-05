@@ -7,6 +7,7 @@ use tauri::{Manager, State};
 pub mod anilist;
 mod identity;
 mod jikan;
+mod kitsu;
 pub mod subsplease;
 
 use identity::IdentityResolver;
@@ -358,7 +359,8 @@ impl CatalogState {
                 anilist.clone(),
                 identity.clone(),
             )),
-            Arc::new(jikan::JikanAdapter::new(http.clone(), identity)),
+            Arc::new(jikan::JikanAdapter::new(http.clone(), identity.clone())),
+            Arc::new(kitsu::KitsuAdapter::new(http.clone(), identity)),
         ];
 
         for (index, adapter) in adapters.iter().enumerate() {
@@ -510,7 +512,7 @@ mod tests {
             .iter()
             .map(|adapter| adapter.descriptor().id)
             .collect::<Vec<_>>();
-        assert_eq!(providers, ["anilist", "jikan"]);
+        assert_eq!(providers, ["anilist", "jikan", "kitsu"]);
         assert_eq!(CatalogSeason::Fall.as_str(), "FALL");
     }
 }

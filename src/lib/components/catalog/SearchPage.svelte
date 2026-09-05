@@ -8,6 +8,8 @@
   import CatalogLoading from '$lib/components/catalog/CatalogLoading.svelte';
   import CatalogNotice from '$lib/components/catalog/CatalogNotice.svelte';
   import SearchResultCard from '$lib/components/catalog/SearchResultCard.svelte';
+  import AnimePosterCard from '$lib/components/catalog/AnimePosterCard.svelte';
+  import CatalogStatusBadge from '$lib/components/catalog/CatalogStatusBadge.svelte';
   import {
     CONFIRMED_MATCH_CONFIDENCE, errorMessage, preferredTitle, providerImageUrl,
     matchSubsPleaseShow, saveProviderMapping, type ProviderMatch
@@ -156,9 +158,6 @@
       {#if search.providerIndex?.cacheWarning}
         <CatalogNotice kind="warning" title="Saved archive" description={search.providerIndex.cacheWarning} class="mb-6" />
       {/if}
-      {#if search.cacheWarning}
-        <CatalogNotice kind="warning" title="Catalog fallback" description={search.cacheWarning} class="mb-6" />
-      {/if}
       {#if search.searchError}
         <CatalogNotice kind="warning" title="Catalog search unavailable" description={search.searchError}
           actionLabel="Retry search" onAction={() => void search.search(search.query)} class="mb-6" />
@@ -169,8 +168,9 @@
       {/if}
 
       {#if search.provenance}
-        <p class="mb-6 text-xs text-(--text)/45" role="status">
-          {search.results.length} {search.results.length === 1 ? 'result' : 'results'} · {catalogSourceLabel(search.provenance)}{search.providerLoading ? ' · Checking SubsPlease…' : ''}
+        <p class="mb-6 flex flex-wrap items-center gap-2 text-xs text-(--text)/45" role="status">
+          <span>{search.results.length} {search.results.length === 1 ? 'result' : 'results'} · {catalogSourceLabel(search.provenance)}{search.providerLoading ? ' · Checking SubsPlease…' : ''}</span>
+          <CatalogStatusBadge provenance={search.provenance} warning={search.cacheWarning} />
         </p>
       {/if}
       {#if search.animeLoading}
@@ -189,11 +189,11 @@
         <section aria-label="SubsPlease archive search results">
           <h2 class="text-base font-medium">SubsPlease archive</h2>
           <p class="mt-2 text-sm text-(--text)/45">{search.archiveResults.length} archive titles · Catalog identity is not verified.</p>
-          <div class="mt-6 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
+          <div class="mt-6 grid grid-cols-2 gap-x-4 gap-y-8 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6">
             {#each search.archiveResults as provider (provider.page)}
-              <Button variant="ghost" class="h-auto min-h-12 justify-start whitespace-normal rounded-xl px-4 py-3 text-left" onclick={() => openProvider(provider)}>
-                {provider.title}
-              </Button>
+              {@const saved = libraryEntries.find((entry) => entry.slug === provider.page)}
+              <AnimePosterCard title={provider.title} imageUrl={saved?.imageUrl ?? ''}
+                bottomLeft="SubsPlease archive" notice="Identity unverified" onOpen={() => openProvider(provider)} />
             {/each}
           </div>
         </section>

@@ -1,4 +1,5 @@
 import { callBackend, isTauri, type BackendCall } from '$lib/backend';
+import { loadSettings, normalizeCatalogProviderOrder } from '$lib/settings';
 import {
   createCatalogCache,
   normalizeProviderIndex,
@@ -25,6 +26,7 @@ export interface CatalogClientOptions {
   now?: () => number;
   maxConcurrentRequests?: number;
   maxEntries?: number;
+  providerOrder?: () => readonly string[];
 }
 
 interface RequestEntry<T> {
@@ -66,6 +68,7 @@ export function createCatalogClient(
     16
   );
   const maxEntries = boundedOption(options.maxEntries, DEFAULT_MAX_ENTRIES, 200);
+  const providerOrder = options.providerOrder ?? (() => loadSettings().catalogProviderOrder);
   let activeRequests = 0;
   const queued: Array<() => void> = [];
 
@@ -134,14 +137,16 @@ export function createCatalogClient(
 
   return {
     loadSearch(query: string): Promise<CatalogSearchResponse> {
-      return request(`search:${normalizedKey(query)}`, 0, async () => {
-        const response = await coordinator.load({ kind: 'search', query });
+      const order = normalizeCatalogProviderOrder(providerOrder());
+      return request(`search:${normalizedKey(query)}:providers:${JSON.stringify(order)}`, 0, async () => {
+        const response = await coordinator.load({ kind: 'search', query }, order);
         return { results: response.data.items, provenance: response.provenance, cacheWarning: response.cacheWarning };
       });
     },
     loadSeason(season: AnimeSeason, year: number): Promise<AniListSeasonResponse> {
-      return request(`season:${season}:${year}`, 0, async () => {
-        const response = await coordinator.load({ kind: 'season', season, year });
+      const order = normalizeCatalogProviderOrder(providerOrder());
+      return request(`season:${season}:${year}:providers:${JSON.stringify(order)}`, 0, async () => {
+        const response = await coordinator.load({ kind: 'season', season, year }, order);
         return {
           season, year, shows: seasonItems(response.data),
           provenance: response.provenance, cacheWarning: response.cacheWarning

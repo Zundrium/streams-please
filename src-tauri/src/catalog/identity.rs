@@ -35,6 +35,13 @@ impl ProviderId {
             id,
         }
     }
+
+    pub(super) fn kitsu(id: i64) -> Self {
+        Self {
+            provider: "kitsu".into(),
+            id,
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -90,6 +97,7 @@ struct StoredIdentityEntry {
 struct FribbIdentityEntry {
     anilist_id: Option<i64>,
     mal_id: Option<i64>,
+    kitsu_id: Option<i64>,
 }
 
 struct IdentityIndex {
@@ -118,10 +126,14 @@ impl IdentityResolver {
             return Err("Invalid provider identity lookup.".into());
         }
 
+        let required_providers = provider_ids
+            .iter()
+            .map(|value| value.provider.clone())
+            .collect::<HashSet<_>>();
         let mut state = self.state.lock().await;
         self.load_files(&mut state, cache_dir).await?;
         let mut warnings = state.load_warnings.clone();
-        self.refresh_source_if_needed(&mut state, cache_dir, &mut warnings)
+        self.refresh_source_if_needed(&mut state, cache_dir, &required_providers, &mut warnings)
             .await;
 
         let mut pairs = state
@@ -245,11 +257,13 @@ impl IdentityResolver {
         &self,
         state: &mut ResolverState,
         cache_dir: &Path,
+        required_providers: &HashSet<String>,
         warnings: &mut Vec<String>,
     ) {
         let now = unix_timestamp();
         if state.source.as_ref().is_some_and(|source| {
             now.saturating_sub(source.fetched_at) <= SOURCE_CACHE_TTL.as_secs()
+                && source_covers_providers(source, required_providers)
         }) || state
             .source_retry_at
             .is_some_and(|retry| retry > Instant::now())
@@ -379,25 +393,46 @@ fn parse_fribb_source(bytes: &[u8]) -> Result<Vec<IdentityPair>, String> {
 
     let mut pairs = Vec::new();
     for entry in entries {
-        match (entry.anilist_id, entry.mal_id) {
-            (Some(anilist_id), Some(mal_id))
-                if valid_identity_id(anilist_id) && valid_identity_id(mal_id) =>
-            {
-                pairs.push(IdentityPair {
-                    anilist_id,
-                    provider_id: ProviderId::mal(mal_id),
-                });
+        let Some(anilist_id) = entry.anilist_id else {
+            continue;
+        };
+        if !valid_identity_id(anilist_id) && (entry.mal_id.is_some() || entry.kitsu_id.is_some()) {
+            return Err("Fribb returned an out-of-range identity mapping.".into());
+        }
+        if !valid_identity_id(anilist_id) {
+            continue;
+        }
+        for provider_id in [
+            entry.mal_id.map(ProviderId::mal),
+            entry.kitsu_id.map(ProviderId::kitsu),
+        ]
+        .into_iter()
+        .flatten()
+        {
+            if !valid_identity_id(provider_id.id) {
+                return Err("Fribb returned an out-of-range identity mapping.".into());
             }
-            (Some(_), Some(_)) => {
-                return Err("Fribb returned an out-of-range identity mapping.".into())
-            }
-            _ => {}
+            pairs.push(IdentityPair {
+                anilist_id,
+                provider_id,
+            });
         }
     }
-    if pairs.is_empty() {
-        return Err("Fribb did not return any usable identity mappings.".into());
+    if pairs.is_empty() || pairs.len() > MAX_SOURCE_ENTRIES {
+        return Err("Fribb returned an invalid number of identity mappings.".into());
     }
     Ok(pairs)
+}
+
+fn source_covers_providers(source: &StoredSource, providers: &HashSet<String>) -> bool {
+    let available = source
+        .entries
+        .iter()
+        .flat_map(|entry| entry.provider_ids.keys().map(String::as_str))
+        .collect::<HashSet<_>>();
+    providers
+        .iter()
+        .all(|provider| available.contains(provider.as_str()))
 }
 
 fn pairs_from_entries(entries: &[StoredIdentityEntry]) -> Result<Vec<IdentityPair>, String> {
@@ -567,14 +602,21 @@ fn unix_timestamp() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::{
-        append_bounded, build_index, parse_fribb_source, IdentityPair, ProviderId,
-        MAX_SOURCE_RESPONSE_BYTES,
+        append_bounded, build_index, parse_fribb_source, source_covers_providers, IdentityPair,
+        ProviderId, StoredSource, CACHE_VERSION, MAX_SOURCE_RESPONSE_BYTES,
     };
 
     fn pair(anilist_id: i64, mal_id: i64) -> IdentityPair {
         IdentityPair {
             anilist_id,
             provider_id: ProviderId::mal(mal_id),
+        }
+    }
+
+    fn kitsu_pair(anilist_id: i64, kitsu_id: i64) -> IdentityPair {
+        IdentityPair {
+            anilist_id,
+            provider_id: ProviderId::kitsu(kitsu_id),
         }
     }
 
@@ -599,12 +641,33 @@ mod tests {
     #[test]
     fn parses_only_explicit_bounded_fribb_ids() {
         let mappings = parse_fribb_source(
-            br#"[{"anilist_id":1,"mal_id":10,"title":"ignored"},{"anilist_id":2,"mal_id":null}]"#,
+            br#"[{"anilist_id":1,"mal_id":10,"kitsu_id":100,"title":"ignored"},{"anilist_id":2,"mal_id":null,"kitsu_id":200}]"#,
         )
         .unwrap();
-        assert_eq!(mappings, vec![pair(1, 10)]);
+        assert_eq!(
+            mappings,
+            vec![pair(1, 10), kitsu_pair(1, 100), kitsu_pair(2, 200)]
+        );
         assert!(parse_fribb_source(br#"[{"anilist_id":0,"mal_id":10}]"#).is_err());
+        assert!(parse_fribb_source(br#"[{"anilist_id":1,"kitsu_id":0}]"#).is_err());
         assert!(parse_fribb_source(br#"[]"#).is_err());
+    }
+
+    #[test]
+    fn refreshes_legacy_sources_that_do_not_cover_a_requested_provider() {
+        let source = StoredSource {
+            version: CACHE_VERSION,
+            fetched_at: super::unix_timestamp(),
+            entries: super::entries_from_pairs([pair(1, 10)]).unwrap(),
+        };
+        assert!(source_covers_providers(
+            &source,
+            &["mal".to_string()].into_iter().collect()
+        ));
+        assert!(!source_covers_providers(
+            &source,
+            &["kitsu".to_string()].into_iter().collect()
+        ));
     }
 
     #[tokio::test]
@@ -703,19 +766,26 @@ mod tests {
 
     #[test]
     fn independent_provider_namespaces_do_not_conflict() {
-        let index = build_index(vec![
-            pair(1, 10),
-            IdentityPair {
-                anilist_id: 2,
-                provider_id: ProviderId {
-                    provider: "kitsu".into(),
-                    id: 10,
-                },
-            },
-        ])
-        .unwrap();
+        let index = build_index(vec![pair(1, 10), kitsu_pair(2, 10)]).unwrap();
         assert_eq!(index.conflicts, 0);
         assert_eq!(index.by_provider_id.len(), 2);
+    }
+
+    #[test]
+    fn excludes_conflicting_kitsu_mappings_without_affecting_mal() {
+        let index = build_index(vec![
+            kitsu_pair(1, 10),
+            kitsu_pair(1, 11),
+            kitsu_pair(2, 20),
+            kitsu_pair(3, 20),
+            pair(4, 40),
+        ])
+        .unwrap();
+        assert_eq!(index.conflicts, 4);
+        assert_eq!(index.by_provider_id.get(&ProviderId::mal(40)), Some(&4));
+        assert!(!index.by_provider_id.contains_key(&ProviderId::kitsu(10)));
+        assert!(!index.by_provider_id.contains_key(&ProviderId::kitsu(11)));
+        assert!(!index.by_provider_id.contains_key(&ProviderId::kitsu(20)));
     }
 
     #[test]

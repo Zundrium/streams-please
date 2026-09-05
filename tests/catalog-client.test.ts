@@ -48,6 +48,28 @@ test('catalog client shares inflight searches and evicts rejected requests', asy
   assert.equal(calls, 3);
 });
 
+test('catalog client reads the current provider order for each new catalog request', async () => {
+  const registry = [
+    { id: 'anilist', label: 'AniList', capabilities: ['search'] },
+    { id: 'jikan', label: 'Jikan', capabilities: ['search'] },
+    { id: 'kitsu', label: 'Kitsu', capabilities: ['search'] }
+  ];
+  let order = ['anilist', 'jikan', 'kitsu'];
+  const calls: string[] = [];
+  const client = createCatalogClient(async <T>(name: string, args?: Record<string, unknown>): Promise<T> => {
+    if (name === 'catalog_providers') return registry as T;
+    assert.equal(name, 'catalog_request');
+    const provider = String(args?.provider);
+    calls.push(provider);
+    return { provider, items: [], warnings: [] } as T;
+  }, { cacheScope: 'preview', providerOrder: () => order });
+
+  await client.loadSearch('first');
+  order = ['kitsu', 'jikan', 'anilist'];
+  await client.loadSearch('second');
+  assert.deepEqual(calls, ['anilist', 'kitsu']);
+});
+
 test('catalog client persists a shared network response only once', async () => {
   const storage = new MemoryStorage();
   const client = createCatalogClient(async <T>(): Promise<T> => indexResponse as T, {

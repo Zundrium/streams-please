@@ -25,6 +25,7 @@ export interface CatalogProvenance {
   label: string;
   fetchedAt: number;
   cache: 'none' | 'fresh' | 'stale';
+  failedProviders?: string[];
 }
 
 export interface CatalogSearchResponse {

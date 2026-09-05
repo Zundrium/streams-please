@@ -1,6 +1,6 @@
 [package]
 name = "streamsplease"
-version = "0.5.0"
+version = "0.5.1"
 description = "A local-first Tauri torrent media player powered by librqbit and mpv"
 authors = ["StreamsPlease contributors"]
 edition = "2021"

@@ -20,7 +20,7 @@ interface CatalogResult extends SavedCatalogResult {
 export function createCatalogCoordinator(call: BackendCall, options: CatalogCacheOptions = {}) {
   const now = options.now ?? Date.now;
   const cache = createCatalogResultCache(options);
-  const failures = new Map<string, { until: number; message: string }>();
+  const failures = new Map<string, { until: number; label: string; message: string }>();
   const pending = new Map<string, Promise<CatalogResult>>();
   let registry: Promise<CatalogProvider[]> | undefined;
 
@@ -47,24 +47,44 @@ export function createCatalogCoordinator(call: BackendCall, options: CatalogCach
     saved: SavedCatalogResult,
     provider: CatalogProvider,
     mode: CatalogProvenance['cache'],
-    errors: string[],
+    errors: Array<{ label: string; message: string }>,
     secondary: boolean
   ): CatalogResult {
     const warnings = [...saved.data.warnings];
-    if (errors.length) warnings.unshift(`Catalog refresh failed: ${errors.map((error) => error.replace(/[.!?]+$/, '')).join('; ')}.`);
+    if (errors.length) warnings.unshift(`Catalog refresh failed: ${errors.map(({ message }) => message.replace(/[.!?]+$/, '')).join('; ')}.`);
     if (mode === 'stale') warnings.push('Showing saved catalog data.');
     else if (secondary) warnings.push(`Using ${provider.label} as an alternative catalog source; coverage may differ.`);
+    const failedProviders = [...new Set(errors.map(({ label }) => label))];
     return {
       ...saved,
-      provenance: { provider: provider.id, label: provider.label, fetchedAt: saved.savedAt, cache: mode },
+      provenance: {
+        provider: provider.id,
+        label: provider.label,
+        fetchedAt: saved.savedAt,
+        cache: mode,
+        ...(failedProviders.length ? { failedProviders } : {})
+      },
       ...(warnings.length ? { cacheWarning: warnings.join(' ') } : {})
     };
   }
 
-  async function resolve(request: CatalogRequest): Promise<CatalogResult> {
-    const available = (await providers()).filter((provider) => provider.capabilities.includes(request.kind));
+  function orderProviders(available: CatalogProvider[], providerOrder: readonly string[]): CatalogProvider[] {
+    if (!providerOrder.length) return available;
+    const selected = [...new Set(providerOrder)];
+    const byId = new Map(available.map((provider) => [provider.id, provider]));
+    return [
+      ...selected.map((provider) => byId.get(provider)).filter((provider): provider is CatalogProvider => Boolean(provider)),
+      ...available.filter((provider) => !selected.includes(provider.id))
+    ];
+  }
+
+  async function resolve(request: CatalogRequest, providerOrder: readonly string[]): Promise<CatalogResult> {
+    const available = orderProviders(
+      (await providers()).filter((provider) => provider.capabilities.includes(request.kind)),
+      providerOrder
+    );
     if (!available.length) throw new Error(`No catalog provider supports ${request.kind}.`);
-    const errors: string[] = [];
+    const errors: Array<{ label: string; message: string }> = [];
     for (const [index, provider] of available.entries()) {
       const secondary = index > 0;
       const age = secondary ? Math.min(freshAge(request), FALLBACK_MAX_FRESH_AGE) : freshAge(request);
@@ -72,7 +92,7 @@ export function createCatalogCoordinator(call: BackendCall, options: CatalogCach
       if (fresh) return result(fresh, provider, 'fresh', errors, secondary);
       const failure = failures.get(provider.id);
       if (failure && failure.until > now()) {
-        errors.push(failure.message);
+        errors.push(failure);
       } else {
         try {
           const raw = await call<unknown>('catalog_request', { provider: provider.id, request });
@@ -82,23 +102,24 @@ export function createCatalogCoordinator(call: BackendCall, options: CatalogCach
           return result(cache.save(request, value), provider, 'none', errors, secondary);
         } catch (reason: unknown) {
           const message = `${provider.label}: ${reason instanceof Error ? reason.message : String(reason)}`;
-          failures.set(provider.id, { until: now() + FAILURE_COOLDOWN, message });
-          errors.push(message);
+          const failed = { until: now() + FAILURE_COOLDOWN, label: provider.label, message };
+          failures.set(provider.id, failed);
+          errors.push(failed);
         }
       }
       const stale = cache.load(provider.id, request, request.kind === 'search' ? 30 * DAY : 90 * DAY);
       if (stale) return result(stale, provider, 'stale', errors, secondary);
     }
-    throw new Error(`Catalog providers are unavailable. ${errors.join(' ')}`);
+    throw new Error(`Catalog providers are unavailable. ${errors.map(({ message }) => message).join(' ')}`);
   }
 
   return {
-    load(request: CatalogRequest): Promise<CatalogResult> {
+    load(request: CatalogRequest, providerOrder: readonly string[] = []): Promise<CatalogResult> {
       if (!validCatalogRequest(request)) return Promise.reject(new Error('Invalid catalog request.'));
-      const key = catalogRequestKey(request);
+      const key = `${catalogRequestKey(request)}\u0000${JSON.stringify(providerOrder)}`;
       const existing = pending.get(key);
       if (existing) return existing;
-      const promise = resolve(request).finally(() => {
+      const promise = resolve(request, providerOrder).finally(() => {
         if (pending.get(key) === promise) pending.delete(key);
       });
       pending.set(key, promise);

@@ -27,6 +27,7 @@
   import { currentSeason, preferredTitle, saveProviderMapping, shiftSeason } from '$lib/catalog';
   import { createSeasonCatalog } from '$lib/catalog/season.svelte';
   import { catalogSourceLabel } from '$lib/catalog/providers';
+  import CatalogStatusBadge from '$lib/components/catalog/CatalogStatusBadge.svelte';
   import { libraryEntryMatches } from '$lib/library';
   import { youtubeTrailerSearchPlaybackUrl } from '$lib/trailers';
   import {
@@ -546,10 +547,13 @@
 
   <div class="relative mx-auto flex min-h-[calc(100%_-_4rem)] max-w-[100rem] flex-col px-5 py-7 lg:px-10 lg:py-8">
     {#if seasonCatalog.catalog?.provenance}
-      <p class="mb-4 text-xs text-(--text)/45" role="status">{catalogSourceLabel(seasonCatalog.catalog.provenance)}</p>
+      <p class="mb-4 flex flex-wrap items-center gap-2 text-xs text-(--text)/45" role="status">
+        <span>{catalogSourceLabel(seasonCatalog.catalog.provenance)}</span>
+        <CatalogStatusBadge provenance={seasonCatalog.catalog.provenance} warning={seasonCatalog.catalog.cacheWarning} />
+      </p>
     {/if}
-    {#if seasonCatalog.catalog?.cacheWarning || seasonCatalog.providerIndex?.cacheWarning}
-      <CatalogNotice kind="warning" title="Catalog fallback" description={[seasonCatalog.catalog?.cacheWarning, seasonCatalog.providerIndex?.cacheWarning].filter(Boolean).join(' ')} class="mb-6" />
+    {#if seasonCatalog.providerIndex?.cacheWarning}
+      <CatalogNotice kind="warning" title="Saved archive" description={seasonCatalog.providerIndex.cacheWarning} class="mb-6" />
     {/if}
     {#if seasonCatalog.scheduleError}
       <CatalogNotice

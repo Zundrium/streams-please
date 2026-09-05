@@ -29,7 +29,7 @@
   } from '$lib/catalog/season.svelte';
   import { libraryEntryMatches } from '$lib/library';
   import type { CatalogDetailsActions } from '$lib/catalog/contracts';
-  import { catalogSourceLabel } from '$lib/catalog/providers';
+  import CatalogStatusBadge from '$lib/components/catalog/CatalogStatusBadge.svelte';
   import {
     DAY_ORDER,
     type AnimeSeason,
@@ -377,12 +377,6 @@
       {#if seasonCatalog.providerIndex?.cacheWarning}
         <CatalogNotice kind="warning" title="Saved archive" description={seasonCatalog.providerIndex.cacheWarning} class="mb-5" />
       {/if}
-      {#if mode === 'season' && seasonCatalog.catalog?.provenance}
-        <p class="mb-4 text-xs text-(--text)/45" role="status">{catalogSourceLabel(seasonCatalog.catalog.provenance)}</p>
-      {/if}
-      {#if mode === 'season' && seasonCatalog.catalog?.cacheWarning}
-        <CatalogNotice kind="warning" title="Catalog fallback" description={seasonCatalog.catalog.cacheWarning} class="mb-5" />
-      {/if}
       {#if mode === 'archive'}
         <p class="text-xs text-(--text)/42">
           {#if seasonCatalog.providerLoading && !seasonCatalog.providerIndex}
@@ -473,11 +467,12 @@
           {/if}
         {/if}
       {:else}
-        <p class="text-xs text-(--text)/42">
+        <p class="flex flex-wrap items-center gap-2 text-xs text-(--text)/42" role="status">
           {#if seasonCatalog.catalogLoading || seasonCatalog.providerLoading}
             Loading confirmed season matches…
           {:else}
-            {filteredShows.length} confirmed of {seasonCatalog.catalog?.shows.length ?? 0} season titles
+            <span>{filteredShows.length} confirmed of {seasonCatalog.catalog?.shows.length ?? 0} season titles</span>
+            <CatalogStatusBadge provenance={seasonCatalog.catalog?.provenance} warning={seasonCatalog.catalog?.cacheWarning} />
           {/if}
         </p>
 

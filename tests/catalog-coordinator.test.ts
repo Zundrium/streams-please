@@ -82,6 +82,8 @@ test('alternative results retain canonical identities, warnings and provenance i
   assert.equal(result.data.items[0].id, 42);
   assert.equal(result.data.items[0].idMal, 84);
   assert.equal(result.provenance.provider, 'jikan');
+  assert.deepEqual(result.provenance.failedProviders, ['AniList']);
+  assert.match(result.cacheWarning ?? '', /Catalog refresh failed: AniList: HTTP 403/);
   assert.match(result.cacheWarning ?? '', /2 unmapped items/);
   assert.match(result.cacheWarning ?? '', /alternative catalog/);
   const restarted = createCatalogCoordinator(backend(() => { throw new Error('offline'); }), options);
@@ -89,6 +91,46 @@ test('alternative results retain canonical identities, warnings and provenance i
   assert.equal(cached.provenance.provider, 'jikan');
   assert.equal(cached.provenance.cache, 'fresh');
   assert.match(cached.cacheWarning ?? '', /2 unmapped items/);
+});
+
+test('third provider fallback reports both failures for search and season, including cooldown reuse', async () => {
+  const registry: CatalogProvider[] = [...providers, { id: 'kitsu', label: 'Kitsu', capabilities: ['search', 'season'] }];
+  const calls: string[] = [];
+  const client = createCatalogCoordinator(backend((provider, request) => {
+    calls.push(provider);
+    if (provider !== 'kitsu') throw new Error('offline');
+    return response(provider, request.kind === 'season');
+  }, registry));
+  for (const query of [request, seasonRequest]) {
+    const result = await client.load(query);
+    assert.equal(result.provenance.provider, 'kitsu');
+    assert.deepEqual(result.provenance.failedProviders, ['AniList', 'Jikan']);
+    assert.equal(result.data.items[0].id, 42);
+  }
+  assert.deepEqual(calls, ['anilist', 'jikan', 'kitsu', 'kitsu']);
+});
+
+test('selected provider order applies to new requests without joining an older pending order', async () => {
+  const registry: CatalogProvider[] = [
+    { id: 'anilist', label: 'AniList', capabilities: ['search'] },
+    { id: 'jikan', label: 'Jikan', capabilities: ['search'] },
+    { id: 'kitsu', label: 'Kitsu', capabilities: ['search'] }
+  ];
+  let releaseAniList!: () => void;
+  const calls: string[] = [];
+  const client = createCatalogCoordinator(backend((provider) => {
+    calls.push(provider);
+    if (provider === 'anilist') return new Promise((resolve) => { releaseAniList = () => resolve(response(provider)); });
+    return response(provider);
+  }, registry));
+
+  const oldOrder = client.load(request, ['anilist', 'jikan', 'kitsu']);
+  const newOrder = client.load(request, ['kitsu', 'jikan', 'anilist']);
+  assert.notEqual(oldOrder, newOrder);
+  assert.equal((await newOrder).provenance.provider, 'kitsu');
+  releaseAniList();
+  assert.equal((await oldOrder).provenance.provider, 'anilist');
+  assert.deepEqual(calls, ['anilist', 'kitsu']);
 });
 
 test('new registered providers work without coordinator changes; unsupported capabilities are skipped', async () => {
@@ -185,12 +227,16 @@ test('legacy saved seasons remain usable without being re-dated', async () => {
 });
 
 test('preview adapters expose the same contract and canonical fixture identities', async () => {
-  assert.deepEqual(await callPreviewBackend('catalog_providers'), providers);
+  const previewProviders: CatalogProvider[] = [...providers, { id: 'kitsu', label: 'Kitsu', capabilities: ['search', 'season'] }];
+  assert.deepEqual(await callPreviewBackend('catalog_providers'), previewProviders);
   const primary = await callPreviewBackend('catalog_request', { provider: 'anilist', request: { kind: 'search', query: 'Black' } });
   const alternative = await callPreviewBackend('catalog_request', { provider: 'jikan', request: { kind: 'search', query: 'Black' } });
+  const kitsu = await callPreviewBackend('catalog_request', { provider: 'kitsu', request: { kind: 'search', query: 'Black' } });
   const normalizedPrimary = normalizeCatalogResponse(primary, 'anilist', request);
   const normalizedAlternative = normalizeCatalogResponse(alternative, 'jikan', request);
+  const normalizedKitsu = normalizeCatalogResponse(kitsu, 'kitsu', request);
   assert.ok(normalizedPrimary?.items.length);
   assert.deepEqual(normalizedPrimary?.items, normalizedAlternative?.items);
+  assert.deepEqual(normalizedPrimary?.items, normalizedKitsu?.items);
   assert.equal(catalogSourceLabel({ provider: 'jikan', label: 'Jikan', fetchedAt: initialTime, cache: 'stale' }, initialTime + 2 * 24 * 60 * 60_000), 'Jikan · saved 2d ago');
 });
