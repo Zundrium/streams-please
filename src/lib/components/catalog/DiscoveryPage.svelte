@@ -4,8 +4,6 @@
   import {
     Check,
     CheckCircle2,
-    ChevronLeft,
-    ChevronRight,
     Clapperboard,
     Clock3,
     Film,
@@ -13,30 +11,24 @@
     Meh,
     Play,
     RectangleHorizontal,
-    RefreshCw,
-    ThumbsDown,
-    Tv2
+    ThumbsDown
   } from '@lucide/svelte';
-  import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert';
   import { Badge } from '$lib/components/ui/badge';
   import { Button } from '$lib/components/ui/button';
   import { Switch } from '$lib/components/ui/switch';
-  import AnimatedProgress from '$lib/components/AnimatedProgress.svelte';
-  import ContextToolbar from '$lib/components/ContextToolbar.svelte';
-  import RevealFrame from '$lib/components/RevealFrame.svelte';
-  import RevealImage from '$lib/components/RevealImage.svelte';
+  import AnimatedProgress from '$lib/components/shared/AnimatedProgress.svelte';
+  import CatalogLoading from '$lib/components/catalog/CatalogLoading.svelte';
+  import CatalogNotice from '$lib/components/catalog/CatalogNotice.svelte';
+  import SeasonNavigator from '$lib/components/catalog/SeasonNavigator.svelte';
+  import ContextToolbar from '$lib/components/shared/ContextToolbar.svelte';
+  import RevealFrame from '$lib/components/shared/RevealFrame.svelte';
+  import RevealImage from '$lib/components/shared/RevealImage.svelte';
   import { isTauri } from '$lib/backend';
-  import {
-    currentSeason,
-    loadProviderMappings,
-    matchSubsPleaseSeason,
-    saveProviderMapping,
-    shiftSeason
-  } from '$lib/catalog';
+  import { currentSeason, preferredTitle, saveProviderMapping, shiftSeason } from '$lib/catalog';
+  import { createSeasonCatalog } from '$lib/catalog/season.svelte';
   import { libraryEntryMatches } from '$lib/library';
   import { youtubeTrailerSearchPlaybackUrl } from '$lib/trailers';
   import {
-    DAY_ORDER,
     type AnimeSeason,
     type AniListSeasonResponse,
     type AniListSeasonShow,
@@ -101,26 +93,19 @@
   });
 
   const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Amsterdam';
-  const weekday = new Intl.DateTimeFormat('en-US', { weekday: 'long', timeZone: timezone }).format(
-    new Date()
-  );
-  const todayIndex = Math.max(0, DAY_ORDER.indexOf(weekday as DayName));
-  const discoveryDayOrder = [
-    ...DAY_ORDER.slice(todayIndex),
-    ...DAY_ORDER.slice(0, todayIndex)
-  ];
   const initialSeason = currentSeason();
   const furthestSeason = shiftSeason(initialSeason.season, initialSeason.year, 1);
 
-  let selectedSeason = $state<AnimeSeason>(initialSeason.season);
-  let selectedYear = $state(initialSeason.year);
-  let catalog = $state<AniListSeasonResponse | null>(null);
-  let providerIndex = $state<SubsPleaseIndexResponse | null>(null);
-  let schedule = $state<SubsPleaseScheduleResponse | null>(null);
-  let catalogLoading = $state(true);
-  let providerLoading = $state(true);
-  let catalogError = $state('');
-  let providerError = $state('');
+  const seasonCatalog = createSeasonCatalog({
+    loadSeason: (season, year) => loadSeason(season, year),
+    loadIndex: () => loadIndex(),
+    loadSchedule: (requestedTimezone) => loadSchedule(requestedTimezone),
+    timezone,
+    initialSeason
+  });
+
+  let selectedSeason = $derived(seasonCatalog.season);
+  let selectedYear = $derived(seasonCatalog.year);
   let presentedCandidate = $state<DiscoveryCandidate | null>(null);
   let details = $state<SubsPleaseShowResponse | null>(null);
   let loadedCandidateKey = $state('');
@@ -137,8 +122,6 @@
   let discoveryPageElement = $state<HTMLElement | null>(null);
   let trailerSurface = $state<HTMLElement | null>(null);
   let decisionPending = $state(false);
-  let seasonRequestId = 0;
-  const detailsRequests = new Map<string, Promise<SubsPleaseShowResponse>>();
 
   let selectedIsCurrentSeason = $derived(
     selectedSeason === initialSeason.season && selectedYear === initialSeason.year
@@ -147,39 +130,35 @@
     seasonOrdinal(selectedSeason, selectedYear) <
       seasonOrdinal(furthestSeason.season, furthestSeason.year)
   );
-  let discoveryLoading = $derived(catalogLoading || providerLoading);
-  let discoveryError = $derived(catalogError || providerError);
-  let allCandidates = $derived.by((): DiscoveryCandidate[] => {
-    if (!catalog || !providerIndex) return [];
-    const matches = matchSubsPleaseSeason(
-      catalog.shows,
-      providerIndex.shows,
-      loadProviderMappings()
-    );
-    return catalog.shows.flatMap((anime): DiscoveryCandidate[] => {
-      const match = matches.get(anime.id);
-      if (!match || hasSeriesPrequel(anime) || isObviousSequelTitle(preferredTitle(anime))) {
-        return [];
-      }
-      const scheduled = scheduledProvider(match.provider.page);
+  let discoveryLoading = $derived(
+    seasonCatalog.catalogLoading || seasonCatalog.providerLoading
+  );
+  let discoveryError = $derived(seasonCatalog.catalogError || seasonCatalog.providerError);
+  let allCandidates = $derived.by((): DiscoveryCandidate[] =>
+    seasonCatalog.seasonMatches.flatMap((match): DiscoveryCandidate[] => {
+      const anime = match.anime;
+      if (hasSeriesPrequel(anime) || isObviousSequelTitle(preferredTitle(anime))) return [];
       return [{
         anime,
         show: {
           title: preferredTitle(anime),
           page: match.provider.page,
           image_url: posterUrl(
-            anime.coverImage?.extraLarge ?? anime.coverImage?.large ?? scheduled?.show.image_url ?? ''
+            anime.coverImage?.extraLarge ??
+              anime.coverImage?.large ??
+              match.schedule?.image_url ??
+              ''
           ),
-          time: scheduled?.show.time ?? '',
+          time: match.schedule?.time ?? '',
           anilist_id: anime.id,
-          subsplease_id: scheduled?.show.subsplease_id
+          subsplease_id: match.schedule?.subsplease_id
         },
         season: selectedSeason,
         year: selectedYear,
-        day: scheduled?.day
+        day: match.day
       }];
-    });
-  });
+    })
+  );
   let eligibleCandidates = $derived(
     allCandidates.filter(({ show }) => !metadataSequelSlugs.includes(show.page))
   );
@@ -260,7 +239,7 @@
   });
 
   onMount(() => {
-    void Promise.all([refreshSchedule(), refreshProviderIndex(), refreshSeason()]);
+    void seasonCatalog.load();
 
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape' && trailerTheaterMode) {
@@ -268,7 +247,10 @@
       }
     };
     window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
+    return () => {
+      seasonCatalog.dispose();
+      window.removeEventListener('keydown', onKeyDown);
+    };
   });
 
   $effect(() => {
@@ -341,17 +323,6 @@
   });
 
   $effect(() => {
-    const nextCandidate = candidates[1];
-    if (!nextCandidate) return;
-
-    void requestCandidateDetails(nextCandidate)
-      .then((nextDetails) => {
-        if (nextDetails.has_series_prequel) excludeMetadataSequel(nextCandidate.show.page);
-      })
-      .catch(() => undefined);
-  });
-
-  $effect(() => {
     const key = presentedCandidateKey;
     if (!presentedDetailsReady || !key) {
       mediaRevealCandidateKey = '';
@@ -414,73 +385,12 @@
   function requestCandidateDetails(
     candidate: DiscoveryCandidate
   ): Promise<SubsPleaseShowResponse> {
-    const key = candidateKey(candidate);
-    let request = detailsRequests.get(key);
-    if (request) return request;
-
-    request = loadShow(candidate.show.page, timezone, candidate.anime.id).catch((reason) => {
-      detailsRequests.delete(key);
-      throw reason;
-    });
-    detailsRequests.set(key, request);
-    return request;
+    return loadShow(candidate.show.page, timezone, candidate.anime.id);
   }
 
   function excludeMetadataSequel(slug: string): void {
     if (!metadataSequelSlugs.includes(slug)) {
       metadataSequelSlugs = [...metadataSequelSlugs, slug];
-    }
-  }
-
-  async function refreshSchedule() {
-    try {
-      schedule = await loadSchedule(timezone);
-    } catch {
-      schedule = null;
-    }
-  }
-
-  async function refreshProviderIndex(): Promise<void> {
-    providerLoading = true;
-    providerError = '';
-    try {
-      providerIndex = await loadIndex();
-    } catch (reason) {
-      providerIndex = null;
-      providerError = reason instanceof Error ? reason.message : String(reason);
-    } finally {
-      providerLoading = false;
-    }
-  }
-
-  async function refreshSeason(): Promise<void> {
-    const requestId = ++seasonRequestId;
-    const requestedSeason = selectedSeason;
-    const requestedYear = selectedYear;
-    catalogLoading = true;
-    catalogError = '';
-    try {
-      const nextCatalog = await loadSeason(requestedSeason, requestedYear);
-      if (
-        requestId !== seasonRequestId ||
-        requestedSeason !== selectedSeason ||
-        requestedYear !== selectedYear
-      ) {
-        return;
-      }
-      catalog = nextCatalog;
-    } catch (reason) {
-      if (
-        requestId !== seasonRequestId ||
-        requestedSeason !== selectedSeason ||
-        requestedYear !== selectedYear
-      ) {
-        return;
-      }
-      catalog = null;
-      catalogError = reason instanceof Error ? reason.message : String(reason);
-    } finally {
-      if (requestId === seasonRequestId) catalogLoading = false;
     }
   }
 
@@ -493,9 +403,7 @@
     ) {
       return;
     }
-    selectedSeason = next.season;
-    selectedYear = next.year;
-    void refreshSeason();
+    seasonCatalog.selectSeason(next.season, next.year);
   }
 
   function seasonOrdinal(season: AnimeSeason, year: number): number {
@@ -506,16 +414,6 @@
     return `${season[0]}${season.slice(1).toLowerCase()}`;
   }
 
-  function preferredTitle(show: AniListSeasonShow): string {
-    return (
-      show.title.english ??
-      show.title.userPreferred ??
-      show.title.romaji ??
-      show.title.native ??
-      `AniList #${show.id}`
-    );
-  }
-
   function hasSeriesPrequel(show: AniListSeasonShow): boolean {
     return (show.relations?.edges ?? []).some(
       (edge) =>
@@ -523,17 +421,6 @@
         edge.node?.type === 'ANIME' &&
         ['TV', 'TV_SHORT', 'ONA'].includes(edge.node.format ?? '')
     );
-  }
-
-  function scheduledProvider(slug: string): {
-    show: SubsPleaseScheduleShow;
-    day: DayName;
-  } | undefined {
-    for (const day of discoveryDayOrder) {
-      const show = schedule?.schedule[day]?.find((candidate) => candidate.page === slug);
-      if (show) return { show, day };
-    }
-    return undefined;
   }
 
   function candidateTiming(candidate: DiscoveryCandidate): string {
@@ -634,31 +521,16 @@
       {/if}
     </div>
 
-    <nav class="col-start-2 row-start-1 flex shrink-0 items-center gap-2 justify-self-center" aria-label="Discovery season">
-      <Button variant="ghost" size="icon" aria-label="Previous season" onclick={() => moveSeason(-1)}>
-        <ChevronLeft class="size-4" />
-      </Button>
-      <h1
-        aria-current={selectedIsCurrentSeason ? 'date' : undefined}
-        class={`min-w-28 rounded-full px-2 py-2.5 text-center text-sm font-semibold transition-colors sm:min-w-40 sm:px-5 ${
-          selectedIsCurrentSeason
-            ? 'bg-(--text) text-(--bg)'
-            : 'text-(--text)/75'
-        }`}
-      >
-        {seasonLabel(selectedSeason)} {selectedYear}
-      </h1>
-      <Button
-        variant="ghost"
-        size="icon"
-        aria-label="Next season"
-        title={canMoveNext ? 'Next season' : 'Discovery looks up to one season ahead'}
-        disabled={!canMoveNext}
-        onclick={() => moveSeason(1)}
-      >
-        <ChevronRight class="size-4" />
-      </Button>
-    </nav>
+    <SeasonNavigator
+      season={selectedSeason}
+      year={selectedYear}
+      current={selectedIsCurrentSeason}
+      {canMoveNext}
+      nextTitle={canMoveNext ? 'Next season' : 'Discovery looks up to one season ahead'}
+      ariaLabel="Discovery season"
+      onPrevious={() => moveSeason(-1)}
+      onNext={() => moveSeason(1)}
+    />
 
     <label class="col-start-3 row-start-1 flex items-center gap-2.5 justify-self-end text-sm font-medium text-(--text)/70">
       <span>Autoplay</span>
@@ -672,36 +544,60 @@
   </ContextToolbar>
 
   <div class="relative mx-auto flex min-h-[calc(100%_-_4rem)] max-w-[100rem] flex-col px-5 py-7 lg:px-10 lg:py-8">
-    {#if discoveryLoading}
-      <section class="min-h-[60vh]" aria-busy="true" role="status">
-        <span class="sr-only">Finding shows for {seasonLabel(selectedSeason)} {selectedYear}</span>
-      </section>
-    {:else if discoveryError}
+    {#if seasonCatalog.catalog?.cacheWarning || seasonCatalog.providerIndex?.cacheWarning}
+      <CatalogNotice kind="warning" title="Saved catalog" description={seasonCatalog.catalog?.cacheWarning ?? seasonCatalog.providerIndex?.cacheWarning} class="mb-6" />
+    {/if}
+    {#if seasonCatalog.scheduleError}
+      <CatalogNotice
+        kind="warning"
+        class="mb-6"
+        title="Schedule times unavailable"
+        description={seasonCatalog.scheduleError}
+        actionLabel="Retry schedule"
+        onAction={() => void seasonCatalog.refreshSchedule()}
+      />
+    {/if}
+
+    {#if seasonCatalog.catalogError || seasonCatalog.providerError}
       <section class="grid min-h-[60vh] place-items-center">
-        <Alert variant="destructive" class="max-w-xl">
-          <Tv2 class="size-5" />
-          <AlertTitle>Discovery is unavailable</AlertTitle>
-          <AlertDescription>{discoveryError}</AlertDescription>
-          <Button
-            variant="ghost"
-            size="sm"
-            class="mt-3 gap-2"
-            onclick={() => void Promise.all([refreshProviderIndex(), refreshSeason()])}
-          ><RefreshCw class="size-3.5" /> Try again</Button>
-        </Alert>
+        <div class="w-full max-w-xl space-y-4">
+          {#if seasonCatalog.catalogError}
+            <CatalogNotice
+              kind="error"
+              title="AniList season unavailable"
+              description={seasonCatalog.catalogError}
+              actionLabel="Retry AniList"
+              onAction={() => void seasonCatalog.refreshSeason()}
+            />
+          {/if}
+          {#if seasonCatalog.providerError}
+            <CatalogNotice
+              kind="error"
+              title="SubsPlease archive unavailable"
+              description={seasonCatalog.providerError}
+              actionLabel="Retry archive"
+              onAction={() => void seasonCatalog.refreshProvider()}
+            />
+          {/if}
+        </div>
       </section>
+    {:else if discoveryLoading}
+      <CatalogLoading
+        class="min-h-[60vh]"
+        label={`Finding shows for ${seasonLabel(selectedSeason)} ${selectedYear}`}
+      />
     {:else if currentCandidate && !presentedDetailsReady && !visibleDetailsError}
-      <section class="min-h-[60vh]" aria-busy="true" role="status">
-        <span class="sr-only">Loading the next show</span>
-      </section>
+      <CatalogLoading class="min-h-[60vh]" label="Loading the next show" />
     {:else if currentCandidate && !presentedDetailsReady && visibleDetailsError}
       <section class="grid min-h-[60vh] place-items-center">
-        <Alert variant="destructive" class="max-w-xl">
-          <Tv2 class="size-5" />
-          <AlertTitle>Show details unavailable</AlertTitle>
-          <AlertDescription>{visibleDetailsError}</AlertDescription>
-          <Button variant="ghost" size="sm" class="mt-3 gap-2" onclick={() => (detailsRetry += 1)}><RefreshCw class="size-3.5" /> Try again</Button>
-        </Alert>
+        <CatalogNotice
+          kind="error"
+          centered
+          title="Show details unavailable"
+          description={visibleDetailsError}
+          actionLabel="Try again"
+          onAction={() => (detailsRetry += 1)}
+        />
       </section>
     {:else if !currentCandidate}
       <section class="grid flex-1 place-items-center py-20 text-center">
@@ -817,12 +713,14 @@
         </div>
 
         {#if visibleDetailsError}
-          <Alert variant="destructive" class="mt-6">
-            <Tv2 class="size-5" />
-            <AlertTitle>The next show could not load</AlertTitle>
-            <AlertDescription>{visibleDetailsError}</AlertDescription>
-            <Button variant="ghost" size="sm" class="mt-3 gap-2" onclick={() => (detailsRetry += 1)}><RefreshCw class="size-3.5" /> Try again</Button>
-          </Alert>
+          <CatalogNotice
+            kind="error"
+            class="mt-6"
+            title="The next show could not load"
+            description={visibleDetailsError}
+            actionLabel="Try again"
+            onAction={() => (detailsRetry += 1)}
+          />
         {:else}
         <div class="mt-6 grid w-full grid-cols-1 gap-3 sm:grid-cols-3">
           <Button

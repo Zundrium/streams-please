@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
+  import { onDestroy, onMount } from 'svelte';
   import { BookOpen, Check, Play, Search, X } from '@lucide/svelte';
   import { Button } from '$lib/components/ui/button';
   import {
@@ -9,13 +9,15 @@
   } from '$lib/components/ui/input-group';
   import { Slider } from '$lib/components/ui/slider';
   import { Spinner } from '$lib/components/ui/spinner';
-  import AnimatedProgress from '$lib/components/AnimatedProgress.svelte';
-  import AnimePosterCard from '$lib/components/AnimePosterCard.svelte';
-  import ContextToolbar from '$lib/components/ContextToolbar.svelte';
-  import ShowDetailsPage from '$lib/components/ShowDetailsPage.svelte';
+  import AnimatedProgress from '$lib/components/shared/AnimatedProgress.svelte';
+  import AnimePosterCard from '$lib/components/catalog/AnimePosterCard.svelte';
+  import ContextToolbar from '$lib/components/shared/ContextToolbar.svelte';
+  import ShowDetailsPage from '$lib/components/catalog/ShowDetailsPage.svelte';
   import {
+    CONFIRMED_MATCH_CONFIDENCE,
     loadProviderMappings,
     matchSubsPleaseShow,
+    preferredTitle,
     saveProviderMapping
   } from '$lib/catalog';
   import {
@@ -61,7 +63,8 @@
     loadShow: (
       slug: string,
       timezone: string,
-      anilistId?: number
+      anilistId?: number,
+      includeMetadata?: boolean
     ) => Promise<SubsPleaseShowResponse>;
     onPlay: (request: EpisodePlaybackRequest) => Promise<void>;
     onPlayTrailer: (request: TrailerPlaybackRequest) => void | Promise<void>;
@@ -96,6 +99,8 @@
   let query = $state('');
   let quickPlaySlug = $state('');
   let quickPlayError = $state<{ slug: string; message: string } | null>(null);
+  let relationGeneration = 0;
+  let disposed = false;
   let libraryShows = $derived(entries.filter((entry) => entry.following));
   let checkedShows = $derived.by(() =>
     entries
@@ -129,6 +134,11 @@
   let totalAired = $derived(libraryShows.reduce((total, entry) => total + entry.availableEpisodes.length, 0));
   let totalWatched = $derived(libraryShows.reduce((total, entry) => total + watchedCount(entry), 0));
 
+  onDestroy(() => {
+    disposed = true;
+    relationGeneration += 1;
+  });
+
   onMount(() => {
     const posterShows = [...libraryShows, ...checkedShows];
     if (!posterShows.length) return;
@@ -137,7 +147,7 @@
     refreshing = true;
     void Promise.allSettled(
       posterShows.map(async (entry) => {
-        const details = await loadShow(entry.slug, timezone, entry.anilistId);
+        const details = await loadShow(entry.slug, timezone, entry.anilistId, false);
         if (!cancelled) onShowLoaded(details, scheduleShow(entry), entry.day);
       })
     ).finally(() => {
@@ -186,12 +196,14 @@
   }
 
   function openEntry(entry: LibraryEntry) {
+    relationGeneration += 1;
     detailHistory = [];
     selectedDay = entry.day;
     selectedShow = scheduleShow(entry);
   }
 
   function goBack() {
+    relationGeneration += 1;
     const previous = detailHistory.at(-1);
     if (previous) {
       detailHistory = detailHistory.slice(0, -1);
@@ -203,17 +215,8 @@
     selectedDay = undefined;
   }
 
-  function relatedTitle(media: AniListRelationNode): string {
-    return (
-      media.title.english ??
-      media.title.userPreferred ??
-      media.title.romaji ??
-      media.title.native ??
-      `AniList #${media.id}`
-    );
-  }
-
   async function openRelatedShow(media: AniListRelationNode): Promise<void> {
+    const generation = ++relationGeneration;
     let nextShow: SubsPleaseScheduleShow;
     let nextDay: DayName | undefined;
     const libraryMatch = entries.find((entry) => entry.anilistId === media.id);
@@ -223,13 +226,14 @@
       nextDay = libraryMatch.day;
     } else {
       const providerIndex = await loadIndex();
+      if (disposed || generation !== relationGeneration) return;
       const match = matchSubsPleaseShow(media, providerIndex.shows, loadProviderMappings());
-      if (!match) {
-        throw new Error(`${relatedTitle(media)} is not available in the SubsPlease archive.`);
+      if (!match || match.confidence < CONFIRMED_MATCH_CONFIDENCE) {
+        throw new Error(`${preferredTitle(media)} is not available in the SubsPlease archive.`);
       }
       saveProviderMapping(media.id, match.provider.page);
       nextShow = {
-        title: relatedTitle(media),
+        title: preferredTitle(media),
         page: match.provider.page,
         image_url: media.coverImage?.extraLarge ?? media.coverImage?.large ?? '',
         time: '',
@@ -238,6 +242,7 @@
       nextDay = undefined;
     }
 
+    if (disposed || generation !== relationGeneration) return;
     if (selectedShow) {
       detailHistory = [...detailHistory, { show: selectedShow, day: selectedDay }];
     }

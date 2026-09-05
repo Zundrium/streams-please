@@ -1,6 +1,6 @@
 <script lang="ts">
   import { AlertCircle, Check, Database, Download, Languages, MonitorCog, Upload, UserRound } from '@lucide/svelte';
-  import ContextToolbar from '$lib/components/ContextToolbar.svelte';
+  import ContextToolbar from '$lib/components/shared/ContextToolbar.svelte';
   import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert';
   import { Button } from '$lib/components/ui/button';
   import { createLibraryExport, parseLibraryExport } from '$lib/library';

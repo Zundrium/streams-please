@@ -36,10 +36,11 @@
   import { Separator } from '$lib/components/ui/separator';
   import { Spinner } from '$lib/components/ui/spinner';
   import { Switch } from '$lib/components/ui/switch';
-  import RevealImage from '$lib/components/RevealImage.svelte';
-  import ContextToolbar from '$lib/components/ContextToolbar.svelte';
-  import TasteIndicator from '$lib/components/TasteIndicator.svelte';
+  import RevealImage from '$lib/components/shared/RevealImage.svelte';
+  import ContextToolbar from '$lib/components/shared/ContextToolbar.svelte';
+  import TasteIndicator from '$lib/components/catalog/TasteIndicator.svelte';
   import { isTauri } from '$lib/backend';
+  import { preferredTitle } from '$lib/catalog';
   import { buildEpisodeSupplements, episodeNumberKey } from '$lib/episodeMetadata';
   import {
     youtubeTrailerSearchPageUrl,
@@ -134,6 +135,7 @@
   let mediaRevealShowPage = $state('');
   let detailsLoading = $state(true);
   let detailsError = $state('');
+  let detailsRetry = $state(0);
   let episodeQuery = $state('');
   let episodeLimit = $state(18);
   let playingKey = $state('');
@@ -210,6 +212,7 @@
   $effect(() => {
     const activeShow = show;
     const activeDay = day;
+    detailsRetry;
     let cancelled = false;
     details = null;
     loadedShowPage = '';
@@ -354,16 +357,6 @@
       .replace(/(^|\s)\S/g, (letter) => letter.toUpperCase());
   }
 
-  function relatedTitle(media: AniListRelationNode): string {
-    return (
-      media.title.english ??
-      media.title.userPreferred ??
-      media.title.romaji ??
-      media.title.native ??
-      `AniList #${media.id}`
-    );
-  }
-
   async function openRelatedShow(media: AniListRelationNode): Promise<void> {
     relationNavigationId = media.id;
     relationError = '';
@@ -471,6 +464,7 @@
         <Tv2 class="size-5" />
         <AlertTitle>Show unavailable</AlertTitle>
         <AlertDescription>{detailsError}</AlertDescription>
+        <Button variant="ghost" size="sm" class="mt-4" onclick={() => (detailsRetry += 1)}>Try again</Button>
       </Alert>
     </div>
   {:else if detailsReady && details}
@@ -510,8 +504,8 @@
                   size="sm"
                   class="h-8 gap-1.5 rounded-full border-white/12 bg-black/18 px-3 text-xs text-white/68 backdrop-blur hover:bg-white/10 hover:text-white"
                   disabled={relationNavigationId !== null}
-                  aria-label={`Open prequel ${relatedTitle(media)}`}
-                  title={relatedTitle(media)}
+                  aria-label={`Open prequel ${preferredTitle(media)}`}
+                  title={preferredTitle(media)}
                   onclick={() => void openRelatedShow(media)}
                 >
                   {#if relationNavigationId === media.id}
@@ -528,8 +522,8 @@
                   size="sm"
                   class="h-8 gap-1.5 rounded-full border-white/12 bg-black/18 px-3 text-xs text-white/68 backdrop-blur hover:bg-white/10 hover:text-white"
                   disabled={relationNavigationId !== null}
-                  aria-label={`Open sequel ${relatedTitle(media)}`}
-                  title={relatedTitle(media)}
+                  aria-label={`Open sequel ${preferredTitle(media)}`}
+                  title={preferredTitle(media)}
                   onclick={() => void openRelatedShow(media)}
                 >
                   Sequel

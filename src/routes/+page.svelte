@@ -1,5 +1,5 @@
 <script lang="ts">
-  import StreamsPleaseApp from '$lib/components/StreamsPleaseApp.svelte';
+  import StreamsPleaseApp from '$lib/components/app/StreamsPleaseApp.svelte';
 </script>
 
 <svelte:head>

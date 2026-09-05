@@ -251,6 +251,7 @@ export interface AniListSeasonShow extends AniListMatchableMedia {
 }
 
 export interface AniListSeasonResponse {
+  cacheWarning?: string;
   season: AnimeSeason;
   year: number;
   shows: AniListSeasonShow[];
@@ -262,6 +263,7 @@ export interface SubsPleaseIndexShow {
 }
 
 export interface SubsPleaseIndexResponse {
+  cacheWarning?: string;
   shows: SubsPleaseIndexShow[];
 }
 

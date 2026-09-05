@@ -359,10 +359,19 @@ export function entryFromShow(
     slug: details.slug || scheduleShow.page,
     subspleaseId:
       details.subsplease_id ?? scheduleShow.subsplease_id ?? previous?.subspleaseId,
-    title: details.title || scheduleShow.title,
-    imageUrl: details.image_url || scheduleShow.image_url,
-    bannerImageUrl: details.banner_image_url,
-    synopsis: details.synopsis || previous?.synopsis,
+    title:
+      previous && !details.metadata_id
+        ? previous.title
+        : details.title || scheduleShow.title,
+    imageUrl:
+      previous && !details.metadata_id
+        ? previous.imageUrl
+        : details.image_url || scheduleShow.image_url,
+    bannerImageUrl: details.banner_image_url ?? previous?.bannerImageUrl,
+    synopsis:
+      previous && !details.metadata_id
+        ? previous.synopsis ?? details.synopsis
+        : details.synopsis || previous?.synopsis,
     genres: details.genres ?? previous?.genres,
     year: details.year ?? previous?.year,
     trailer: details.trailer ?? previous?.trailer,
@@ -373,7 +382,7 @@ export function entryFromShow(
     checkedAt: previous?.checkedAt,
     day: day ?? previous?.day,
     airingTime: scheduleShow.time || previous?.airingTime,
-    episodeCount: details.episode_count,
+    episodeCount: details.episode_count ?? previous?.episodeCount,
     availableEpisodes: sortEpisodeNumbers(
       unique(Object.values(details.episode ?? {}).map((release) => release.episode))
     ),

@@ -3,7 +3,7 @@
   import { Button } from '$lib/components/ui/button';
   import { Card } from '$lib/components/ui/card';
   import { Spinner } from '$lib/components/ui/spinner';
-  import RevealImage from '$lib/components/RevealImage.svelte';
+  import RevealImage from '$lib/components/shared/RevealImage.svelte';
 
   let {
     title,

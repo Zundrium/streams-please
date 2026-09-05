@@ -13,7 +13,8 @@ StreamsPlease is a local Tauri v2 desktop player for legal or personally owned B
 - live download, upload, and peer status, plus pausing P2P and stopping the session;
 - a local media cache in the OS-specific app cache directory;
 - AniList-first seasonal browsing with previous/next season navigation;
-- global AniList title search with SubsPlease archive availability checks;
+- global AniList title search with SubsPlease archive availability checks and archive-only fallback;
+- direct SubsPlease archive browsing without an AniList dependency;
 - SubsPlease availability filtering, weekly release times, and historical episode access;
 - Discord-capturable YouTube trailer search through the same in-process libmpv player;
 - signed startup updates from private GitHub releases;
@@ -34,7 +35,7 @@ The stream server binds exclusively to `127.0.0.1`, selects a random available p
 
 ## Requirements
 
-- Node.js 20 or newer (for the Lily CLI);
+- Node.js 24 or newer (including the built-in TypeScript regression test runner);
 - the current stable Rust toolchain;
 - the Tauri v2 platform prerequisites (on Windows: WebView2 and MSVC build tools);
 - the bundled libmpv, yt-dlp, and Deno runtimes in `src-tauri/lib` (included in this checkout for Windows x86-64).
@@ -59,7 +60,9 @@ Checks:
 
 ```powershell
 npm run check
+npm test
 npm run build
+cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
 cargo test --manifest-path src-tauri/Cargo.toml
 cargo check --manifest-path src-tauri/Cargo.toml
 ```
@@ -91,12 +94,14 @@ Set `STREAMSPLEASE_GITHUB_TOKEN` as a GitHub Actions secret containing a fine-gr
 4. Use **External subtitle** to add a local subtitle file.
 5. Pause P2P or stop the session when you are done. Stopping forgets the torrent but preserves cache files that have already been written.
 
-The **Search** tab searches AniList across seasons and checks every result against the
-SubsPlease show archive. Confirmed and possible title matches identify the corresponding
-SubsPlease entry, while unmatched results remain visible so availability is explicit.
+The **Search** tab searches AniList across seasons and checks each result against the
+SubsPlease archive. Possible matches are labeled for review and never saved as confirmed
+AniList identities. If AniList is unavailable or has no results, matching archive titles remain
+accessible without pretending their metadata has been verified.
 
 The **SubsPlease** tab starts with an AniList season and filters it against the SubsPlease
-show archive. Use the previous and next controls to browse other seasons. AniList IDs are
+show archive. Use the previous and next controls to browse other seasons, or choose **Archive**
+to browse SubsPlease directly, including when AniList is unavailable. AniList IDs are
 the canonical identity for saved shows; the optional SubsPlease slug and numeric ID are
 retained only for weekly timing and episode retrieval. Selecting an episode passes the
 chosen magnet link to the same local player flow.
@@ -105,7 +110,29 @@ Select a trailer from Discovery, Library, or SubsPlease details to open it in St
 
 The **Legal Sintel demo** button enters a Creative Commons/open movie torrent so you can test the flow without commercial content.
 
+## Source organization
+
+- `src/lib/components/app/`: app orchestration, navigation, window controls, and updates.
+- `src/lib/components/catalog/`: Search, Discovery, SubsPlease, show details, and shared catalog components.
+- `src/lib/components/{library,player,settings,shared}/`: feature UI and reusable presentation.
+- `src/lib/components/ui/`: locally owned Lily primitives.
+- `src/lib/catalog/`: typed request client, validated storage, title matching, and cancellable page state.
+- `src/lib/backend.ts` and `src/lib/backend/preview.ts`: desktop invocation and deterministic preview fixtures.
+- `src-tauri/src/catalog/`: independent AniList and SubsPlease providers, validators, and unit tests.
+- `src-tauri/src/lib.rs`: torrent engine, loopback stream server, runtime setup, and command registration.
+- `tests/`: Node regression tests for matching, caches, async state, preview identity, and library refresh.
+
+Catalog calls share bounded caches and concurrency limits. AniList requests are paced and stop
+sending during a 403 access block or 429 cooldown; a retry never attempts to bypass restrictions.
+Provider errors remain distinct from empty results. Recently saved seasons/archive data can be
+shown with a warning during an outage, and library episode refresh skips optional AniList metadata.
+The former fuzzy provider-map cache is intentionally not reused; saved library data is preserved.
+Browser preview catalog data is deterministic and isolated from desktop caches. Remote artwork and
+trailer embeds still need network access; preview episode buttons use the legal Sintel fixture.
+
 ## Known limitations
+
+- An AniList outage can prevent fresh global search, seasonal Discovery, or optional metadata enrichment. Direct SubsPlease archive browsing and saved library episodes remain available when SubsPlease is reachable.
 
 - The bundled libmpv integration is currently tested most thoroughly on Windows x86-64; macOS and Linux builds need platform-specific libmpv libraries.
 - In this initial version, the UI manages one active episode at a time; the Rust engine can manage multiple torrents.

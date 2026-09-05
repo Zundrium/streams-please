@@ -17,16 +17,11 @@
   import {
     AlertCircle,
     AudioLines,
-    BookOpen,
-    CalendarDays,
     Check,
-    CircleUserRound,
     FileVideo2,
     Languages,
     MonitorPlay,
     Play,
-    Search,
-    Sparkles,
     X
   } from '@lucide/svelte';
   import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert';
@@ -44,15 +39,9 @@
   } from '$lib/components/ui/select';
   import { Spinner } from '$lib/components/ui/spinner';
   import { Switch } from '$lib/components/ui/switch';
-  import { Tabs, TabsList, TabsTrigger } from '$lib/components/ui/tabs';
+  import AppNavigation from '$lib/components/app/AppNavigation.svelte';
   import { callBackend, isTauri } from '$lib/backend';
-  import {
-    currentSeason,
-    loadCachedProviderIndex,
-    loadCachedSeason,
-    saveCachedProviderIndex,
-    saveCachedSeason
-  } from '$lib/catalog';
+  import { createCatalogClient } from '$lib/catalog/client';
   import {
     entryFromDiscovery,
     entryFromShow,
@@ -69,26 +58,21 @@
     type TrailerPlaybackState
   } from '$lib/trailer-player';
   import { isYoutubeTrailerSearchPlaybackUrl } from '$lib/trailers';
-  import AccountSettingsPage from '$lib/components/AccountSettingsPage.svelte';
-  import DiscoveryPage from '$lib/components/DiscoveryPage.svelte';
-  import LibraryPage from '$lib/components/LibraryPage.svelte';
-  import NextEpisodePrompt from '$lib/components/NextEpisodePrompt.svelte';
-  import PlayerTransport from '$lib/components/PlayerTransport.svelte';
-  import RevealImage from '$lib/components/RevealImage.svelte';
-  import SearchPage from '$lib/components/SearchPage.svelte';
-  import SubsPleasePage from '$lib/components/SubsPleasePage.svelte';
-  import StreamsPleaseLogo from '$lib/components/StreamsPleaseLogo.svelte';
-  import TasteIndicator from '$lib/components/TasteIndicator.svelte';
-  import UpdateStatus from '$lib/components/UpdateStatus.svelte';
-  import WindowControls from '$lib/components/WindowControls.svelte';
+  import AccountSettingsPage from '$lib/components/settings/AccountSettingsPage.svelte';
+  import DiscoveryPage from '$lib/components/catalog/DiscoveryPage.svelte';
+  import LibraryPage from '$lib/components/library/LibraryPage.svelte';
+  import NextEpisodePrompt from '$lib/components/player/NextEpisodePrompt.svelte';
+  import PlayerTransport from '$lib/components/player/PlayerTransport.svelte';
+  import RevealImage from '$lib/components/shared/RevealImage.svelte';
+  import SearchPage from '$lib/components/catalog/SearchPage.svelte';
+  import SubsPleasePage from '$lib/components/catalog/SubsPleasePage.svelte';
+  import TasteIndicator from '$lib/components/catalog/TasteIndicator.svelte';
+  import UpdateStatus from '$lib/components/app/UpdateStatus.svelte';
   import { checkForUpdate, installPendingUpdate } from '$lib/updates';
   import { DAY_ORDER } from '$lib/types';
   import type {
     AddTorrentResponse,
-    AnimeSeason,
     AppUpdateStatus,
-    AniListSearchResult,
-    AniListSeasonResponse,
     AppView,
     CurrentTorrent,
     DayName,
@@ -103,7 +87,6 @@
     RuntimeInfo,
     SubtitleLanguage,
     SubsPleaseDownload,
-    SubsPleaseIndexResponse,
     SubsPleaseRelease,
     SubsPleaseScheduleResponse,
     SubsPleaseScheduleShow,
@@ -150,13 +133,14 @@
     timer: number;
   };
 
-  const seasonCatalogRequests = new Map<string, Promise<AniListSeasonResponse>>();
-  let subspleaseIndexRequest: Promise<SubsPleaseIndexResponse> | null = null;
-  const PROVIDER_INDEX_CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
-  const CURRENT_SEASON_CACHE_MAX_AGE_MS = 15 * 60 * 1000;
-  const FUTURE_SEASON_CACHE_MAX_AGE_MS = 60 * 60 * 1000;
-  const PAST_SEASON_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
-  const SEASON_ORDER: AnimeSeason[] = ['WINTER', 'SPRING', 'SUMMER', 'FALL'];
+  const catalogClient = createCatalogClient();
+  const {
+    loadSearch: loadAniListSearch,
+    loadSeason: loadAniListSeason,
+    loadIndex: loadSubsPleaseIndex,
+    loadSchedule: loadSubsPleaseSchedule,
+    loadShow: loadSubsPleaseShow
+  } = catalogClient;
 
   const OBSERVED_PROPERTIES = [
     ['pause', 'flag'],
@@ -1927,71 +1911,6 @@
     requestedShowSlug = '';
   }
 
-  function loadSubsPleaseSchedule(timezone: string) {
-    return callBackend<SubsPleaseScheduleResponse>('subsplease_schedule', { timezone });
-  }
-
-  function loadSubsPleaseIndex() {
-    if (!subspleaseIndexRequest) {
-      const cached = loadCachedProviderIndex(PROVIDER_INDEX_CACHE_MAX_AGE_MS);
-      subspleaseIndexRequest = cached
-        ? Promise.resolve(cached)
-        : callBackend<SubsPleaseIndexResponse>('subsplease_index')
-            .then((response) => {
-              saveCachedProviderIndex(response);
-              return response;
-            })
-            .catch((reason) => {
-              subspleaseIndexRequest = null;
-              throw reason;
-            });
-    }
-    return subspleaseIndexRequest;
-  }
-
-  function seasonCacheMaxAge(season: AnimeSeason, year: number): number {
-    const current = currentSeason();
-    const requestedIndex = year * 4 + SEASON_ORDER.indexOf(season);
-    const currentIndex = current.year * 4 + SEASON_ORDER.indexOf(current.season);
-    if (requestedIndex === currentIndex) return CURRENT_SEASON_CACHE_MAX_AGE_MS;
-    return requestedIndex < currentIndex
-      ? PAST_SEASON_CACHE_MAX_AGE_MS
-      : FUTURE_SEASON_CACHE_MAX_AGE_MS;
-  }
-
-  function loadAniListSearch(query: string) {
-    return callBackend<AniListSearchResult[]>('anilist_search', { query });
-  }
-
-  function loadAniListSeason(season: AnimeSeason, year: number) {
-    const key = `${season}:${year}`;
-    let request = seasonCatalogRequests.get(key);
-    if (!request) {
-      const cached = loadCachedSeason(season, year, seasonCacheMaxAge(season, year));
-      request = cached
-        ? Promise.resolve(cached)
-        : callBackend<AniListSeasonResponse>('anilist_season', { season, year })
-            .then((response) => {
-              saveCachedSeason(response);
-              return response;
-            })
-            .catch((reason) => {
-              seasonCatalogRequests.delete(key);
-              throw reason;
-            });
-      seasonCatalogRequests.set(key, request);
-    }
-    return request;
-  }
-
-  function loadSubsPleaseShow(slug: string, timezone: string, anilistId?: number) {
-    return callBackend<SubsPleaseShowResponse>('subsplease_show', {
-      slug,
-      timezone,
-      anilistId
-    });
-  }
-
   async function togglePlayback() {
     if (!current) return;
     const paused = !playback.paused;
@@ -2216,40 +2135,9 @@
 
 </script>
 
-<div class="grid h-screen min-h-0 overflow-hidden text-(--text) {immersiveMode ? 'grid-rows-[minmax(0,1fr)]' : 'grid-rows-[4rem_minmax(0,1fr)]'}">
+<div class="grid h-screen min-h-0 grid-cols-[minmax(0,1fr)] overflow-hidden text-(--text) {immersiveMode ? 'grid-rows-[minmax(0,1fr)]' : 'grid-rows-[4rem_minmax(0,1fr)]'}">
   {#if !immersiveMode}
-  <header class="flex items-stretch gap-4 border-b border-(--text)/8 bg-(--bg) px-4" data-tauri-drag-region>
-    <div class="flex min-w-0 shrink-0 items-center px-2" data-tauri-drag-region>
-      <StreamsPleaseLogo />
-    </div>
-
-    <Tabs
-      value={activeView}
-      onValueChange={(value) => void changeActiveView(value as AppView)}
-      class="h-full min-w-0"
-    >
-      <TabsList class="h-full gap-0 rounded-none bg-transparent p-0">
-        <TabsTrigger value="player" class="h-full gap-2 rounded-none border-b-2 border-transparent px-5 py-0 shadow-none data-[state=active]:border-(--text) data-[state=active]:bg-(--text)/4 data-[state=active]:shadow-none"><MonitorPlay class="size-4" /> Player</TabsTrigger>
-        <TabsTrigger value="library" class="h-full gap-2 rounded-none border-b-2 border-transparent px-5 py-0 shadow-none data-[state=active]:border-(--text) data-[state=active]:bg-(--text)/4 data-[state=active]:shadow-none"><BookOpen class="size-4" /> Library</TabsTrigger>
-        <TabsTrigger value="search" class="h-full gap-2 rounded-none border-b-2 border-transparent px-5 py-0 shadow-none data-[state=active]:border-(--text) data-[state=active]:bg-(--text)/4 data-[state=active]:shadow-none"><Search class="size-4" /> Search</TabsTrigger>
-        <TabsTrigger value="discovery" class="h-full gap-2 rounded-none border-b-2 border-transparent px-5 py-0 shadow-none data-[state=active]:border-(--text) data-[state=active]:bg-(--text)/4 data-[state=active]:shadow-none"><Sparkles class="size-4" /> Discovery</TabsTrigger>
-        <TabsTrigger value="subsplease" class="h-full gap-2 rounded-none border-b-2 border-transparent px-5 py-0 shadow-none data-[state=active]:border-(--text) data-[state=active]:bg-(--text)/4 data-[state=active]:shadow-none"><CalendarDays class="size-4" /> SubsPlease</TabsTrigger>
-      </TabsList>
-    </Tabs>
-
-    <div class="min-w-4 flex-1" data-tauri-drag-region></div>
-    <Button
-      variant="ghost"
-      size="icon"
-      class={`my-auto shrink-0 ${activeView === 'account' ? 'bg-(--text)/10 text-(--text)' : ''}`}
-      aria-label="Account settings"
-      aria-current={activeView === 'account' ? 'page' : undefined}
-      onclick={() => void changeActiveView('account')}
-    ><CircleUserRound class="size-5" /></Button>
-    {#if isTauri()}
-      <WindowControls />
-    {/if}
-  </header>
+  <AppNavigation {activeView} onNavigate={(view) => void changeActiveView(view)} />
   {/if}
 
   <div bind:this={contentViewport} class="relative min-h-0 overflow-hidden">

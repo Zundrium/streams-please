@@ -19,7 +19,7 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           cache: npm
 
       - uses: dtolnay/rust-toolchain@stable
@@ -29,6 +29,15 @@ jobs:
 
       - name: Check frontend
         run: npm run check
+
+      - name: Test catalog behavior
+        run: npm test
+
+      - name: Check Rust formatting
+        run: cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
+
+      - name: Test backend
+        run: cargo test --manifest-path src-tauri/Cargo.toml --lib
 
       - name: Build and upload signed Windows update
         uses: tauri-apps/tauri-action@v1

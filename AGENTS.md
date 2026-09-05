@@ -35,15 +35,17 @@ Apply the same pattern to other commands below.
 ## Source map
 
 - `src/routes/`: static, client-only SvelteKit entry points. SSR is disabled.
-- `src/lib/components/StreamsPleaseApp.svelte`: app orchestration, native-player lifecycle, torrent playback, and top-level state.
-- `src/lib/components/*Page.svelte`: feature-level UI.
+- `src/lib/components/app/StreamsPleaseApp.svelte`: app orchestration, native-player lifecycle, torrent playback, and top-level state.
+- `src/lib/components/{catalog,library,settings}/*Page.svelte`: feature-level UI.
 - `src/lib/components/ui/`: locally installed Lily component source.
-- `src/lib/backend.ts`: typed Tauri invocation boundary plus browser-preview mocks.
+- `src/lib/backend.ts`, `src/lib/backend/preview.ts`: Tauri invocation boundary and deterministic browser-preview fixtures.
 - `src/lib/types.ts`: shared frontend contracts for Rust responses and UI state.
-- `src/lib/catalog.ts`: AniList/SubsPlease matching and browser cache logic.
+- `src/lib/catalog/`: shared request client, cancellable page state, AniList/SubsPlease matching, and validated browser caches.
 - `src/lib/library.ts`, `src/lib/settings.ts`: local persistence and domain helpers.
 - `src/app.css`: Tailwind v4 entry point, Lily tokens, and global media/motion behavior.
-- `src-tauri/src/lib.rs`: Tauri commands, input validation, provider requests, librqbit state, and the local stream server.
+- `src-tauri/src/lib.rs`: Tauri command registration, runtime setup, librqbit state, and the local stream server.
+- `src-tauri/src/catalog/`: independent AniList/SubsPlease clients, input validation, parsers, and provider tests.
+- `tests/`: frontend catalog and library regression tests using Node 24's built-in test runner.
 - `src-tauri/tauri.conf.json`: window, CSP, bundle resources, and frontend build integration.
 - `src-tauri/capabilities/default.json`: Tauri permissions.
 - `src-tauri/lib/`: pinned Windows libmpv and trailer-resolver runtimes; binaries are stored with Git LFS.
@@ -124,6 +126,7 @@ Frontend checks:
 
 ```powershell
 npm run check
+npm test
 npm run build
 ```
 

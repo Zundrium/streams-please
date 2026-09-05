@@ -1,8 +1,8 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import { Film } from '@lucide/svelte';
-  import RevealImage from '$lib/components/RevealImage.svelte';
-  import TasteIndicator from '$lib/components/TasteIndicator.svelte';
+  import RevealImage from '$lib/components/shared/RevealImage.svelte';
+  import TasteIndicator from '$lib/components/catalog/TasteIndicator.svelte';
   import type { DiscoveryVerdict } from '$lib/types';
 
   let {
@@ -23,7 +23,7 @@
     bottomLeft?: string;
     bottomRight?: string;
     notice?: string;
-    onOpen: () => void;
+    onOpen?: () => void;
     bottomLeftContent?: Snippet;
     posterOverlay?: Snippet;
     footer?: Snippet;
@@ -31,12 +31,14 @@
 </script>
 
 <article class="group relative min-w-0">
-  <button
-    type="button"
-    class="card-open-button absolute inset-0 z-0 rounded-xl focus-visible:outline-none"
-    aria-label={`Open ${title}`}
-    onclick={onOpen}
-  ></button>
+  {#if onOpen}
+    <button
+      type="button"
+      class="card-open-button absolute inset-0 z-0 rounded-xl focus-visible:outline-none"
+      aria-label={`Open ${title}`}
+      onclick={onOpen}
+    ></button>
+  {/if}
 
   <div
     class="poster-frame pointer-events-none relative z-10 block aspect-[2/3] overflow-hidden rounded-xl bg-(--text)/5 ring-1 ring-white/6"
