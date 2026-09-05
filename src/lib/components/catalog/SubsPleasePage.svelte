@@ -29,6 +29,7 @@
   } from '$lib/catalog/season.svelte';
   import { libraryEntryMatches } from '$lib/library';
   import type { CatalogDetailsActions } from '$lib/catalog/contracts';
+  import { catalogSourceLabel } from '$lib/catalog/providers';
   import {
     DAY_ORDER,
     type AnimeSeason,
@@ -376,8 +377,11 @@
       {#if seasonCatalog.providerIndex?.cacheWarning}
         <CatalogNotice kind="warning" title="Saved archive" description={seasonCatalog.providerIndex.cacheWarning} class="mb-5" />
       {/if}
+      {#if mode === 'season' && seasonCatalog.catalog?.provenance}
+        <p class="mb-4 text-xs text-(--text)/45" role="status">{catalogSourceLabel(seasonCatalog.catalog.provenance)}</p>
+      {/if}
       {#if mode === 'season' && seasonCatalog.catalog?.cacheWarning}
-        <CatalogNotice kind="warning" title="Saved season" description={seasonCatalog.catalog.cacheWarning} class="mb-5" />
+        <CatalogNotice kind="warning" title="Catalog fallback" description={seasonCatalog.catalog.cacheWarning} class="mb-5" />
       {/if}
       {#if mode === 'archive'}
         <p class="text-xs text-(--text)/42">
@@ -492,9 +496,9 @@
           <CatalogNotice
             kind="error"
             class="mt-8"
-            title="AniList season unavailable"
+            title="Season catalog unavailable"
             description={seasonCatalog.catalogError}
-            actionLabel="Retry AniList"
+            actionLabel="Retry catalog"
             secondaryActionLabel="Browse the archive"
             onAction={() => void seasonCatalog.refreshSeason()}
             onSecondaryAction={() => selectMode('archive')}
@@ -522,7 +526,7 @@
           (seasonCatalog.providerLoading && !seasonCatalog.providerIndex)}
           <CatalogLoading
             label={seasonCatalog.catalogLoading
-              ? 'Loading AniList season'
+              ? 'Loading season catalog'
               : 'Loading SubsPlease availability'}
           />
         {:else}
@@ -562,7 +566,7 @@
               title={query ? 'No season titles match' : 'No confirmed SubsPlease matches found'}
               description={query
                 ? 'No confirmed seasonal title matches this search.'
-                : 'AniList loaded this season, but no title could be confidently matched to the SubsPlease archive.'}
+                : 'The season catalog loaded, but no title could be confidently matched to the SubsPlease archive.'}
             />
           {/if}
         {/if}

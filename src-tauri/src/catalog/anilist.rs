@@ -1,6 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::Mutex,
+    path::PathBuf,
+    sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
@@ -9,7 +10,10 @@ use serde_json::Value;
 use tauri::State;
 use tokio::sync::Semaphore;
 
-use super::CatalogState;
+use super::{
+    identity::IdentityResolver, AdapterFuture, CatalogAdapter, CatalogCapability, CatalogMedia,
+    CatalogProvider, CatalogRequest, CatalogResponse, CatalogState,
+};
 
 const ANILIST_ENDPOINT: &str = "https://graphql.anilist.co";
 const ANILIST_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
@@ -20,6 +24,7 @@ const ANILIST_DEFAULT_COOLDOWN_SECONDS: u64 = 30;
 const ANILIST_MAX_COOLDOWN_SECONDS: u64 = 5 * 60;
 const ANILIST_BLOCKED_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 const MAX_SEASON_PAGES: usize = 3;
+const CAPABILITIES: &[CatalogCapability] = &[CatalogCapability::Search, CatalogCapability::Season];
 const METADATA_FRAGMENT: &str = r#"
     fragment Metadata on Media {
         id
@@ -86,6 +91,11 @@ pub(super) struct AniListClient {
     http: reqwest::Client,
     in_flight: Semaphore,
     control: Mutex<RequestControl>,
+}
+
+pub(super) struct AniListAdapter {
+    client: Arc<AniListClient>,
+    identity: Arc<IdentityResolver>,
 }
 
 impl AniListClient {
@@ -283,6 +293,123 @@ impl AniListClient {
                 .request(&query, serde_json::json!({ "id": id }))
                 .await?,
         )
+    }
+
+    async fn season(&self, season: &str, year: i32) -> Result<Vec<Value>, String> {
+        let query = r#"
+            query ($season: MediaSeason!, $year: Int!) {
+                page1: Page(page: 1, perPage: 50) { media(type: ANIME, season: $season, seasonYear: $year, format_in: [TV, TV_SHORT, ONA], isAdult: false, sort: [POPULARITY_DESC, START_DATE]) { ...SeasonCard } }
+                page2: Page(page: 2, perPage: 50) { media(type: ANIME, season: $season, seasonYear: $year, format_in: [TV, TV_SHORT, ONA], isAdult: false, sort: [POPULARITY_DESC, START_DATE]) { ...SeasonCard } }
+                page3: Page(page: 3, perPage: 50) { media(type: ANIME, season: $season, seasonYear: $year, format_in: [TV, TV_SHORT, ONA], isAdult: false, sort: [POPULARITY_DESC, START_DATE]) { ...SeasonCard } }
+            }
+            fragment SeasonCard on Media {
+                id
+                idMal
+                title { romaji english native userPreferred }
+                synonyms
+                coverImage { extraLarge large color }
+                season
+                seasonYear
+                startDate { year month day }
+                endDate { year month day }
+                format
+                status
+                episodes
+                nextAiringEpisode { episode airingAt timeUntilAiring }
+                relations {
+                    edges {
+                        relationType
+                        node { id type format title { romaji english native userPreferred } }
+                    }
+                }
+            }
+        "#;
+        let response = self
+            .request(query, serde_json::json!({ "season": season, "year": year }))
+            .await?;
+        season_shows(&response)
+    }
+
+    async fn search(&self, query: &str) -> Result<Vec<Value>, String> {
+        validate_anilist_search(query)?;
+        let response = self
+            .request(
+                r#"
+                    query ($search: String!) {
+                        Page(page: 1, perPage: 10) {
+                            media(search: $search, type: ANIME, isAdult: false) {
+                                id
+                                idMal
+                                title { romaji english native userPreferred }
+                                synonyms
+                                coverImage { extraLarge large color }
+                                season
+                                seasonYear
+                                format
+                                status
+                                episodes
+                            }
+                        }
+                    }
+                "#,
+                serde_json::json!({ "search": query.trim() }),
+            )
+            .await?;
+        Ok(media_array(&response, "/data/Page/media", "search results")?.clone())
+    }
+}
+
+impl AniListAdapter {
+    pub(super) fn new(client: Arc<AniListClient>, identity: Arc<IdentityResolver>) -> Self {
+        Self { client, identity }
+    }
+
+    async fn normalize_and_learn(
+        &self,
+        values: Vec<Value>,
+        cache_dir: &std::path::Path,
+    ) -> Result<(Vec<CatalogMedia>, Vec<String>), String> {
+        let items = values
+            .into_iter()
+            .map(CatalogMedia::from_anilist)
+            .collect::<Result<Vec<_>, _>>()?;
+        let mappings = items
+            .iter()
+            .filter_map(|item| item.id_mal.map(|mal_id| (item.id, mal_id)))
+            .collect::<Vec<_>>();
+        let mut warnings = Vec::new();
+        if let Err(error) = self
+            .identity
+            .learn_anilist_mappings(&mappings, cache_dir)
+            .await
+        {
+            warnings.push(format!(
+                "AniList identity mappings could not be saved: {error}"
+            ));
+        }
+        Ok((items, warnings))
+    }
+}
+
+impl CatalogAdapter for AniListAdapter {
+    fn descriptor(&self) -> CatalogProvider {
+        CatalogProvider::new("anilist", "AniList", CAPABILITIES)
+    }
+
+    fn request<'a>(&'a self, request: CatalogRequest, cache_dir: PathBuf) -> AdapterFuture<'a> {
+        Box::pin(async move {
+            let (items, warnings) = match &request {
+                CatalogRequest::Search { query } => {
+                    let values = self.client.search(query).await?;
+                    self.normalize_and_learn(values, &cache_dir).await?
+                }
+                CatalogRequest::Season { season, year } => {
+                    let values = self.client.season(season.as_str(), *year).await?;
+                    self.normalize_and_learn(values, &cache_dir).await?
+                }
+            };
+            Ok(CatalogResponse::new("anilist", &request, items, warnings))
+        })
     }
 }
 
@@ -608,41 +735,10 @@ pub async fn anilist_season(
     year: i32,
 ) -> Result<Value, String> {
     let season = validate_anilist_season(&season, year)?;
-    let query = r#"
-        query ($season: MediaSeason!, $year: Int!) {
-            page1: Page(page: 1, perPage: 50) { media(type: ANIME, season: $season, seasonYear: $year, format_in: [TV, TV_SHORT, ONA], isAdult: false, sort: [POPULARITY_DESC, START_DATE]) { ...SeasonCard } }
-            page2: Page(page: 2, perPage: 50) { media(type: ANIME, season: $season, seasonYear: $year, format_in: [TV, TV_SHORT, ONA], isAdult: false, sort: [POPULARITY_DESC, START_DATE]) { ...SeasonCard } }
-            page3: Page(page: 3, perPage: 50) { media(type: ANIME, season: $season, seasonYear: $year, format_in: [TV, TV_SHORT, ONA], isAdult: false, sort: [POPULARITY_DESC, START_DATE]) { ...SeasonCard } }
-        }
-        fragment SeasonCard on Media {
-            id
-            title { romaji english native userPreferred }
-            synonyms
-            coverImage { extraLarge large color }
-            season
-            seasonYear
-            startDate { year month day }
-            endDate { year month day }
-            format
-            status
-            episodes
-            nextAiringEpisode { episode airingAt timeUntilAiring }
-            relations {
-                edges {
-                    relationType
-                    node { id type format title { romaji english native userPreferred } }
-                }
-            }
-        }
-    "#;
-    let response = state
-        .anilist
-        .request(query, serde_json::json!({ "season": season, "year": year }))
-        .await?;
     Ok(serde_json::json!({
         "season": season,
         "year": year,
-        "shows": season_shows(&response)?
+        "shows": state.anilist.season(season, year).await?
     }))
 }
 
@@ -651,33 +747,7 @@ pub async fn anilist_search(
     state: State<'_, CatalogState>,
     query: String,
 ) -> Result<Value, String> {
-    validate_anilist_search(&query)?;
-    let response = state
-        .anilist
-        .request(
-            r#"
-                query ($search: String!) {
-                    Page(page: 1, perPage: 10) {
-                        media(search: $search, type: ANIME, isAdult: false) {
-                            id
-                            title { romaji english native userPreferred }
-                            synonyms
-                            coverImage { extraLarge large color }
-                            season
-                            seasonYear
-                            format
-                            status
-                            episodes
-                        }
-                    }
-                }
-            "#,
-            serde_json::json!({ "search": query.trim() }),
-        )
-        .await?;
-    Ok(Value::Array(
-        media_array(&response, "/data/Page/media", "search results")?.clone(),
-    ))
+    Ok(Value::Array(state.anilist.search(&query).await?))
 }
 
 #[cfg(test)]

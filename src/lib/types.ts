@@ -182,7 +182,8 @@ export interface AniListMatchableMedia {
   synonyms?: string[];
 }
 
-export interface AniListSearchResult extends AniListMatchableMedia {
+export interface CatalogMedia extends AniListMatchableMedia {
+  idMal?: number;
   coverImage?: {
     extraLarge?: string;
     large?: string;
@@ -194,6 +195,8 @@ export interface AniListSearchResult extends AniListMatchableMedia {
   status?: string;
   episodes?: number;
 }
+
+export type AniListSearchResult = CatalogMedia;
 
 export interface AniListRelationNode extends AniListMatchableMedia {
   type?: string;
@@ -214,7 +217,7 @@ export interface AniListRelationEdge {
   node?: AniListRelationNode;
 }
 
-export interface AniListSeasonShow extends AniListMatchableMedia {
+export interface CatalogSeasonMedia extends CatalogMedia {
   idMal?: number;
   description?: string;
   trailer?: {
@@ -250,12 +253,17 @@ export interface AniListSeasonShow extends AniListMatchableMedia {
   };
 }
 
-export interface AniListSeasonResponse {
+export type AniListSeasonShow = CatalogSeasonMedia;
+
+export interface CatalogSeasonResponse {
+  provenance?: import('$lib/catalog/providers').CatalogProvenance;
   cacheWarning?: string;
   season: AnimeSeason;
   year: number;
   shows: AniListSeasonShow[];
 }
+
+export type AniListSeasonResponse = CatalogSeasonResponse;
 
 export interface SubsPleaseIndexShow {
   title: string;

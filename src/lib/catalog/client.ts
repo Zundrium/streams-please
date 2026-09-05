@@ -2,25 +2,22 @@ import { callBackend, isTauri, type BackendCall } from '$lib/backend';
 import {
   createCatalogCache,
   normalizeProviderIndex,
-  normalizeSearchResponse,
-  normalizeSeasonResponse,
   type CatalogCacheScope,
   type CatalogStorage
 } from '$lib/catalog/cache';
 import type {
   AnimeSeason,
-  AniListSearchResult,
   AniListSeasonResponse,
   SubsPleaseIndexResponse,
   SubsPleaseScheduleResponse,
   SubsPleaseShowResponse
 } from '$lib/types';
 
-import { currentSeason, SEASON_ORDER } from '$lib/catalog/presentation';
+import { createCatalogCoordinator } from '$lib/catalog/coordinator';
+import { seasonItems, type CatalogSearchResponse } from '$lib/catalog/providers';
 const DEFAULT_MAX_CONCURRENT_REQUESTS = 4;
 const DEFAULT_MAX_ENTRIES = 100;
 const MAX_STALE_INDEX_AGE = 30 * 24 * 60 * 60 * 1000;
-const MAX_STALE_SEASON_AGE = 90 * 24 * 60 * 60 * 1000;
 
 export interface CatalogClientOptions {
   cacheScope?: CatalogCacheScope;
@@ -34,14 +31,6 @@ interface RequestEntry<T> {
   promise: Promise<T>;
   expiresAt: number;
   touchedAt: number;
-}
-
-function seasonCacheMaxAge(season: AnimeSeason, year: number, now: () => number): number {
-  const current = currentSeason(new Date(now()));
-  const requestedIndex = year * 4 + SEASON_ORDER.indexOf(season);
-  const currentIndex = current.year * 4 + SEASON_ORDER.indexOf(current.season);
-  if (requestedIndex === currentIndex) return 15 * 60 * 1000;
-  return requestedIndex < currentIndex ? 7 * 24 * 60 * 60 * 1000 : 60 * 60 * 1000;
 }
 
 function normalizedKey(value: string): string {
@@ -66,6 +55,9 @@ export function createCatalogClient(
     scope: options.cacheScope ?? cacheScope(),
     storage: options.storage,
     now
+  });
+  const coordinator = createCatalogCoordinator(call, {
+    scope: options.cacheScope ?? cacheScope(), storage: options.storage, now
   });
   const requests = new Map<string, RequestEntry<unknown>>();
   const maxConcurrent = boundedOption(
@@ -141,28 +133,20 @@ export function createCatalogClient(
   }
 
   return {
-    loadSearch(query: string): Promise<AniListSearchResult[]> {
-      const normalized = normalizedKey(query);
-      return request(`search:${normalized}`, 5 * 60 * 1000, async () => {
-        const response = normalizeSearchResponse(await call<unknown>('anilist_search', { query }));
-        if (!response) throw new Error('AniList returned invalid search results. Try again later.');
-        return response;
+    loadSearch(query: string): Promise<CatalogSearchResponse> {
+      return request(`search:${normalizedKey(query)}`, 0, async () => {
+        const response = await coordinator.load({ kind: 'search', query });
+        return { results: response.data.items, provenance: response.provenance, cacheWarning: response.cacheWarning };
       });
     },
     loadSeason(season: AnimeSeason, year: number): Promise<AniListSeasonResponse> {
-      const key = `season:${season}:${year}`;
-      const maxAge = seasonCacheMaxAge(season, year, now);
-      const fresh = cache.loadSeason(season, year, maxAge);
-      if (fresh) return Promise.resolve(fresh);
-      const stale = cache.loadStaleSeason(season, year, MAX_STALE_SEASON_AGE);
-      return request(key, maxAge, async () => {
-        const response = normalizeSeasonResponse(await call<unknown>('anilist_season', { season, year }));
-        if (!response || response.season !== season || response.year !== year) {
-          throw new Error('AniList returned invalid season data. Try again later.');
-        }
-        cache.saveSeason(response);
-        return response;
-      }).catch((reason: unknown) => fallback(stale, reason));
+      return request(`season:${season}:${year}`, 0, async () => {
+        const response = await coordinator.load({ kind: 'season', season, year });
+        return {
+          season, year, shows: seasonItems(response.data),
+          provenance: response.provenance, cacheWarning: response.cacheWarning
+        };
+      });
     },
     loadIndex(): Promise<SubsPleaseIndexResponse> {
       const key = 'index';

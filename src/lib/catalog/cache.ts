@@ -294,8 +294,13 @@ export function normalizeSearchResponse(value: unknown): AniListSearchResult[] |
     const media = normalizeRelationNode(item);
     if (!media || !isRecord(item)) return undefined;
     const episodes = optionalInteger(item.episodes);
-    if (episodes === INVALID) return undefined;
-    results.set(media.id, { ...media, ...(typeof episodes === 'number' ? { episodes } : {}) });
+    const idMal = optionalInteger(item.idMal, 1);
+    if (episodes === INVALID || idMal === INVALID) return undefined;
+    results.set(media.id, {
+      ...media,
+      ...(typeof episodes === 'number' ? { episodes } : {}),
+      ...(typeof idMal === 'number' ? { idMal } : {})
+    });
   }
   return [...results.values()];
 }

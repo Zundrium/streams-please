@@ -1,13 +1,16 @@
 import { errorMessage } from '$lib/catalog/presentation';
 import { loadProviderMappings, matchSubsPleaseSeason, searchArchive } from '$lib/catalog/matching';
-import type { AniListSearchResult, SubsPleaseIndexResponse } from '$lib/types';
+import type { CatalogMedia, SubsPleaseIndexResponse } from '$lib/types';
+import type { CatalogProvenance, CatalogSearchResponse } from '$lib/catalog/providers';
 
 export function createCatalogSearch(
-  loadSearch: (query: string) => Promise<AniListSearchResult[]>,
+  loadSearch: (query: string) => Promise<CatalogSearchResponse>,
   loadIndex: () => Promise<SubsPleaseIndexResponse>
 ) {
   let query = $state('');
-  let results = $state<AniListSearchResult[]>([]);
+  let results = $state<CatalogMedia[]>([]);
+  let provenance = $state<CatalogProvenance | undefined>();
+  let cacheWarning = $state('');
   let providerIndex = $state<SubsPleaseIndexResponse | null>(null);
   let animeLoading = $state(false);
   let providerLoading = $state(false);
@@ -27,6 +30,8 @@ export function createCatalogSearch(
     const id = ++generation;
     query = value.trim();
     results = [];
+    provenance = undefined;
+    cacheWarning = '';
     searchError = '';
     providerError = '';
     animeLoading = false;
@@ -41,7 +46,12 @@ export function createCatalogSearch(
     providerLoading = true;
     await Promise.all([
       Promise.resolve().then(() => loadSearch(term)).then(
-        (value) => { if (current()) results = value; },
+        (value) => {
+          if (!current()) return;
+          results = value.results;
+          provenance = value.provenance;
+          cacheWarning = value.cacheWarning ?? '';
+        },
         (reason: unknown) => { if (current()) searchError = errorMessage(reason); }
       ).finally(() => { if (current()) animeLoading = false; }),
       Promise.resolve().then(loadIndex).then(
@@ -55,6 +65,8 @@ export function createCatalogSearch(
     generation += 1;
     query = '';
     results = [];
+    provenance = undefined;
+    cacheWarning = '';
     searchError = '';
     providerError = '';
     animeLoading = false;
@@ -64,6 +76,8 @@ export function createCatalogSearch(
   return {
     get query() { return query; },
     get results() { return results; },
+    get provenance() { return provenance; },
+    get cacheWarning() { return cacheWarning; },
     get verifiedResults() { return verifiedResults; },
     get archiveResults() { return archiveResults; },
     get providerIndex() { return providerIndex; },

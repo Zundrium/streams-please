@@ -16,6 +16,7 @@ class MemoryStorage {
   }
 }
 
+const providers = [{ id: 'anilist', label: 'AniList', capabilities: ['search', 'season'] }];
 const indexResponse: SubsPleaseIndexResponse = { shows: [{ title: 'Preview', page: 'preview' }] };
 const seasonResponse: AniListSeasonResponse = {
   season: 'SUMMER',
@@ -26,12 +27,14 @@ const seasonResponse: AniListSeasonResponse = {
 test('catalog client shares inflight searches and evicts rejected requests', async () => {
   let calls = 0;
   let fail = false;
+  let now = Date.UTC(2026, 6, 1);
   const client = createCatalogClient(async <T>(name: string): Promise<T> => {
-    assert.equal(name, 'anilist_search');
+    if (name === 'catalog_providers') return providers as T;
+    assert.equal(name, 'catalog_request');
     calls += 1;
     if (fail) throw new Error('unavailable');
-    return [] as T;
-  }, { cacheScope: 'preview' });
+    return { provider: 'anilist', items: [], warnings: [] } as T;
+  }, { cacheScope: 'preview', now: () => now });
 
   assert.equal(client.loadSearch(' Preview '), client.loadSearch('preview'));
   await client.loadSearch('preview');
@@ -40,6 +43,7 @@ test('catalog client shares inflight searches and evicts rejected requests', asy
   fail = true;
   await assert.rejects(client.loadSearch('different'));
   fail = false;
+  now += 60_001;
   await client.loadSearch('different');
   assert.equal(calls, 3);
 });
@@ -126,7 +130,8 @@ test('catalog client limits concurrent catalog calls and releases synchronous fa
   let active = 0;
   let highest = 0;
   const call: BackendCall = <T>(name: string): Promise<T> => {
-    if (name === 'anilist_search') throw new Error('synchronous failure');
+    if (name === 'catalog_providers') return Promise.resolve(providers as T);
+    if (name === 'catalog_request') throw new Error('synchronous failure');
     active += 1;
     highest = Math.max(highest, active);
     return new Promise<T>((resolve) => {

@@ -1,4 +1,5 @@
 import { currentSeason } from '$lib/catalog/presentation';
+import { validCatalogRequest, type CatalogProvider, type CatalogRequest } from '$lib/catalog/providers';
 import type {
   AnimeSeason,
   AniListSearchResult,
@@ -112,6 +113,7 @@ function previewSeason(season: AnimeSeason, year: number): AniListSeasonResponse
     year,
     shows: selection.map((show, index) => ({
       id: previewId(show.page)!,
+      idMal: previewId(show.page)! + 100_000,
       title: { romaji: show.title, userPreferred: show.title },
       synonyms: [],
       description: 'Representative seasonal anime fixture available in the browser preview.',
@@ -134,13 +136,14 @@ function previewSearch(query: string): AniListSearchResult[] {
     ...previewSeason(current.season, current.year).shows,
     ...mockIndex.shows.map((show) => ({
       id: previewId(show.page)!,
+      idMal: previewId(show.page)! + 100_000,
       title: { romaji: show.title, userPreferred: show.title }
     }))
   ];
   const unique = new Map<string, AniListSearchResult>();
   for (const show of candidates) {
     const title = show.title.userPreferred ?? show.title.romaji ?? '';
-    if (!term || normalizeTitle(title).includes(term)) unique.set(title, show);
+    if ((!term || normalizeTitle(title).includes(term)) && !unique.has(title)) unique.set(title, show);
   }
   return [...unique.values()].slice(0, 10);
 }
@@ -156,7 +159,7 @@ function previewShow(slug: string, anilistId?: number, includeMetadata = true): 
     episode,
     downloads: ['480', '720', '1080'].map((res) => ({ res, torrent: '', magnet: SINTEL_MAGNET }))
   }));
-  const metadata = includeMetadata
+  const metadata = includeMetadata && !['offline', 'anilist-offline'].includes(catalogPreviewMode() ?? '')
     ? {
         banner_image_url: undefined,
         trailer: { id: 'eRsGyueVLvQ', site: 'youtube' },
@@ -200,6 +203,30 @@ function previewShow(slug: string, anilistId?: number, includeMetadata = true): 
     episode: Object.fromEntries(releases.map((release) => [`${title} - ${release.episode}`, release])),
     ...metadata
   };
+}
+
+const catalogProviders: CatalogProvider[] = [
+  { id: 'anilist', label: 'AniList', capabilities: ['search', 'season'] },
+  { id: 'jikan', label: 'Jikan', capabilities: ['search', 'season'] }
+];
+
+function catalogPreviewMode(): string | null {
+  return typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('catalogPreview');
+}
+
+function previewCatalog(provider: string, request: CatalogRequest): unknown {
+  if (!catalogProviders.some((item) => item.id === provider) || !request
+    || !['search', 'season'].includes(request.kind)
+    || (request.kind === 'search' && typeof request.query !== 'string')
+    || !validCatalogRequest(request)) throw new Error('Invalid preview catalog request.');
+  const mode = catalogPreviewMode();
+  if (mode === 'offline' || (mode === 'anilist-offline' && provider === 'anilist')) {
+    throw new Error('Provider unavailable in this preview scenario.');
+  }
+  const warnings = provider === 'jikan' ? ['Preview alternative-provider fixture; identities remain unchanged.'] : [];
+  if (request.kind === 'search') return { provider, items: previewSearch(request.query), warnings };
+  const season = previewSeason(request.season, request.year);
+  return { provider, items: season.shows, season: season.season, year: season.year, warnings };
 }
 
 let mockStartedAt = Date.now();
@@ -248,6 +275,10 @@ export async function callPreviewBackend<T>(
     return { tz: String(args?.timezone ?? 'Europe/Amsterdam'), schedule } as T;
   }
   if (name === 'subsplease_index') return mockIndex as T;
+  if (name === 'catalog_providers') return structuredClone(catalogProviders) as T;
+  if (name === 'catalog_request') {
+    return previewCatalog(String(args?.provider ?? ''), args?.request as CatalogRequest) as T;
+  }
   if (name === 'anilist_season') {
     return previewSeason(
       String(args?.season ?? 'SUMMER').toUpperCase() as AnimeSeason,

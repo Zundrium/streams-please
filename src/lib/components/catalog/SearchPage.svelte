@@ -13,6 +13,7 @@
     matchSubsPleaseShow, saveProviderMapping, type ProviderMatch
   } from '$lib/catalog';
   import { createCatalogSearch } from '$lib/catalog/search.svelte';
+  import { catalogSourceLabel, type CatalogSearchResponse } from '$lib/catalog/providers';
   import type { CatalogDetailsActions } from '$lib/catalog/contracts';
   import { libraryEntryMatches } from '$lib/library';
   import type {
@@ -25,7 +26,7 @@
     onToggleLibrary, onSetDiscoveryVerdict, onToggleWatched, onShowLoaded,
     preferredQuality, openSlug = '', onOpenConsumed = () => undefined
   }: CatalogDetailsActions & {
-    loadSearch: (query: string) => Promise<AniListSearchResult[]>;
+    loadSearch: (query: string) => Promise<CatalogSearchResponse>;
     loadIndex: () => Promise<SubsPleaseIndexResponse>;
   } = $props();
 
@@ -155,21 +156,26 @@
       {#if search.providerIndex?.cacheWarning}
         <CatalogNotice kind="warning" title="Saved archive" description={search.providerIndex.cacheWarning} class="mb-6" />
       {/if}
+      {#if search.cacheWarning}
+        <CatalogNotice kind="warning" title="Catalog fallback" description={search.cacheWarning} class="mb-6" />
+      {/if}
       {#if search.searchError}
-        <CatalogNotice kind="warning" title="AniList search unavailable" description={search.searchError}
-          actionLabel="Retry AniList" onAction={() => void search.search(search.query)} class="mb-6" />
+        <CatalogNotice kind="warning" title="Catalog search unavailable" description={search.searchError}
+          actionLabel="Retry search" onAction={() => void search.search(search.query)} class="mb-6" />
       {/if}
       {#if search.providerError}
         <CatalogNotice kind="warning" title="SubsPlease could not be checked" description={search.providerError}
           actionLabel="Retry search" onAction={() => void search.search(search.query)} class="mb-6" />
       {/if}
 
-      {#if search.animeLoading}
-        <CatalogLoading label="Searching AniList" />
-      {:else if search.verifiedResults.length}
+      {#if search.provenance}
         <p class="mb-6 text-xs text-(--text)/45" role="status">
-          {search.results.length} AniList results{search.providerLoading ? ' · Checking SubsPlease…' : ''}
+          {search.results.length} {search.results.length === 1 ? 'result' : 'results'} · {catalogSourceLabel(search.provenance)}{search.providerLoading ? ' · Checking SubsPlease…' : ''}
         </p>
+      {/if}
+      {#if search.animeLoading}
+        <CatalogLoading label="Searching catalogs" />
+      {:else if search.verifiedResults.length}
         <section class="grid grid-cols-2 gap-x-4 gap-y-8 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6" aria-label={`Search results for ${search.query}`}>
           {#each search.verifiedResults as result (result.anime.id)}
             <SearchResultCard anime={result.anime} match={result.match}
@@ -182,7 +188,7 @@
       {:else if search.query && search.archiveResults.length}
         <section aria-label="SubsPlease archive search results">
           <h2 class="text-base font-medium">SubsPlease archive</h2>
-          <p class="mt-2 text-sm text-(--text)/45">{search.archiveResults.length} archive titles · AniList metadata is not verified.</p>
+          <p class="mt-2 text-sm text-(--text)/45">{search.archiveResults.length} archive titles · Catalog identity is not verified.</p>
           <div class="mt-6 grid gap-2 sm:grid-cols-2 lg:grid-cols-3">
             {#each search.archiveResults as provider (provider.page)}
               <Button variant="ghost" class="h-auto min-h-12 justify-start whitespace-normal rounded-xl px-4 py-3 text-left" onclick={() => openProvider(provider)}>
@@ -197,7 +203,7 @@
             ? 'A catalog service is unavailable. Retry later or browse your library.'
             : 'Try another title, spelling, or romanized name.'} />
       {:else}
-        <CatalogNotice centered title="Find an anime series" description="Search AniList across seasons. If AniList is unavailable, matching SubsPlease archive titles are shown instead." />
+        <CatalogNotice centered title="Find an anime series" description="Search across seasons using available catalogs and saved results. SubsPlease archive search remains available during catalog outages." />
       {/if}
     </div>
   </main>

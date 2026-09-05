@@ -465,6 +465,8 @@ pub fn run() {
             forget_torrent,
             export_library_file,
             import_library_file,
+            catalog::catalog_providers,
+            catalog::catalog_request,
             catalog::subsplease::subsplease_schedule,
             catalog::subsplease::subsplease_index,
             catalog::subsplease::subsplease_show,

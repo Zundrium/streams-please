@@ -12,8 +12,8 @@ StreamsPlease is a local Tauri v2 desktop player for legal or personally owned B
 - adding external `.ass`, `.ssa`, `.srt`, `.vtt`, and `.sub` files;
 - live download, upload, and peer status, plus pausing P2P and stopping the session;
 - a local media cache in the OS-specific app cache directory;
-- AniList-first seasonal browsing with previous/next season navigation;
-- global AniList title search with SubsPlease archive availability checks and archive-only fallback;
+- multi-provider seasonal browsing with previous/next season navigation, preferring AniList and falling back to saved results or Jikan;
+- global catalog title search with persistent offline results, source/age labels, and SubsPlease archive availability checks;
 - direct SubsPlease archive browsing without an AniList dependency;
 - SubsPlease availability filtering, weekly release times, and historical episode access;
 - Discord-capturable YouTube trailer search through the same in-process libmpv player;
@@ -24,7 +24,9 @@ StreamsPlease is a local Tauri v2 desktop player for legal or personally owned B
 
 ```text
 SvelteKit UI + Lily components (Tauri WebView)
-  ├─ catalog proxy ───> AniList seasonal catalog + SubsPlease availability/releases
+  ├─ catalog coordinator ──> native provider registry ──> AniList / Jikan
+  │                              └─ persistent cross-provider identity resolver
+  ├─ release catalog ────> SubsPlease availability/releases
   ├─ Tauri commands ──> librqbit session ──> trackers / DHT / peers
   ├─ player controls ─> in-process libmpv playback ──> episodes + trailers
   ├─ trailer search ───> bundled yt-dlp + Deno ──> first YouTube result
@@ -94,12 +96,13 @@ Set `STREAMSPLEASE_GITHUB_TOKEN` as a GitHub Actions secret containing a fine-gr
 4. Use **External subtitle** to add a local subtitle file.
 5. Pause P2P or stop the session when you are done. Stopping forgets the torrent but preserves cache files that have already been written.
 
-The **Search** tab searches AniList across seasons and checks each result against the
-SubsPlease archive. Possible matches are labeled for review and never saved as confirmed
-AniList identities. If AniList is unavailable or has no results, matching archive titles remain
-accessible without pretending their metadata has been verified.
+The **Search** tab searches across seasons and checks each result against the SubsPlease
+archive. AniList is preferred; during an outage, validated saved results take priority over
+alternative providers such as Jikan. Source, cache age, and incomplete-coverage warnings remain
+visible. Possible SubsPlease matches are labeled for review and never saved as confirmed
+identities. Archive titles remain accessible when catalog providers cannot be reached.
 
-The **SubsPlease** tab starts with an AniList season and filters it against the SubsPlease
+The **SubsPlease** tab starts with a normalized season catalog and filters it against the SubsPlease
 show archive. Use the previous and next controls to browse other seasons, or choose **Archive**
 to browse SubsPlease directly, including when AniList is unavailable. AniList IDs are
 the canonical identity for saved shows; the optional SubsPlease slug and numeric ID are
@@ -118,21 +121,57 @@ The **Legal Sintel demo** button enters a Creative Commons/open movie torrent so
 - `src/lib/components/ui/`: locally owned Lily primitives.
 - `src/lib/catalog/`: typed request client, validated storage, title matching, and cancellable page state.
 - `src/lib/backend.ts` and `src/lib/backend/preview.ts`: desktop invocation and deterministic preview fixtures.
-- `src-tauri/src/catalog/`: independent AniList and SubsPlease providers, validators, and unit tests.
+- `src-tauri/src/catalog/`: catalog adapter registry, AniList/Jikan adapters, persistent identity resolution, and independent SubsPlease releases.
 - `src-tauri/src/lib.rs`: torrent engine, loopback stream server, runtime setup, and command registration.
 - `tests/`: Node regression tests for matching, caches, async state, preview identity, and library refresh.
 
-Catalog calls share bounded caches and concurrency limits. AniList requests are paced and stop
-sending during a 403 access block or 429 cooldown; a retry never attempts to bypass restrictions.
-Provider errors remain distinct from empty results. Recently saved seasons/archive data can be
-shown with a warning during an outage, and library episode refresh skips optional AniList metadata.
-The former fuzzy provider-map cache is intentionally not reused; saved library data is preserved.
-Browser preview catalog data is deterministic and isolated from desktop caches. Remote artwork and
-trailer embeds still need network access; preview episode buttons use the legal Sintel fixture.
+## Catalog providers and outage behavior
+
+The native `CatalogAdapter` registry declares provider IDs, labels, and supported capabilities.
+`catalog_providers` exposes that ordered registry, and `catalog_request` accepts a provider plus a
+search or season request. Adapters return the same normalized `CatalogMedia` envelope; frontend
+components do not parse provider responses. Existing AniList type aliases and IPC commands remain
+compatible. Details enrichment still uses the existing AniList/SubsPlease path independently of
+these listing capabilities.
+
+`src/lib/catalog/coordinator.ts` handles capability routing, request deduplication, provider
+cooldowns, and fallback. For each supported provider in priority order it uses fresh cached data,
+then attempts a refresh, then uses validated stale results before trying the next provider.
+Stale search results are retained for at most 30 days and seasons for 90 days. Provider caches
+remain separate, timestamps are not reset by stale reads, and fallback caches do not prevent
+recovery to the primary provider. A genuine empty response is not an outage. Provider failures,
+missing identity mappings, and truncated listings are not silently reported as complete results.
+
+AniList and Jikan requests are paced and respect bounded cooldowns without automatic retries or
+attempts to bypass access restrictions. Jikan lists are SFW, with up to 25 search results or four
+season pages of 25 items. A season only includes matching year/season TV, TV_SHORT, and ONA items.
+Artwork from Jikan uses the explicitly allowed `https://cdn.myanimelist.net` image origin; no new
+WebView API/network permissions are needed.
+
+AniList IDs remain canonical for the existing library. The separate native identity resolver
+learns explicit AniList/MyAnimeList ID pairs and bootstraps independently from
+[Fribb's reduced anime-offline database](https://github.com/Fribb/anime-lists), so an AniList outage
+does not prevent mapping newly retrieved Jikan results. Validated mappings are stored in the
+app cache's `catalog` directory, refreshed after seven days when needed, and usable stale when
+Fribb is unavailable. Conflicting mappings in either direction are excluded. Unknown mappings
+are omitted with a coverage warning, never inferred from title similarity or equal numeric IDs.
+A first-ever fallback needs Fribb or previously learned mappings; no ID database is bundled.
+
+To add another provider such as Kitsu, implement and register a native `CatalogAdapter`, declare
+its supported capabilities, normalize its data, extend the resolver's explicit source-ID import
+where necessary, and add deterministic preview fixtures and tests. Provider priority comes from
+the registry; unsupported capabilities are skipped without provider-specific coordinator or UI
+branches. SubsPlease release retrieval remains independent of metadata providers.
+
+Browser preview is isolated from desktop caches. Use `?catalogPreview=anilist-offline` to exercise
+alternative-provider fallback or `?catalogPreview=offline` for all catalog providers unavailable.
+Saved preview results still take precedence; use a fresh browser profile for an uncached fallback.
+Remote artwork and trailer embeds still need network access; episode buttons use legal Sintel
+fixtures. Library episode refresh skips optional metadata and preserves existing progress.
 
 ## Known limitations
 
-- An AniList outage can prevent fresh global search, seasonal Discovery, or optional metadata enrichment. Direct SubsPlease archive browsing and saved library episodes remain available when SubsPlease is reachable.
+- Simultaneous catalog/mapping outages or unmapped titles can still limit fresh search and seasonal Discovery. Optional details enrichment remains AniList-dependent; SubsPlease details and saved library episodes remain available when SubsPlease is reachable. Jikan listings do not supply AniList relation/prequel or next-airing data.
 
 - The bundled libmpv integration is currently tested most thoroughly on Windows x86-64; macOS and Linux builds need platform-specific libmpv libraries.
 - In this initial version, the UI manages one active episode at a time; the Rust engine can manage multiple torrents.
