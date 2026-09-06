@@ -44,6 +44,12 @@ export type UpdateDownloadEvent =
 
 export type AppUpdateStatus =
   | {
+      phase: 'available';
+      version: string;
+      currentVersion: string;
+      notes?: string;
+    }
+  | {
       phase: 'downloading';
       version: string;
       downloadedBytes: number;
@@ -184,16 +190,38 @@ export interface AniListMatchableMedia {
 
 export interface CatalogMedia extends AniListMatchableMedia {
   idMal?: number;
+  description?: string;
+  trailer?: {
+    id: string;
+    site: string;
+    thumbnail?: string;
+  };
   coverImage?: {
     extraLarge?: string;
     large?: string;
     color?: string;
   };
+  bannerImage?: string;
+  genres?: string[];
   season?: AnimeSeason;
   seasonYear?: number;
+  startDate?: AniListDate;
+  endDate?: AniListDate;
   format?: string;
   status?: string;
   episodes?: number;
+  duration?: number;
+  averageScore?: number;
+  popularity?: number;
+  siteUrl?: string;
+  nextAiringEpisode?: {
+    episode: number;
+    airingAt: number;
+    timeUntilAiring: number;
+  };
+  relations?: {
+    edges?: AniListRelationEdge[];
+  };
 }
 
 export type AniListSearchResult = CatalogMedia;

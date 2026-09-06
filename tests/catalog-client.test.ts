@@ -148,6 +148,70 @@ test('catalog client separates provider-only and metadata show requests', async 
   assert.equal(calls[1]?.includeMetadata, true);
 });
 
+test('catalog client normalizes recommendation seeds for cache keys and requests', async () => {
+  const calls: Array<Record<string, unknown> | undefined> = [];
+  const client = createCatalogClient(async <T>(name: string, args?: Record<string, unknown>): Promise<T> => {
+    if (name === 'catalog_providers') {
+      return [{ id: 'anilist', label: 'AniList', capabilities: ['recommendations'] }] as T;
+    }
+    calls.push(args);
+    return {
+      provider: 'anilist',
+      items: [{ id: 7, title: { romaji: 'Recommendation' }, season: 'SUMMER', seasonYear: 2026 }],
+      warnings: []
+    } as T;
+  }, { cacheScope: 'preview' });
+
+  const first = client.loadRecommendations([7, 3, 7]);
+  assert.equal(first, client.loadRecommendations([3, 7]));
+  const response = await first;
+  assert.equal(response.results[0]?.season, 'SUMMER');
+  assert.deepEqual(calls[0]?.request, { kind: 'recommendations', ids: [3, 7] });
+  assert.equal('myAnimeListClientId' in (calls[0] ?? {}), false);
+});
+
+test('catalog client rejects invalid recommendation seeds without contacting providers', async () => {
+  let calls = 0;
+  const client = createCatalogClient(async <T>(): Promise<T> => {
+    calls += 1;
+    return [] as T;
+  }, { cacheScope: 'preview' });
+
+  for (const ids of [[], [0], [1.5], Array.from({ length: 11 }, (_, index) => index + 1)]) {
+    await assert.rejects(client.loadRecommendations(ids), /Invalid recommendation seeds/);
+  }
+  assert.equal(calls, 0);
+});
+
+test('catalog client skips unconfigured official MyAnimeList and sends its ID only to official requests', async () => {
+  let myAnimeListClientId: string | undefined;
+  const calls: Array<Record<string, unknown> | undefined> = [];
+  const client = createCatalogClient(async <T>(name: string, args?: Record<string, unknown>): Promise<T> => {
+    if (name === 'catalog_providers') {
+      return [
+        { id: 'myanimelist', label: 'MyAnimeList', capabilities: ['search'] },
+        { id: 'jikan', label: 'MyAnimeList (Jikan)', capabilities: ['search'] }
+      ] as T;
+    }
+    calls.push(args);
+    const provider = String(args?.provider);
+    return { provider, items: [], warnings: [] } as T;
+  }, {
+    cacheScope: 'preview',
+    providerOrder: () => ['myanimelist', 'jikan'],
+    myAnimeListClientId: () => myAnimeListClientId
+  });
+
+  await client.loadSearch('without id');
+  assert.equal(calls[0]?.provider, 'jikan');
+  assert.equal('myAnimeListClientId' in (calls[0] ?? {}), false);
+
+  myAnimeListClientId = 'Client_ID-42';
+  await client.loadSearch('with id');
+  assert.equal(calls[1]?.provider, 'myanimelist');
+  assert.equal(calls[1]?.myAnimeListClientId, 'Client_ID-42');
+});
+
 test('catalog client limits concurrent catalog calls and releases synchronous failures', async () => {
   let active = 0;
   let highest = 0;

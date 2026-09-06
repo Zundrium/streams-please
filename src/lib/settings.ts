@@ -4,7 +4,8 @@ const STORAGE_KEY = 'streamsplease.settings.v1';
 
 export const CATALOG_PROVIDERS = [
   { id: 'anilist', label: 'AniList' },
-  { id: 'jikan', label: 'Jikan' },
+  { id: 'myanimelist', label: 'MyAnimeList (official)' },
+  { id: 'jikan', label: 'MyAnimeList (Jikan)' },
   { id: 'kitsu', label: 'Kitsu' }
 ] as const;
 
@@ -14,6 +15,7 @@ export interface AppSettings {
   preferredQuality: PlaybackQuality;
   preferredSubtitleLanguage: SubtitleLanguage;
   catalogProviderOrder: CatalogProviderId[];
+  myAnimeListClientId?: string;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -21,6 +23,12 @@ export const DEFAULT_SETTINGS: AppSettings = {
   preferredSubtitleLanguage: 'en',
   catalogProviderOrder: CATALOG_PROVIDERS.map((provider) => provider.id)
 };
+
+export function normalizeMyAnimeListClientId(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const clientId = value.trim();
+  return /^[A-Za-z0-9_-]{8,128}$/.test(clientId) ? clientId : undefined;
+}
 
 export function normalizeCatalogProviderOrder(value: unknown): CatalogProviderId[] {
   const known = new Set<string>(CATALOG_PROVIDERS.map((provider) => provider.id));
@@ -37,6 +45,7 @@ function normalizeSettings(value: unknown): AppSettings {
     : {};
   const preferredQuality = settings.preferredQuality;
   const preferredSubtitleLanguage = settings.preferredSubtitleLanguage;
+  const myAnimeListClientId = normalizeMyAnimeListClientId(settings.myAnimeListClientId);
   return {
     preferredQuality:
       preferredQuality === '480' || preferredQuality === '720' || preferredQuality === '1080'
@@ -48,7 +57,8 @@ function normalizeSettings(value: unknown): AppSettings {
       preferredSubtitleLanguage === 'nl'
         ? preferredSubtitleLanguage
         : DEFAULT_SETTINGS.preferredSubtitleLanguage,
-    catalogProviderOrder: normalizeCatalogProviderOrder(settings.catalogProviderOrder)
+    catalogProviderOrder: normalizeCatalogProviderOrder(settings.catalogProviderOrder),
+    ...(myAnimeListClientId ? { myAnimeListClientId } : {})
   };
 }
 

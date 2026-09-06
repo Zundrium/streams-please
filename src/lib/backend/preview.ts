@@ -1,5 +1,6 @@
 import { currentSeason } from '$lib/catalog/presentation';
 import { validCatalogRequest, type CatalogProvider, type CatalogRequest } from '$lib/catalog/providers';
+import { normalizeMyAnimeListClientId } from '$lib/settings';
 import type {
   AnimeSeason,
   AniListSearchResult,
@@ -129,6 +130,18 @@ function previewSeason(season: AnimeSeason, year: number): AniListSeasonResponse
   };
 }
 
+function previewRecommendations(ids: number[]): AniListSearchResult[] {
+  const seedIds = new Set(ids);
+  const current = currentSeason();
+  return previewSeason(current.season, current.year).shows
+    .filter((show) => !seedIds.has(show.id))
+    .slice(0, 10)
+    .map((show) => ({
+      ...show,
+      trailer: { id: 'eRsGyueVLvQ', site: 'youtube' }
+    }));
+}
+
 function previewSearch(query: string): AniListSearchResult[] {
   const term = normalizeTitle(query);
   const current = currentSeason();
@@ -206,8 +219,9 @@ function previewShow(slug: string, anilistId?: number, includeMetadata = true): 
 }
 
 const catalogProviders: CatalogProvider[] = [
-  { id: 'anilist', label: 'AniList', capabilities: ['search', 'season'] },
-  { id: 'jikan', label: 'Jikan', capabilities: ['search', 'season'] },
+  { id: 'anilist', label: 'AniList', capabilities: ['search', 'season', 'recommendations'] },
+  { id: 'myanimelist', label: 'MyAnimeList', capabilities: ['search', 'season', 'recommendations'] },
+  { id: 'jikan', label: 'MyAnimeList (Jikan)', capabilities: ['search', 'season', 'recommendations'] },
   { id: 'kitsu', label: 'Kitsu', capabilities: ['search', 'season'] }
 ];
 
@@ -215,19 +229,30 @@ function catalogPreviewMode(): string | null {
   return typeof window === 'undefined' ? null : new URLSearchParams(window.location.search).get('catalogPreview');
 }
 
-function previewCatalog(provider: string, request: CatalogRequest): unknown {
+function previewCatalog(
+  provider: string,
+  request: CatalogRequest,
+  myAnimeListClientId?: string
+): unknown {
   if (!catalogProviders.some((item) => item.id === provider) || !request
-    || !['search', 'season'].includes(request.kind)
+    || !['search', 'season', 'recommendations'].includes(request.kind)
     || (request.kind === 'search' && typeof request.query !== 'string')
+    || (provider === 'myanimelist' && !normalizeMyAnimeListClientId(myAnimeListClientId))
     || !validCatalogRequest(request)) throw new Error('Invalid preview catalog request.');
+  if (!catalogProviders.find((item) => item.id === provider)?.capabilities.includes(request.kind)) {
+    throw new Error('This preview provider does not support the requested capability.');
+  }
   const mode = catalogPreviewMode();
   if (mode === 'offline' || mode === `${provider}-offline`) {
     throw new Error('Provider unavailable in this preview scenario.');
   }
-  const warnings = provider === 'anilist'
-    ? []
-    : ['Preview alternative-provider fixture; identities remain unchanged.'];
+  const warnings = provider === 'jikan' || provider === 'kitsu'
+    ? ['Preview alternative-provider fixture; identities remain unchanged.']
+    : [];
   if (request.kind === 'search') return { provider, items: previewSearch(request.query), warnings };
+  if (request.kind === 'recommendations') {
+    return { provider, items: previewRecommendations(request.ids), warnings };
+  }
   const season = previewSeason(request.season, request.year);
   return { provider, items: season.shows, season: season.season, year: season.year, warnings };
 }
@@ -280,7 +305,11 @@ export async function callPreviewBackend<T>(
   if (name === 'subsplease_index') return mockIndex as T;
   if (name === 'catalog_providers') return structuredClone(catalogProviders) as T;
   if (name === 'catalog_request') {
-    return previewCatalog(String(args?.provider ?? ''), args?.request as CatalogRequest) as T;
+    return previewCatalog(
+      String(args?.provider ?? ''),
+      args?.request as CatalogRequest,
+      typeof args?.myAnimeListClientId === 'string' ? args.myAnimeListClientId : undefined
+    ) as T;
   }
   if (name === 'anilist_season') {
     return previewSeason(

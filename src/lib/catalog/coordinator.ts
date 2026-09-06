@@ -1,6 +1,7 @@
 import type { BackendCall } from '$lib/backend';
 import type { CatalogCacheOptions } from '$lib/catalog/cache';
 import { createCatalogResultCache, type SavedCatalogResult } from '$lib/catalog/result-cache';
+import { normalizeMyAnimeListClientId } from '$lib/settings';
 import {
   catalogRequestKey, normalizeCatalogProviders, normalizeCatalogResponse, validCatalogRequest,
   type CatalogProvider, type CatalogProvenance, type CatalogRequest
@@ -23,6 +24,8 @@ export function createCatalogCoordinator(call: BackendCall, options: CatalogCach
   const failures = new Map<string, { until: number; label: string; message: string }>();
   const pending = new Map<string, Promise<CatalogResult>>();
   let registry: Promise<CatalogProvider[]> | undefined;
+  let myAnimeListClientId: string | undefined;
+  let myAnimeListConfiguration = 0;
 
   function providers(): Promise<CatalogProvider[]> {
     if (!registry) {
@@ -36,7 +39,7 @@ export function createCatalogCoordinator(call: BackendCall, options: CatalogCach
   }
 
   function freshAge(request: CatalogRequest): number {
-    if (request.kind === 'search') return 5 * MINUTE;
+    if (request.kind === 'search' || request.kind === 'recommendations') return 5 * MINUTE;
     const current = currentSeason(new Date(now()));
     const delta = request.year * 4 + SEASON_ORDER.indexOf(request.season)
       - (current.year * 4 + SEASON_ORDER.indexOf(current.season));
@@ -78,9 +81,16 @@ export function createCatalogCoordinator(call: BackendCall, options: CatalogCach
     ];
   }
 
-  async function resolve(request: CatalogRequest, providerOrder: readonly string[]): Promise<CatalogResult> {
+  async function resolve(
+    request: CatalogRequest,
+    providerOrder: readonly string[],
+    currentMyAnimeListClientId: string | undefined,
+    configuration: number
+  ): Promise<CatalogResult> {
     const available = orderProviders(
-      (await providers()).filter((provider) => provider.capabilities.includes(request.kind)),
+      (await providers()).filter((provider) =>
+        provider.capabilities.includes(request.kind)
+          && (provider.id !== 'myanimelist' || Boolean(currentMyAnimeListClientId))),
       providerOrder
     );
     if (!available.length) throw new Error(`No catalog provider supports ${request.kind}.`);
@@ -90,36 +100,61 @@ export function createCatalogCoordinator(call: BackendCall, options: CatalogCach
       const age = secondary ? Math.min(freshAge(request), FALLBACK_MAX_FRESH_AGE) : freshAge(request);
       const fresh = cache.load(provider.id, request, age);
       if (fresh) return result(fresh, provider, 'fresh', errors, secondary);
-      const failure = failures.get(provider.id);
+      const failure = provider.id !== 'myanimelist' || configuration === myAnimeListConfiguration
+        ? failures.get(provider.id) : undefined;
       if (failure && failure.until > now()) {
         errors.push(failure);
       } else {
         try {
-          const raw = await call<unknown>('catalog_request', { provider: provider.id, request });
+          const raw = await call<unknown>('catalog_request', {
+            provider: provider.id,
+            request,
+            ...(provider.id === 'myanimelist'
+              ? { myAnimeListClientId: currentMyAnimeListClientId }
+              : {})
+          });
           const value = normalizeCatalogResponse(raw, provider.id, request);
           if (!value) throw new Error('Invalid catalog response.');
-          failures.delete(provider.id);
+          if (provider.id !== 'myanimelist' || configuration === myAnimeListConfiguration) {
+            failures.delete(provider.id);
+          }
           return result(cache.save(request, value), provider, 'none', errors, secondary);
         } catch (reason: unknown) {
           const message = `${provider.label}: ${reason instanceof Error ? reason.message : String(reason)}`;
           const failed = { until: now() + FAILURE_COOLDOWN, label: provider.label, message };
-          failures.set(provider.id, failed);
+          if (provider.id !== 'myanimelist' || configuration === myAnimeListConfiguration) {
+            failures.set(provider.id, failed);
+          }
           errors.push(failed);
         }
       }
-      const stale = cache.load(provider.id, request, request.kind === 'search' ? 30 * DAY : 90 * DAY);
+      const stale = cache.load(
+        provider.id,
+        request,
+        request.kind === 'season' ? 90 * DAY : 30 * DAY
+      );
       if (stale) return result(stale, provider, 'stale', errors, secondary);
     }
     throw new Error(`Catalog providers are unavailable. ${errors.map(({ message }) => message).join(' ')}`);
   }
 
   return {
-    load(request: CatalogRequest, providerOrder: readonly string[] = []): Promise<CatalogResult> {
+    load(
+      request: CatalogRequest,
+      providerOrder: readonly string[] = [],
+      configuredMyAnimeListClientId?: string
+    ): Promise<CatalogResult> {
       if (!validCatalogRequest(request)) return Promise.reject(new Error('Invalid catalog request.'));
-      const key = `${catalogRequestKey(request)}\u0000${JSON.stringify(providerOrder)}`;
+      const currentMyAnimeListClientId = normalizeMyAnimeListClientId(configuredMyAnimeListClientId);
+      if (currentMyAnimeListClientId !== myAnimeListClientId) {
+        myAnimeListClientId = currentMyAnimeListClientId;
+        myAnimeListConfiguration += 1;
+        failures.delete('myanimelist');
+      }
+      const key = `${catalogRequestKey(request)}\u0000${JSON.stringify(providerOrder)}\u0000mal:${myAnimeListConfiguration}`;
       const existing = pending.get(key);
       if (existing) return existing;
-      const promise = resolve(request, providerOrder).finally(() => {
+      const promise = resolve(request, providerOrder, currentMyAnimeListClientId, myAnimeListConfiguration).finally(() => {
         if (pending.get(key) === promise) pending.delete(key);
       });
       pending.set(key, promise);

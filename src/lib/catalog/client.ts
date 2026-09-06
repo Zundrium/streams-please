@@ -1,5 +1,9 @@
 import { callBackend, isTauri, type BackendCall } from '$lib/backend';
-import { loadSettings, normalizeCatalogProviderOrder } from '$lib/settings';
+import {
+  loadSettings,
+  normalizeCatalogProviderOrder,
+  normalizeMyAnimeListClientId
+} from '$lib/settings';
 import {
   createCatalogCache,
   normalizeProviderIndex,
@@ -27,6 +31,7 @@ export interface CatalogClientOptions {
   maxConcurrentRequests?: number;
   maxEntries?: number;
   providerOrder?: () => readonly string[];
+  myAnimeListClientId?: () => string | undefined;
 }
 
 interface RequestEntry<T> {
@@ -69,7 +74,11 @@ export function createCatalogClient(
   );
   const maxEntries = boundedOption(options.maxEntries, DEFAULT_MAX_ENTRIES, 200);
   const providerOrder = options.providerOrder ?? (() => loadSettings().catalogProviderOrder);
+  const configuredMyAnimeListClientId = options.myAnimeListClientId
+    ?? (() => loadSettings().myAnimeListClientId);
   let activeRequests = 0;
+  let lastMyAnimeListClientId: string | undefined;
+  let myAnimeListConfiguration = 0;
   const queued: Array<() => void> = [];
 
   function run<T>(operation: () => Promise<T>): Promise<T> {
@@ -135,23 +144,66 @@ export function createCatalogClient(
     };
   }
 
+  function catalogConfiguration(): { myAnimeListClientId: string | undefined; generation: number } {
+    const myAnimeListClientId = normalizeMyAnimeListClientId(configuredMyAnimeListClientId());
+    if (myAnimeListClientId !== lastMyAnimeListClientId) {
+      lastMyAnimeListClientId = myAnimeListClientId;
+      myAnimeListConfiguration += 1;
+    }
+    return { myAnimeListClientId, generation: myAnimeListConfiguration };
+  }
+
+  function recommendationIds(ids: number[]): number[] | undefined {
+    if (ids.length < 1 || ids.length > 10
+      || ids.some((id) => !Number.isSafeInteger(id) || id <= 0 || id > 2_147_483_647)) return undefined;
+    return [...new Set(ids)].sort((left, right) => left - right);
+  }
+
   return {
     loadSearch(query: string): Promise<CatalogSearchResponse> {
       const order = normalizeCatalogProviderOrder(providerOrder());
-      return request(`search:${normalizedKey(query)}:providers:${JSON.stringify(order)}`, 0, async () => {
-        const response = await coordinator.load({ kind: 'search', query }, order);
-        return { results: response.data.items, provenance: response.provenance, cacheWarning: response.cacheWarning };
-      });
+      const configuration = catalogConfiguration();
+      return request(
+        `search:${normalizedKey(query)}:providers:${JSON.stringify(order)}:mal:${configuration.generation}`,
+        0,
+        async () => {
+          const response = await coordinator.load({ kind: 'search', query }, order, configuration.myAnimeListClientId);
+          return { results: response.data.items, provenance: response.provenance, cacheWarning: response.cacheWarning };
+        }
+      );
     },
     loadSeason(season: AnimeSeason, year: number): Promise<AniListSeasonResponse> {
       const order = normalizeCatalogProviderOrder(providerOrder());
-      return request(`season:${season}:${year}:providers:${JSON.stringify(order)}`, 0, async () => {
-        const response = await coordinator.load({ kind: 'season', season, year }, order);
-        return {
-          season, year, shows: seasonItems(response.data),
-          provenance: response.provenance, cacheWarning: response.cacheWarning
-        };
-      });
+      const configuration = catalogConfiguration();
+      return request(
+        `season:${season}:${year}:providers:${JSON.stringify(order)}:mal:${configuration.generation}`,
+        0,
+        async () => {
+          const response = await coordinator.load({ kind: 'season', season, year }, order, configuration.myAnimeListClientId);
+          return {
+            season, year, shows: seasonItems(response.data),
+            provenance: response.provenance, cacheWarning: response.cacheWarning
+          };
+        }
+      );
+    },
+    loadRecommendations(ids: number[]): Promise<CatalogSearchResponse> {
+      const normalizedIds = recommendationIds(ids);
+      if (!normalizedIds) return Promise.reject(new Error('Invalid recommendation seeds.'));
+      const order = normalizeCatalogProviderOrder(providerOrder());
+      const configuration = catalogConfiguration();
+      return request(
+        `recommendations:${normalizedIds.join(',')}:providers:${JSON.stringify(order)}:mal:${configuration.generation}`,
+        0,
+        async () => {
+          const response = await coordinator.load(
+            { kind: 'recommendations', ids: normalizedIds },
+            order,
+            configuration.myAnimeListClientId
+          );
+          return { results: response.data.items, provenance: response.provenance, cacheWarning: response.cacheWarning };
+        }
+      );
     },
     loadIndex(): Promise<SubsPleaseIndexResponse> {
       const key = 'index';

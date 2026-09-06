@@ -143,11 +143,7 @@ impl KitsuAdapter {
         query: &str,
         cache_dir: &std::path::Path,
     ) -> Result<(Vec<CatalogMedia>, Vec<String>), String> {
-        let url = kitsu_url(&[
-            ("filter[text]", query.trim().to_owned()),
-            ("page[limit]", KITSU_PAGE_LIMIT.to_string()),
-            ("page[offset]", "0".into()),
-        ])?;
+        let url = kitsu_search_url(query)?;
         let payload = self.client.request(url.clone()).await?;
         let page = parse_kitsu_page(payload, &url, 0, KITSU_PAGE_LIMIT)?;
         let mut warnings = Vec::new();
@@ -169,16 +165,22 @@ impl KitsuAdapter {
         let mut warnings = Vec::new();
         for page_number in 0..KITSU_MAX_SEASON_PAGES {
             let offset = page_number * KITSU_PAGE_LIMIT;
-            let url = kitsu_url(&[
-                ("filter[season]", season.as_str().to_ascii_lowercase()),
-                ("filter[seasonYear]", year.to_string()),
-                ("filter[subtype]", "TV,ONA".into()),
-                ("page[limit]", KITSU_PAGE_LIMIT.to_string()),
-                ("page[offset]", offset.to_string()),
-                ("sort", "-userCount".into()),
-            ])?;
-            let payload = self.client.request(url.clone()).await?;
-            let page = parse_kitsu_page(payload, &url, offset, KITSU_PAGE_LIMIT)?;
+            let url = kitsu_season_url(season, year, offset)?;
+            let page = match self
+                .client
+                .request(url.clone())
+                .await
+                .and_then(|payload| parse_kitsu_page(payload, &url, offset, KITSU_PAGE_LIMIT))
+            {
+                Ok(page) => page,
+                Err(error) => match kitsu_season_page_failure(anime.len(), error) {
+                    Ok(warning) => {
+                        warnings.push(warning);
+                        break;
+                    }
+                    Err(error) => return Err(error),
+                },
+            };
             let has_next_page = page.links.next.is_some();
             anime.extend(page.data);
             if !has_next_page {
@@ -291,6 +293,9 @@ impl CatalogAdapter for KitsuAdapter {
                 CatalogRequest::Search { query } => self.search(query, &cache_dir).await?,
                 CatalogRequest::Season { season, year } => {
                     self.season(*season, *year, &cache_dir).await?
+                }
+                CatalogRequest::Recommendations { .. } => {
+                    return Err("Kitsu does not support recommendations.".into())
                 }
             };
             Ok(CatalogResponse::new("kitsu", &request, items, warnings))
@@ -454,6 +459,16 @@ impl KitsuClient {
     }
 }
 
+fn kitsu_season_page_failure(loaded_items: usize, error: String) -> Result<String, String> {
+    if loaded_items == 0 {
+        Err(error)
+    } else {
+        Ok(format!(
+            "Kitsu season results are partial because a later page was unavailable: {error}"
+        ))
+    }
+}
+
 fn reserve_kitsu_request(control: &mut RequestControl, now: Instant) -> Result<Duration, String> {
     ensure_kitsu_available(control, now)?;
     let request_at = control.next_request_at.max(now);
@@ -482,6 +497,25 @@ fn kitsu_retry_after(retry_after: Option<&str>) -> Duration {
         .unwrap_or(KITSU_DEFAULT_RATE_COOLDOWN_SECONDS)
         .clamp(1, KITSU_MAX_RATE_COOLDOWN_SECONDS);
     Duration::from_secs(seconds)
+}
+
+fn kitsu_search_url(query: &str) -> Result<Url, String> {
+    kitsu_url(&[
+        ("filter[text]", query.trim().to_owned()),
+        ("page[limit]", KITSU_PAGE_LIMIT.to_string()),
+        ("page[offset]", "0".into()),
+    ])
+}
+
+fn kitsu_season_url(season: CatalogSeason, year: i32, offset: usize) -> Result<Url, String> {
+    kitsu_url(&[
+        ("filter[season]", season.as_str().to_ascii_lowercase()),
+        ("filter[seasonYear]", year.to_string()),
+        ("filter[subtype]", "TV,ONA".into()),
+        ("page[limit]", KITSU_PAGE_LIMIT.to_string()),
+        ("page[offset]", offset.to_string()),
+        ("sort", "-userCount".into()),
+    ])
 }
 
 fn kitsu_url(query: &[(&str, String)]) -> Result<Url, String> {
@@ -930,7 +964,8 @@ mod tests {
     use serde_json::Value;
 
     use super::{
-        append_bounded, kitsu_retry_after, kitsu_season, kitsu_url, normalize_kitsu_anime,
+        append_bounded, kitsu_retry_after, kitsu_search_url, kitsu_season,
+        kitsu_season_page_failure, kitsu_season_url, kitsu_url, normalize_kitsu_anime,
         parse_kitsu_date, parse_kitsu_page, reserve_kitsu_request, KitsuAnime, RequestControl,
         KITSU_MAX_RESPONSE_BYTES, KITSU_REQUEST_INTERVAL,
     };
@@ -957,19 +992,89 @@ mod tests {
     }
 
     #[test]
-    fn builds_only_fixed_kitsu_urls_with_encoded_inputs() {
-        let url = kitsu_url(&[
-            ("filter[text]", "Frieren & Fern".into()),
-            ("page[limit]", "20".into()),
+    fn builds_every_kitsu_query_with_encoded_inputs() {
+        let search = kitsu_search_url("  Frieren & Fern  ").unwrap();
+        assert_eq!(search.origin().ascii_serialization(), "https://kitsu.io");
+        assert_eq!(search.path(), "/api/edge/anime");
+        assert_eq!(
+            search.query().unwrap(),
+            "filter%5Btext%5D=Frieren+%26+Fern&page%5Blimit%5D=20&page%5Boffset%5D=0"
+        );
+
+        let season = kitsu_season_url(super::CatalogSeason::Winter, 2026, 40).unwrap();
+        assert_eq!(
+            season.query().unwrap(),
+            "filter%5Bseason%5D=winter&filter%5BseasonYear%5D=2026&filter%5Bsubtype%5D=TV%2CONA&page%5Blimit%5D=20&page%5Boffset%5D=40&sort=-userCount"
+        );
+    }
+
+    #[test]
+    fn parses_the_current_live_kitsu_json_api_shape() {
+        let request = kitsu_url(&[
+            ("filter[text]", "Frieren".into()),
+            ("page[limit]", "1".into()),
             ("page[offset]", "0".into()),
         ])
         .unwrap();
-        assert_eq!(url.origin().ascii_serialization(), "https://kitsu.io");
-        assert_eq!(url.path(), "/api/edge/anime");
-        assert!(url
-            .query()
-            .unwrap()
-            .contains("filter%5Btext%5D=Frieren+%26+Fern"));
+        let next = kitsu_url(&[
+            ("filter[text]", "Frieren".into()),
+            ("page[limit]", "1".into()),
+            ("page[offset]", "1".into()),
+        ])
+        .unwrap();
+        let last = kitsu_url(&[
+            ("filter[text]", "Frieren".into()),
+            ("page[limit]", "1".into()),
+            ("page[offset]", "5".into()),
+        ])
+        .unwrap();
+        let fixture = serde_json::json!({
+            "data": [{
+                "id": "46474",
+                "type": "anime",
+                "links": { "self": "https://kitsu.io/api/edge/anime/46474" },
+                "attributes": {
+                    "createdAt": "2022-09-13T05:36:19.002Z",
+                    "slug": "sousou-no-frieren",
+                    "synopsis": "An elf mage retraces a journey.",
+                    "description": "An elf mage retraces a journey.",
+                    "titles": {
+                        "en": "Frieren: Beyond Journey’s End",
+                        "en_jp": "Sousou no Frieren",
+                        "ja_jp": "葬送のフリーレン"
+                    },
+                    "canonicalTitle": "Sousou no Frieren",
+                    "abbreviatedTitles": ["Frieren at the Funeral"],
+                    "averageRating": "88.81",
+                    "userCount": 21024,
+                    "startDate": "2023-09-29",
+                    "endDate": "2024-03-22",
+                    "subtype": "TV",
+                    "showType": "TV",
+                    "status": "finished",
+                    "posterImage": {
+                        "large": "https://media.kitsu.app/anime/46474/poster_image/large.jpeg",
+                        "meta": { "dimensions": { "large": { "width": 550, "height": 780 } } }
+                    },
+                    "coverImage": null,
+                    "episodeCount": 28,
+                    "episodeLength": 24,
+                    "youtubeVideoId": "qgQunxD0qCk",
+                    "ratingFrequencies": { "20": "1" },
+                    "nsfw": false
+                }
+            }],
+            "meta": { "count": 6 },
+            "links": {
+                "first": request.as_str(),
+                "next": next.as_str(),
+                "last": last.as_str()
+            }
+        });
+        let page = parse_kitsu_page(fixture, &request, 0, 1).unwrap();
+        assert_eq!(page.data[0].id, "46474");
+        assert_eq!(page.data[0].attributes.user_count, 21024);
+        assert_eq!(page.links.next.as_deref(), Some(next.as_str()));
     }
 
     #[test]
@@ -997,6 +1102,21 @@ mod tests {
             "https://example.com/api/edge/anime?page%5Blimit%5D=20&page%5Boffset%5D=0".into(),
         );
         assert!(parse_kitsu_page(malicious, &request, 0, 20).is_err());
+    }
+
+    #[test]
+    fn keeps_validated_kitsu_pages_when_a_later_page_is_unavailable() {
+        let warning = kitsu_season_page_failure(
+            20,
+            "Kitsu returned an HTTP 500 Internal Server Error server error.".into(),
+        )
+        .unwrap();
+        assert!(warning.contains("results are partial"));
+        assert!(warning.contains("HTTP 500"));
+        assert_eq!(
+            kitsu_season_page_failure(0, "first page failed".into()).unwrap_err(),
+            "first page failed"
+        );
     }
 
     #[test]

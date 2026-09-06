@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onDestroy, onMount } from 'svelte';
   import { BookOpen, Check, Play, Search, X } from '@lucide/svelte';
+  import { Badge } from '$lib/components/ui/badge';
   import { Button } from '$lib/components/ui/button';
   import {
     InputGroup,
@@ -250,9 +251,9 @@
     selectedDay = nextDay;
   }
 
-  function subsPleaseScheduleLabel(entry: LibraryEntry): string {
-    if (!entry.airingTime) return 'SP Archive';
-    return `SP ${entry.day?.slice(0, 3) ?? ''} ${entry.airingTime}`.trim();
+  function nextAiringLabel(entry: LibraryEntry): string {
+    if (!entry.airingTime) return '';
+    return `Next on ${entry.day?.slice(0, 3) ?? ''} ${entry.airingTime}`.trim();
   }
 
   function preferredDownload(release: SubsPleaseRelease): SubsPleaseDownload | undefined {
@@ -311,7 +312,6 @@
     title={entry.title}
     imageUrl={posterUrl(entry.imageUrl)}
     verdict={entry.discoveryVerdict}
-    bottomRight={subsPleaseScheduleLabel(entry)}
     notice={waiting > 0 ? `${waiting} new` : ''}
     onOpen={() => openEntry(entry)}
   >
@@ -337,6 +337,12 @@
         {/if}
       {:else}
         <span class="block truncate">{aired ? 'Up to date' : 'Episodes TBA'}</span>
+      {/if}
+    {/snippet}
+
+    {#snippet footer()}
+      {#if nextAiringLabel(entry)}
+        <Badge>{nextAiringLabel(entry)}</Badge>
       {/if}
     {/snippet}
 

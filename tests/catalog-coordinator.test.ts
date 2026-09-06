@@ -176,10 +176,124 @@ test('malformed provider results and wrong season data fail over, never become c
   assert.equal(normalizeCatalogResponse(response('jikan'), 'anilist', request), undefined);
 });
 
+test('recommendations skip unconfigured official MyAnimeList without an outage warning', async () => {
+  const registry: CatalogProvider[] = [
+    { id: 'myanimelist', label: 'MyAnimeList', capabilities: ['recommendations'] },
+    { id: 'jikan', label: 'MyAnimeList (Jikan)', capabilities: ['recommendations'] },
+    { id: 'kitsu', label: 'Kitsu', capabilities: ['search'] }
+  ];
+  const calls: Array<Record<string, unknown> | undefined> = [];
+  const client = createCatalogCoordinator(async <T>(name: string, args?: Record<string, unknown>): Promise<T> => {
+    if (name === 'catalog_providers') return registry as T;
+    calls.push(args);
+    return { provider: 'jikan', items, warnings: [] } as T;
+  });
+
+  const result = await client.load({ kind: 'recommendations', ids: [42] }, ['myanimelist', 'jikan']);
+  assert.equal(result.provenance.provider, 'jikan');
+  assert.equal(result.provenance.failedProviders, undefined);
+  assert.equal('myAnimeListClientId' in (calls[0] ?? {}), false);
+});
+
+test('a changed MyAnimeList Client ID clears its cooldown', async () => {
+  const registry: CatalogProvider[] = [
+    { id: 'myanimelist', label: 'MyAnimeList', capabilities: ['search'] },
+    { id: 'jikan', label: 'MyAnimeList (Jikan)', capabilities: ['search'] }
+  ];
+  const calls: Array<{ provider: string; clientId?: string }> = [];
+  const client = createCatalogCoordinator(async <T>(name: string, args?: Record<string, unknown>): Promise<T> => {
+    if (name === 'catalog_providers') return registry as T;
+    const provider = String(args?.provider);
+    calls.push({ provider, clientId: typeof args?.myAnimeListClientId === 'string' ? args.myAnimeListClientId : undefined });
+    if (provider === 'myanimelist' && args?.myAnimeListClientId === 'Client_ID-1') throw new Error('rejected');
+    return { provider, items: [], warnings: [] } as T;
+  });
+
+  await client.load({ kind: 'search', query: 'first' }, ['myanimelist', 'jikan'], 'Client_ID-1');
+  await client.load({ kind: 'search', query: 'second' }, ['myanimelist', 'jikan'], 'Client_ID-1');
+  await client.load({ kind: 'search', query: 'third' }, ['myanimelist', 'jikan'], 'Client_ID-2');
+  assert.deepEqual(calls, [
+    { provider: 'myanimelist', clientId: 'Client_ID-1' },
+    { provider: 'jikan', clientId: undefined },
+    { provider: 'jikan', clientId: undefined },
+    { provider: 'myanimelist', clientId: 'Client_ID-2' }
+  ]);
+});
+
+test('a changed MyAnimeList Client ID does not dedupe with an older request', async () => {
+  const registry: CatalogProvider[] = [
+    { id: 'myanimelist', label: 'MyAnimeList', capabilities: ['search'] }
+  ];
+  let releaseFirst!: () => void;
+  let firstStarted!: () => void;
+  const started = new Promise<void>((resolve) => { firstStarted = resolve; });
+  const client = createCatalogCoordinator(async <T>(name: string, args?: Record<string, unknown>): Promise<T> => {
+    if (name === 'catalog_providers') return registry as T;
+    if (args?.myAnimeListClientId === 'Client_ID-1') {
+      firstStarted();
+      return await new Promise<T>((resolve) => { releaseFirst = () => resolve({ provider: 'myanimelist', items: [], warnings: [] } as T); });
+    }
+    return { provider: 'myanimelist', items: [], warnings: [] } as T;
+  });
+  const request = { kind: 'search' as const, query: 'same query' };
+  const first = client.load(request, ['myanimelist'], 'Client_ID-1');
+  await started;
+  const replacement = client.load(request, ['myanimelist'], 'Client_ID-2');
+  assert.notEqual(first, replacement);
+  await replacement;
+  releaseFirst();
+  await first;
+});
+
+test('a late failure from an old Client ID cannot cool down its replacement', async () => {
+  const registry: CatalogProvider[] = [
+    { id: 'myanimelist', label: 'MyAnimeList', capabilities: ['search'] }
+  ];
+  let rejectFirst!: (reason: Error) => void;
+  let firstStarted!: () => void;
+  const started = new Promise<void>((resolve) => { firstStarted = resolve; });
+  let replacementCalls = 0;
+  const client = createCatalogCoordinator(async <T>(name: string, args?: Record<string, unknown>): Promise<T> => {
+    if (name === 'catalog_providers') return registry as T;
+    if (args?.myAnimeListClientId === 'Client_ID-1') {
+      firstStarted();
+      return new Promise<T>((_, reject) => { rejectFirst = reject; });
+    }
+    replacementCalls += 1;
+    return { provider: 'myanimelist', items: [], warnings: [] } as T;
+  });
+  const first = client.load(request, ['myanimelist'], 'Client_ID-1');
+  const failed = assert.rejects(first, /old authentication failed/);
+  await started;
+  await client.load({ kind: 'search', query: 'replacement' }, ['myanimelist'], 'Client_ID-2');
+  rejectFirst(new Error('old authentication failed'));
+  await failed;
+  await client.load({ kind: 'search', query: 'another title' }, ['myanimelist'], 'Client_ID-2');
+  assert.equal(replacementCalls, 2);
+});
+
+test('recommendation request keys are sorted and cached without credentials', async () => {
+  const registry: CatalogProvider[] = [
+    { id: 'anilist', label: 'AniList', capabilities: ['recommendations'] }
+  ];
+  let calls = 0;
+  const client = createCatalogCoordinator(backend((provider, request) => {
+    calls += 1;
+    assert.deepEqual(request, { kind: 'recommendations', ids: [2, 1] });
+    return { provider, items, warnings: [] };
+  }, registry));
+  await client.load({ kind: 'recommendations', ids: [2, 1] });
+  const cached = await client.load({ kind: 'recommendations', ids: [1, 2] });
+  assert.equal(calls, 1);
+  assert.equal(cached.provenance.cache, 'fresh');
+});
+
 test('invalid input is rejected before fetching the registry or contacting providers', async () => {
   const client = createCatalogCoordinator(async () => { throw new Error('must not be called'); });
   await assert.rejects(client.load({ kind: 'search', query: '\u0000unsafe' }), /Invalid catalog request/);
   await assert.rejects(client.load({ kind: 'season', season: 'SUMMER', year: 10 }), /Invalid catalog request/);
+  await assert.rejects(client.load({ kind: 'recommendations', ids: [1, 1] }), /Invalid catalog request/);
+  await assert.rejects(client.load({ kind: 'recommendations', ids: Array.from({ length: 11 }, (_, index) => index + 1) }), /Invalid catalog request/);
   assert.equal(normalizeCatalogProviders([...providers, providers[0]]), undefined);
 });
 
@@ -227,16 +341,37 @@ test('legacy saved seasons remain usable without being re-dated', async () => {
 });
 
 test('preview adapters expose the same contract and canonical fixture identities', async () => {
-  const previewProviders: CatalogProvider[] = [...providers, { id: 'kitsu', label: 'Kitsu', capabilities: ['search', 'season'] }];
+  const previewProviders: CatalogProvider[] = [
+    { id: 'anilist', label: 'AniList', capabilities: ['search', 'season', 'recommendations'] },
+    { id: 'myanimelist', label: 'MyAnimeList', capabilities: ['search', 'season', 'recommendations'] },
+    { id: 'jikan', label: 'MyAnimeList (Jikan)', capabilities: ['search', 'season', 'recommendations'] },
+    { id: 'kitsu', label: 'Kitsu', capabilities: ['search', 'season'] }
+  ];
   assert.deepEqual(await callPreviewBackend('catalog_providers'), previewProviders);
   const primary = await callPreviewBackend('catalog_request', { provider: 'anilist', request: { kind: 'search', query: 'Black' } });
+  const official = await callPreviewBackend('catalog_request', {
+    provider: 'myanimelist', request: { kind: 'search', query: 'Black' }, myAnimeListClientId: 'Client_ID-42'
+  });
   const alternative = await callPreviewBackend('catalog_request', { provider: 'jikan', request: { kind: 'search', query: 'Black' } });
   const kitsu = await callPreviewBackend('catalog_request', { provider: 'kitsu', request: { kind: 'search', query: 'Black' } });
+  const recommendations = await callPreviewBackend('catalog_request', {
+    provider: 'anilist', request: { kind: 'recommendations', ids: [1] }
+  });
   const normalizedPrimary = normalizeCatalogResponse(primary, 'anilist', request);
+  const normalizedOfficial = normalizeCatalogResponse(official, 'myanimelist', request);
   const normalizedAlternative = normalizeCatalogResponse(alternative, 'jikan', request);
   const normalizedKitsu = normalizeCatalogResponse(kitsu, 'kitsu', request);
+  const normalizedRecommendations = normalizeCatalogResponse(
+    recommendations, 'anilist', { kind: 'recommendations', ids: [1] }
+  );
   assert.ok(normalizedPrimary?.items.length);
+  assert.deepEqual(normalizedPrimary?.items, normalizedOfficial?.items);
   assert.deepEqual(normalizedPrimary?.items, normalizedAlternative?.items);
   assert.deepEqual(normalizedPrimary?.items, normalizedKitsu?.items);
+  assert.ok(normalizedRecommendations?.items.length);
+  assert.equal(normalizedRecommendations?.items[0].trailer?.id, 'eRsGyueVLvQ');
+  await assert.rejects(callPreviewBackend('catalog_request', {
+    provider: 'kitsu', request: { kind: 'recommendations', ids: [1] }
+  }), /does not support/);
   assert.equal(catalogSourceLabel({ provider: 'jikan', label: 'Jikan', fetchedAt: initialTime, cache: 'stale' }, initialTime + 2 * 24 * 60 * 60_000), 'Jikan · saved 2d ago');
 });

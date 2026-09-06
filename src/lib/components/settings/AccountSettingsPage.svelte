@@ -3,9 +3,16 @@
   import ContextToolbar from '$lib/components/shared/ContextToolbar.svelte';
   import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert';
   import { Button } from '$lib/components/ui/button';
+  import { Input } from '$lib/components/ui/input';
   import { createLibraryExport, parseLibraryExport } from '$lib/library';
   import { readLibraryFile, writeLibraryFile } from '$lib/library-transfer';
-  import { CATALOG_PROVIDERS, loadSettings, saveSettings, type CatalogProviderId } from '$lib/settings';
+  import {
+    CATALOG_PROVIDERS,
+    loadSettings,
+    normalizeMyAnimeListClientId,
+    saveSettings,
+    type CatalogProviderId
+  } from '$lib/settings';
   import type {
     LibraryBackupEntry,
     LibraryEntry,
@@ -59,6 +66,8 @@
   let transferStatus = $state<TransferStatus | null>(null);
   let catalogProviderOrder = $state<CatalogProviderId[]>(loadSettings().catalogProviderOrder);
   let catalogProviderStatus = $state('');
+  let myAnimeListClientId = $state(loadSettings().myAnimeListClientId ?? '');
+  let myAnimeListClientIdStatus = $state('');
 
   function moveCatalogProvider(provider: CatalogProviderId, direction: -1 | 1): void {
     const index = catalogProviderOrder.indexOf(provider);
@@ -69,6 +78,20 @@
     catalogProviderOrder = next;
     catalogProviderStatus = `${CATALOG_PROVIDERS.find((item) => item.id === provider)?.label ?? provider} moved to position ${destination + 1}.`;
     saveSettings({ catalogProviderOrder: next });
+  }
+
+  function saveMyAnimeListClientId(): void {
+    const trimmed = myAnimeListClientId.trim();
+    const normalized = normalizeMyAnimeListClientId(trimmed);
+    if (trimmed && !normalized) {
+      myAnimeListClientIdStatus = 'Enter 8–128 letters, numbers, hyphens, or underscores.';
+      return;
+    }
+    myAnimeListClientId = normalized ?? '';
+    saveSettings({ myAnimeListClientId: normalized });
+    myAnimeListClientIdStatus = normalized
+      ? 'Official MyAnimeList requests are enabled on this device.'
+      : 'Official MyAnimeList requests are disabled on this device.';
   }
 
   function errorMessage(reason: unknown): string {
@@ -194,6 +217,33 @@
           </button>
         {/each}
       </div>
+    </section>
+
+    <section class="mt-10 grid gap-8 border-t border-(--text)/8 pt-10 md:grid-cols-[14rem_minmax(0,1fr)]" aria-labelledby="myanimelist-client-id-title">
+      <div class="text-reveal">
+        <span class="mb-3 grid size-9 place-items-center rounded-full bg-(--text)/6 text-(--text)/55"><Database class="size-4" /></span>
+        <h2 id="myanimelist-client-id-title" class="font-semibold">Official MyAnimeList access</h2>
+        <p class="mt-2 text-sm leading-6 text-(--text)/42">Use your public MyAnimeList app Client ID for the official catalog API.</p>
+      </div>
+
+      <form class="rounded-3xl border border-(--text)/8 bg-(--bg-elevated) p-5" onsubmit={(event) => { event.preventDefault(); saveMyAnimeListClientId(); }}>
+        <label for="myanimelist-client-id" class="text-sm font-medium">MyAnimeList Client ID</label>
+        <div class="mt-3 flex flex-col gap-3 sm:flex-row">
+          <Input
+            id="myanimelist-client-id"
+            class="h-10 flex-1"
+            autocomplete="off"
+            spellcheck={false}
+            placeholder="Public app identifier"
+            bind:value={myAnimeListClientId}
+            oninput={() => (myAnimeListClientIdStatus = '')}
+            aria-describedby="myanimelist-client-id-help myanimelist-client-id-status"
+          />
+          <Button type="submit" class="self-start sm:self-auto">Save Client ID</Button>
+        </div>
+        <p id="myanimelist-client-id-help" class="mt-3 text-xs leading-5 text-(--text)/42">This is a public app identifier, not an OAuth secret. It stays only in this browser’s local settings and is sent only with official MyAnimeList requests.</p>
+        <p id="myanimelist-client-id-status" class="mt-2 text-xs text-(--text)/55" aria-live="polite">{myAnimeListClientIdStatus}</p>
+      </form>
     </section>
 
     <section class="mt-10 grid gap-8 border-t border-(--text)/8 pt-10 md:grid-cols-[14rem_minmax(0,1fr)]" aria-labelledby="catalog-provider-order-title">

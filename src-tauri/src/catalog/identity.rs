@@ -71,6 +71,11 @@ pub(super) struct IdentityResolution {
     pub(super) warnings: Vec<String>,
 }
 
+pub(super) struct ProviderResolution {
+    pub(super) provider_id_by_anilist_id: HashMap<i64, i64>,
+    pub(super) warnings: Vec<String>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct StoredSource {
@@ -102,6 +107,7 @@ struct FribbIdentityEntry {
 
 struct IdentityIndex {
     by_provider_id: HashMap<ProviderId, i64>,
+    provider_id_by_anilist_and_provider: HashMap<(i64, String), i64>,
     conflicts: usize,
 }
 
@@ -130,10 +136,63 @@ impl IdentityResolver {
             .iter()
             .map(|value| value.provider.clone())
             .collect::<HashSet<_>>();
+        let (index, warnings) = self.resolve_index(cache_dir, &required_providers).await?;
+        let anilist_by_provider_id = provider_ids
+            .iter()
+            .filter_map(|provider_id| {
+                index
+                    .by_provider_id
+                    .get(provider_id)
+                    .copied()
+                    .map(|anilist_id| (provider_id.clone(), anilist_id))
+            })
+            .collect();
+        Ok(IdentityResolution {
+            anilist_by_provider_id,
+            warnings,
+        })
+    }
+
+    pub(super) async fn resolve_anilist_ids(
+        &self,
+        anilist_ids: &HashSet<i64>,
+        provider: &str,
+        cache_dir: &Path,
+    ) -> Result<ProviderResolution, String> {
+        if anilist_ids.is_empty()
+            || anilist_ids.len() > 200
+            || anilist_ids.iter().any(|id| !valid_identity_id(*id))
+            || !valid_provider_name(provider)
+        {
+            return Err("Invalid canonical identity lookup.".into());
+        }
+        let required_providers = HashSet::from([provider.to_owned()]);
+        let (index, warnings) = self.resolve_index(cache_dir, &required_providers).await?;
+        let provider_id_by_anilist_id = anilist_ids
+            .iter()
+            .filter_map(|anilist_id| {
+                index
+                    .provider_id_by_anilist_and_provider
+                    .get(&(*anilist_id, provider.to_owned()))
+                    .copied()
+                    .map(|provider_id| (*anilist_id, provider_id))
+            })
+            .collect();
+        Ok(ProviderResolution {
+            provider_id_by_anilist_id,
+            warnings,
+        })
+    }
+
+    async fn resolve_index(
+        &self,
+        cache_dir: &Path,
+        required_providers: &HashSet<String>,
+    ) -> Result<(IdentityIndex, Vec<String>), String> {
         let mut state = self.state.lock().await;
         self.load_files(&mut state, cache_dir).await?;
         let mut warnings = state.load_warnings.clone();
-        self.refresh_source_if_needed(&mut state, cache_dir, &required_providers, &mut warnings)
+        self.refresh_source_if_needed(&mut state, cache_dir, required_providers, &mut warnings)
             .await;
 
         let mut pairs = state
@@ -150,21 +209,7 @@ impl IdentityResolver {
                 index.conflicts
             ));
         }
-
-        let anilist_by_provider_id = provider_ids
-            .iter()
-            .filter_map(|provider_id| {
-                index
-                    .by_provider_id
-                    .get(provider_id)
-                    .copied()
-                    .map(|anilist_id| (provider_id.clone(), anilist_id))
-            })
-            .collect();
-        Ok(IdentityResolution {
-            anilist_by_provider_id,
-            warnings,
-        })
+        Ok((index, warnings))
     }
 
     pub(super) async fn learn_anilist_mappings(
@@ -495,6 +540,7 @@ fn build_index(pairs: Vec<IdentityPair>) -> Result<IdentityIndex, String> {
     }
 
     let mut by_provider_id = HashMap::new();
+    let mut provider_id_by_anilist_and_provider = HashMap::new();
     let mut conflicts = 0;
     for pair in unique {
         let forward_unique = forward
@@ -504,6 +550,10 @@ fn build_index(pairs: Vec<IdentityPair>) -> Result<IdentityIndex, String> {
             .get(&pair.provider_id)
             .is_some_and(|ids| ids.len() == 1);
         if forward_unique && reverse_unique {
+            provider_id_by_anilist_and_provider.insert(
+                (pair.anilist_id, pair.provider_id.provider.clone()),
+                pair.provider_id.id,
+            );
             by_provider_id.insert(pair.provider_id, pair.anilist_id);
         } else {
             conflicts += 1;
@@ -511,6 +561,7 @@ fn build_index(pairs: Vec<IdentityPair>) -> Result<IdentityIndex, String> {
     }
     Ok(IdentityIndex {
         by_provider_id,
+        provider_id_by_anilist_and_provider,
         conflicts,
     })
 }
@@ -601,6 +652,8 @@ fn unix_timestamp() -> u64 {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::{
         append_bounded, build_index, parse_fribb_source, source_covers_providers, IdentityPair,
         ProviderId, StoredSource, CACHE_VERSION, MAX_SOURCE_RESPONSE_BYTES,
@@ -633,6 +686,15 @@ mod tests {
         .unwrap();
         assert_eq!(index.conflicts, 4);
         assert_eq!(index.by_provider_id.get(&ProviderId::mal(40)), Some(&4));
+        assert_eq!(
+            index
+                .provider_id_by_anilist_and_provider
+                .get(&(4, "mal".into())),
+            Some(&40)
+        );
+        assert!(!index
+            .provider_id_by_anilist_and_provider
+            .contains_key(&(1, "mal".into())));
         assert!(!index.by_provider_id.contains_key(&ProviderId::mal(10)));
         assert!(!index.by_provider_id.contains_key(&ProviderId::mal(11)));
         assert!(!index.by_provider_id.contains_key(&ProviderId::mal(20)));
@@ -713,6 +775,20 @@ mod tests {
             .anilist_by_provider_id
             .contains_key(&ProviderId::mal(999)));
         assert!(result.warnings.is_empty());
+
+        let canonical = [1, 2, 999].into_iter().collect();
+        let reverse = restarted
+            .resolve_anilist_ids(&canonical, "mal", directory.path())
+            .await
+            .unwrap();
+        assert_eq!(reverse.provider_id_by_anilist_id.get(&1), Some(&10));
+        assert_eq!(reverse.provider_id_by_anilist_id.get(&2), Some(&20));
+        assert!(!reverse.provider_id_by_anilist_id.contains_key(&999));
+        assert!(reverse.warnings.is_empty());
+        assert!(restarted
+            .resolve_anilist_ids(&HashSet::new(), "mal", directory.path())
+            .await
+            .is_err());
     }
 
     #[tokio::test]

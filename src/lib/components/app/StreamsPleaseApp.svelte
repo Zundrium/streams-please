@@ -68,7 +68,7 @@
   import SubsPleasePage from '$lib/components/catalog/SubsPleasePage.svelte';
   import TasteIndicator from '$lib/components/catalog/TasteIndicator.svelte';
   import UpdateStatus from '$lib/components/app/UpdateStatus.svelte';
-  import { checkForUpdate, installPendingUpdate } from '$lib/updates';
+  import { checkForUpdate, createUpdateController, installPendingUpdate } from '$lib/updates';
   import { DAY_ORDER } from '$lib/types';
   import type {
     AddTorrentResponse,
@@ -92,8 +92,7 @@
     SubsPleaseScheduleShow,
     SubsPleaseShowResponse,
     TrailerPlaybackRequest,
-    TorrentStats,
-    UpdateDownloadEvent
+    TorrentStats
   } from '$lib/types';
 
   type TrailerResumeState = {
@@ -137,6 +136,7 @@
   const {
     loadSearch: loadAniListSearch,
     loadSeason: loadAniListSeason,
+    loadRecommendations: loadCatalogRecommendations,
     loadIndex: loadSubsPleaseIndex,
     loadSchedule: loadSubsPleaseSchedule,
     loadShow: loadSubsPleaseShow
@@ -190,7 +190,6 @@
   let trailerOriginView = $state<AppView | null>(null);
   let mpvMediaOwner: MpvMediaOwner = 'episode';
   let mpvLoadWaiter: MpvLoadWaiter | null = null;
-  let updateOperation: Promise<void> | null = null;
   const pendingEpisodeMediaOperations = new Set<Promise<void>>();
 
   let runtime = $state<RuntimeInfo | null>(null);
@@ -214,6 +213,11 @@
   let phase = $state<Phase>('idle');
   let error = $state('');
   let updateStatus = $state<AppUpdateStatus | null>(null);
+  const updateController = createUpdateController({
+    checkForUpdate,
+    installPendingUpdate,
+    onStatusChange: (status) => (updateStatus = status)
+  });
   let current = $state<CurrentTorrent | null>(null);
   let stats = $state<TorrentStats | null>(null);
   let queueOpen = $state(false);
@@ -2096,41 +2100,13 @@
   }
 
   function startAppUpdate() {
-    if (!isTauri() || updateOperation) return;
-    updateOperation = runAppUpdate().finally(() => (updateOperation = null));
+    if (!isTauri()) return;
+    void updateController.check();
   }
 
-  async function runAppUpdate() {
-    updateStatus = null;
-    try {
-      const result = await checkForUpdate();
-      if (result.status !== 'available') return;
-      updateStatus = {
-        phase: 'downloading',
-        version: result.version,
-        downloadedBytes: 0
-      };
-      await installPendingUpdate((event) => updateDownloadProgress(result.version, event));
-    } catch (reason) {
-      updateStatus = {
-        phase: 'error',
-        message: reason instanceof Error ? reason.message : String(reason)
-      };
-    }
-  }
-
-  function updateDownloadProgress(version: string, event: UpdateDownloadEvent) {
-    if (!updateStatus || updateStatus.phase !== 'downloading') return;
-    if (event.event === 'started') {
-      updateStatus = { ...updateStatus, totalBytes: event.data.contentLength };
-    } else if (event.event === 'progress') {
-      updateStatus = {
-        ...updateStatus,
-        downloadedBytes: updateStatus.downloadedBytes + event.data.chunkLength
-      };
-    } else if (updateStatus.totalBytes) {
-      updateStatus = { ...updateStatus, downloadedBytes: updateStatus.totalBytes, version };
-    }
+  function acceptAppUpdate() {
+    if (!isTauri()) return;
+    void updateController.accept();
   }
 
 </script>
@@ -2188,6 +2164,7 @@
   {:else if activeView === 'discovery'}
     <DiscoveryPage
       loadSeason={loadAniListSeason}
+      loadRecommendations={loadCatalogRecommendations}
       loadIndex={loadSubsPleaseIndex}
       loadSchedule={loadSubsPleaseSchedule}
       loadShow={loadSubsPleaseShow}
@@ -2528,6 +2505,7 @@
 {#if updateStatus}
   <UpdateStatus
     status={updateStatus}
+    onAccept={acceptAppUpdate}
     onRetry={startAppUpdate}
     onDismiss={() => (updateStatus = null)}
   />

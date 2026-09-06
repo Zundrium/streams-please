@@ -325,13 +325,6 @@
           aria-pressed={mode === 'season'}
           onclick={() => selectMode('season')}
         >Season</Button>
-        <Button
-          variant={mode === 'archive' ? 'default' : 'ghost'}
-          size="sm"
-          class="px-2 text-xs sm:px-3 sm:text-sm"
-          aria-pressed={mode === 'archive'}
-          onclick={() => selectMode('archive')}
-        >Archive</Button>
       </div>
 
       <div class="col-start-2 row-start-1 justify-self-center">

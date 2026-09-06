@@ -11,8 +11,9 @@ use tauri::State;
 use tokio::sync::Semaphore;
 
 use super::{
-    identity::IdentityResolver, AdapterFuture, CatalogAdapter, CatalogCapability, CatalogMedia,
-    CatalogProvider, CatalogRequest, CatalogResponse, CatalogState,
+    identity::IdentityResolver, validate_recommendation_ids, AdapterFuture, CatalogAdapter,
+    CatalogCapability, CatalogMedia, CatalogProvider, CatalogRequest, CatalogResponse,
+    CatalogState,
 };
 
 const ANILIST_ENDPOINT: &str = "https://graphql.anilist.co";
@@ -24,7 +25,13 @@ const ANILIST_DEFAULT_COOLDOWN_SECONDS: u64 = 30;
 const ANILIST_MAX_COOLDOWN_SECONDS: u64 = 5 * 60;
 const ANILIST_BLOCKED_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 const MAX_SEASON_PAGES: usize = 3;
-const CAPABILITIES: &[CatalogCapability] = &[CatalogCapability::Search, CatalogCapability::Season];
+const ANILIST_RECOMMENDATIONS_PER_SEED: usize = 10;
+const ANILIST_RECOMMENDATION_LIMIT: usize = 50;
+const CAPABILITIES: &[CatalogCapability] = &[
+    CatalogCapability::Search,
+    CatalogCapability::Season,
+    CatalogCapability::Recommendations,
+];
 const METADATA_FRAGMENT: &str = r#"
     fragment Metadata on Media {
         id
@@ -72,6 +79,24 @@ const METADATA_FRAGMENT: &str = r#"
                 }
             }
         }
+    }
+"#;
+const RECOMMENDATION_FRAGMENT: &str = r#"
+    fragment RecommendationCard on Media {
+        id
+        idMal
+        isAdult
+        title { romaji english native userPreferred }
+        synonyms
+        coverImage { extraLarge large color }
+        season
+        seasonYear
+        format
+        status
+        episodes
+        averageScore
+        popularity
+        siteUrl
     }
 "#;
 
@@ -246,58 +271,98 @@ impl AniListClient {
 
     pub(super) async fn metadata_by_title(&self, title: &str) -> Result<Option<Value>, String> {
         validate_anilist_search(title)?;
-        let [exact, normalized, short] = anilist_search_queries(title);
-        let query = [
-            r#"
-                query ($exact: String!, $normalized: String!, $short: String!) {
-                    exact: Page(page: 1, perPage: 6) {
-                        media(search: $exact, type: ANIME) { ...Metadata }
-                    }
-                    normalized: Page(page: 1, perPage: 6) {
-                        media(search: $normalized, type: ANIME) { ...Metadata }
-                    }
-                    short: Page(page: 1, perPage: 6) {
-                        media(search: $short, type: ANIME) { ...Metadata }
-                    }
-                }
-            "#,
-            METADATA_FRAGMENT,
-        ]
-        .concat();
-        let response = self
-            .request(
-                &query,
-                serde_json::json!({
-                    "exact": exact,
-                    "normalized": normalized,
-                    "short": short
-                }),
-            )
-            .await?;
+        let (query, variables) = metadata_by_title_request(title);
+        let response = self.request(&query, variables).await?;
         best_metadata_match(title, &response)
     }
 
     pub(super) async fn metadata_by_id(&self, id: i64) -> Result<Option<Value>, String> {
         validate_anilist_id(id)?;
-        let query = [
+        let (query, variables) = metadata_by_id_request(id);
+        media_from_response(&self.request(&query, variables).await?)
+    }
+
+    async fn season(&self, season: &str, year: i32) -> Result<Vec<Value>, String> {
+        let (query, variables) = season_request(season, year);
+        let response = self.request(query, variables).await?;
+        season_shows(&response)
+    }
+
+    async fn search(&self, query: &str) -> Result<Vec<Value>, String> {
+        validate_anilist_search(query)?;
+        let (request, variables) = search_request(query);
+        let response = self.request(request, variables).await?;
+        Ok(media_array(&response, "/data/Page/media", "search results")?.clone())
+    }
+
+    async fn recommendations(&self, ids: &[i64]) -> Result<AniListRecommendations, String> {
+        validate_recommendation_ids(ids)?;
+        let (query, variables) = recommendations_request(ids);
+        let response = self.request(&query, variables).await?;
+        recommendation_shows(&response, ids)
+    }
+}
+
+struct AniListRecommendations {
+    values: Vec<Value>,
+    matched_seed_count: usize,
+    omitted_count: usize,
+}
+
+struct RecommendationAggregate {
+    media: Value,
+    seed_ids: HashSet<i64>,
+    rating: i64,
+}
+
+fn metadata_by_title_request(title: &str) -> (String, Value) {
+    let [exact, normalized, short] = anilist_search_queries(title);
+    let query = [
+        r#"
+            query CatalogMetadataByTitle($exact: String!, $normalized: String!, $short: String!) {
+                exact: Page(page: 1, perPage: 6) {
+                    media(search: $exact, type: ANIME) { ...Metadata }
+                }
+                normalized: Page(page: 1, perPage: 6) {
+                    media(search: $normalized, type: ANIME) { ...Metadata }
+                }
+                short: Page(page: 1, perPage: 6) {
+                    media(search: $short, type: ANIME) { ...Metadata }
+                }
+            }
+        "#,
+        METADATA_FRAGMENT,
+    ]
+    .concat();
+    (
+        query,
+        serde_json::json!({
+            "exact": exact,
+            "normalized": normalized,
+            "short": short
+        }),
+    )
+}
+
+fn metadata_by_id_request(id: i64) -> (String, Value) {
+    (
+        [
             r#"
-                query ($id: Int!) {
+                query CatalogMetadataById($id: Int!) {
                     Media(id: $id, type: ANIME) { ...Metadata }
                 }
             "#,
             METADATA_FRAGMENT,
         ]
-        .concat();
-        media_from_response(
-            &self
-                .request(&query, serde_json::json!({ "id": id }))
-                .await?,
-        )
-    }
+        .concat(),
+        serde_json::json!({ "id": id }),
+    )
+}
 
-    async fn season(&self, season: &str, year: i32) -> Result<Vec<Value>, String> {
-        let query = r#"
-            query ($season: MediaSeason!, $year: Int!) {
+fn season_request(season: &str, year: i32) -> (&'static str, Value) {
+    (
+        r#"
+            query CatalogSeason($season: MediaSeason!, $year: Int!) {
                 page1: Page(page: 1, perPage: 50) { media(type: ANIME, season: $season, seasonYear: $year, format_in: [TV, TV_SHORT, ONA], isAdult: false, sort: [POPULARITY_DESC, START_DATE]) { ...SeasonCard } }
                 page2: Page(page: 2, perPage: 50) { media(type: ANIME, season: $season, seasonYear: $year, format_in: [TV, TV_SHORT, ONA], isAdult: false, sort: [POPULARITY_DESC, START_DATE]) { ...SeasonCard } }
                 page3: Page(page: 3, perPage: 50) { media(type: ANIME, season: $season, seasonYear: $year, format_in: [TV, TV_SHORT, ONA], isAdult: false, sort: [POPULARITY_DESC, START_DATE]) { ...SeasonCard } }
@@ -323,40 +388,167 @@ impl AniListClient {
                     }
                 }
             }
-        "#;
-        let response = self
-            .request(query, serde_json::json!({ "season": season, "year": year }))
-            .await?;
-        season_shows(&response)
-    }
+        "#,
+        serde_json::json!({ "season": season, "year": year }),
+    )
+}
 
-    async fn search(&self, query: &str) -> Result<Vec<Value>, String> {
-        validate_anilist_search(query)?;
-        let response = self
-            .request(
-                r#"
-                    query ($search: String!) {
-                        Page(page: 1, perPage: 10) {
-                            media(search: $search, type: ANIME, isAdult: false) {
-                                id
-                                idMal
-                                title { romaji english native userPreferred }
-                                synonyms
-                                coverImage { extraLarge large color }
-                                season
-                                seasonYear
-                                format
-                                status
-                                episodes
+fn search_request(query: &str) -> (&'static str, Value) {
+    (
+        r#"
+            query CatalogSearch($search: String!) {
+                Page(page: 1, perPage: 10) {
+                    media(search: $search, type: ANIME, isAdult: false) {
+                        id
+                        idMal
+                        title { romaji english native userPreferred }
+                        synonyms
+                        coverImage { extraLarge large color }
+                        season
+                        seasonYear
+                        format
+                        status
+                        episodes
+                    }
+                }
+            }
+        "#,
+        serde_json::json!({ "search": query.trim() }),
+    )
+}
+
+fn recommendations_request(ids: &[i64]) -> (String, Value) {
+    (
+        [
+            r#"
+                query CatalogRecommendations($ids: [Int!]!) {
+                    Page(page: 1, perPage: 20) {
+                        media(id_in: $ids, type: ANIME) {
+                            id
+                            recommendations(page: 1, perPage: 10, sort: [RATING_DESC, ID]) {
+                                nodes {
+                                    rating
+                                    mediaRecommendation { ...RecommendationCard }
+                                }
                             }
                         }
                     }
-                "#,
-                serde_json::json!({ "search": query.trim() }),
-            )
-            .await?;
-        Ok(media_array(&response, "/data/Page/media", "search results")?.clone())
+                }
+            "#,
+            RECOMMENDATION_FRAGMENT,
+        ]
+        .concat(),
+        serde_json::json!({ "ids": ids }),
+    )
+}
+
+fn recommendation_shows(
+    response: &Value,
+    requested_ids: &[i64],
+) -> Result<AniListRecommendations, String> {
+    let requested = requested_ids.iter().copied().collect::<HashSet<_>>();
+    let sources = media_array(response, "/data/Page/media", "recommendation seed results")?;
+    let mut seen_sources = HashSet::new();
+    let mut seen_pairs = HashSet::new();
+    let mut recommendations = HashMap::<i64, RecommendationAggregate>::new();
+
+    for source in sources {
+        let source_id = source
+            .get("id")
+            .and_then(Value::as_i64)
+            .filter(|id| requested.contains(id))
+            .ok_or_else(|| "AniList returned an invalid recommendation seed.".to_string())?;
+        if !seen_sources.insert(source_id) {
+            return Err("AniList returned a duplicate recommendation seed.".into());
+        }
+        let nodes = source
+            .pointer("/recommendations/nodes")
+            .and_then(Value::as_array)
+            .ok_or_else(|| "AniList returned invalid recommendations.".to_string())?;
+        if nodes.len() > ANILIST_RECOMMENDATIONS_PER_SEED {
+            return Err("AniList returned more recommendations than requested.".into());
+        }
+        for node in nodes {
+            let rating = match node.get("rating") {
+                None | Some(Value::Null) => 0,
+                Some(value) => value.as_i64().ok_or_else(|| {
+                    "AniList returned an invalid recommendation rating.".to_string()
+                })?,
+            };
+            let Some(media) = node.get("mediaRecommendation") else {
+                return Err("AniList returned an invalid recommendation item.".into());
+            };
+            if media.is_null() {
+                continue;
+            }
+            let media = media
+                .as_object()
+                .ok_or_else(|| "AniList returned an invalid recommendation item.".to_string())?;
+            let id = media
+                .get("id")
+                .and_then(Value::as_i64)
+                .filter(|id| super::valid_catalog_id(*id))
+                .ok_or_else(|| "AniList returned an invalid recommendation item.".to_string())?;
+            let is_adult = match media.get("isAdult") {
+                None | Some(Value::Null) => true,
+                Some(Value::Bool(is_adult)) => *is_adult,
+                Some(_) => return Err("AniList returned an invalid recommendation item.".into()),
+            };
+            if is_adult || requested.contains(&id) || !seen_pairs.insert((source_id, id)) {
+                continue;
+            }
+            let aggregate = recommendations
+                .entry(id)
+                .or_insert_with(|| RecommendationAggregate {
+                    media: Value::Object(media.clone()),
+                    seed_ids: HashSet::new(),
+                    rating: 0,
+                });
+            aggregate.seed_ids.insert(source_id);
+            aggregate.rating = aggregate.rating.saturating_add(rating.max(0));
+        }
     }
+
+    let mut recommendations = recommendations.into_values().collect::<Vec<_>>();
+    recommendations.sort_by(|left, right| {
+        right
+            .seed_ids
+            .len()
+            .cmp(&left.seed_ids.len())
+            .then_with(|| right.rating.cmp(&left.rating))
+            .then_with(|| {
+                right
+                    .media
+                    .get("popularity")
+                    .and_then(Value::as_i64)
+                    .unwrap_or_default()
+                    .cmp(
+                        &left
+                            .media
+                            .get("popularity")
+                            .and_then(Value::as_i64)
+                            .unwrap_or_default(),
+                    )
+            })
+            .then_with(|| {
+                left.media["id"]
+                    .as_i64()
+                    .unwrap_or_default()
+                    .cmp(&right.media["id"].as_i64().unwrap_or_default())
+            })
+    });
+    let omitted_count = recommendations
+        .len()
+        .saturating_sub(ANILIST_RECOMMENDATION_LIMIT);
+    recommendations.truncate(ANILIST_RECOMMENDATION_LIMIT);
+    Ok(AniListRecommendations {
+        values: recommendations
+            .into_iter()
+            .map(|recommendation| recommendation.media)
+            .collect(),
+        matched_seed_count: seen_sources.len(),
+        omitted_count,
+    })
 }
 
 impl AniListAdapter {
@@ -406,6 +598,25 @@ impl CatalogAdapter for AniListAdapter {
                 CatalogRequest::Season { season, year } => {
                     let values = self.client.season(season.as_str(), *year).await?;
                     self.normalize_and_learn(values, &cache_dir).await?
+                }
+                CatalogRequest::Recommendations { ids } => {
+                    let result = self.client.recommendations(ids).await?;
+                    let (items, mut warnings) =
+                        self.normalize_and_learn(result.values, &cache_dir).await?;
+                    if result.matched_seed_count < ids.len() {
+                        warnings.push(format!(
+                            "AniList found {} of {} recommendation seed(s).",
+                            result.matched_seed_count,
+                            ids.len()
+                        ));
+                    }
+                    if result.omitted_count > 0 {
+                        warnings.push(format!(
+                            "AniList recommendations were limited to {ANILIST_RECOMMENDATION_LIMIT} items; {} additional recommendation(s) were omitted.",
+                            result.omitted_count
+                        ));
+                    }
+                    (items, warnings)
                 }
             };
             Ok(CatalogResponse::new("anilist", &request, items, warnings))
@@ -754,9 +965,11 @@ pub async fn anilist_search(
 mod tests {
     use super::{
         anilist_rate_limit_message, anilist_search_queries, anilist_title_similarity,
-        best_metadata_match, has_series_prequel, media_from_response, normalize_anilist_title,
-        parse_anilist_response, season_shows, validate_anilist_id, validate_anilist_search,
-        validate_anilist_season,
+        best_metadata_match, has_series_prequel, media_from_response, metadata_by_id_request,
+        metadata_by_title_request, normalize_anilist_title, parse_anilist_response,
+        recommendation_shows, recommendations_request, search_request, season_request,
+        season_shows, validate_anilist_id, validate_anilist_search, validate_anilist_season,
+        ANILIST_RECOMMENDATIONS_PER_SEED,
     };
     use reqwest::StatusCode;
 
@@ -773,6 +986,120 @@ mod tests {
         assert!(validate_anilist_id(0).is_err());
         assert!(validate_anilist_id(-1).is_err());
         assert!(validate_anilist_id(i64::from(i32::MAX) + 1).is_err());
+    }
+
+    #[test]
+    fn builds_every_anilist_query_with_bounded_variables() {
+        let (query, variables) = search_request("  Frieren  ");
+        assert!(query.contains("query CatalogSearch"));
+        assert!(query.contains("perPage: 10"));
+        assert_eq!(variables, serde_json::json!({ "search": "Frieren" }));
+
+        let (query, variables) = season_request("SUMMER", 2026);
+        assert!(query.contains("query CatalogSeason"));
+        assert!(query.contains("page3: Page(page: 3, perPage: 50)"));
+        assert_eq!(
+            variables,
+            serde_json::json!({ "season": "SUMMER", "year": 2026 })
+        );
+
+        let (query, variables) = metadata_by_title_request("Example Show S2");
+        assert!(query.contains("query CatalogMetadataByTitle"));
+        assert!(query.contains("exact: Page(page: 1, perPage: 6)"));
+        assert_eq!(variables["exact"], "Example Show S2");
+        assert_eq!(variables["normalized"], "example show 2");
+
+        let (query, variables) = metadata_by_id_request(154_587);
+        assert!(query.contains("query CatalogMetadataById"));
+        assert!(query.contains("Media(id: $id, type: ANIME)"));
+        assert_eq!(variables, serde_json::json!({ "id": 154_587 }));
+
+        let (query, variables) = recommendations_request(&[154_587, 11061]);
+        assert!(query.contains("query CatalogRecommendations"));
+        assert!(query.contains("media(id_in: $ids, type: ANIME)"));
+        assert!(query.contains("perPage: 10"));
+        assert!(query.contains("...RecommendationCard"));
+        assert_eq!(variables, serde_json::json!({ "ids": [154_587, 11061] }));
+    }
+
+    #[test]
+    fn aggregates_anilist_recommendations_across_liked_seeds() {
+        let media = |id, title, adult| {
+            serde_json::json!({
+                "id": id,
+                "idMal": id + 1000,
+                "isAdult": adult,
+                "title": { "romaji": title, "userPreferred": title },
+                "popularity": id
+            })
+        };
+        let response = serde_json::json!({
+            "data": { "Page": { "media": [
+                {
+                    "id": 1,
+                    "recommendations": { "nodes": [
+                        { "rating": 5, "mediaRecommendation": media(10, "Shared", false) },
+                        { "rating": 100, "mediaRecommendation": media(20, "Popular", false) },
+                        { "rating": 500, "mediaRecommendation": media(30, "Adult", true) },
+                        { "rating": 500, "mediaRecommendation": media(2, "Already liked", false) }
+                    ] }
+                },
+                {
+                    "id": 2,
+                    "recommendations": { "nodes": [
+                        { "rating": 1, "mediaRecommendation": media(10, "Shared", false) },
+                        { "rating": null, "mediaRecommendation": media(40, "Other", false) },
+                        { "rating": 500, "mediaRecommendation": {
+                            "id": 50,
+                            "isAdult": null,
+                            "title": { "romaji": "Unknown rating" }
+                        } }
+                    ] }
+                }
+            ] } }
+        });
+        let recommendations = recommendation_shows(&response, &[1, 2]).unwrap();
+        assert_eq!(recommendations.matched_seed_count, 2);
+        assert_eq!(
+            recommendations
+                .values
+                .iter()
+                .map(|item| item["id"].as_i64().unwrap())
+                .collect::<Vec<_>>(),
+            [10, 20, 40]
+        );
+        assert!(recommendations
+            .values
+            .iter()
+            .all(|item| item["id"] != 2 && item["id"] != 30 && item["id"] != 50));
+    }
+
+    #[test]
+    fn rejects_oversized_or_malformed_anilist_recommendation_fixtures() {
+        let oversized = serde_json::json!({
+            "data": { "Page": { "media": [{
+                "id": 1,
+                "recommendations": { "nodes": vec![serde_json::json!({
+                    "rating": 1,
+                    "mediaRecommendation": {
+                        "id": 2,
+                        "isAdult": false,
+                        "title": { "romaji": "Example" }
+                    }
+                }); ANILIST_RECOMMENDATIONS_PER_SEED + 1] }
+            }] } }
+        });
+        assert!(recommendation_shows(&oversized, &[1]).is_err());
+        assert!(recommendation_shows(
+            &serde_json::json!({
+                "data": { "Page": { "media": [{
+                    "id": 999,
+                    "recommendations": { "nodes": [] }
+                }] } }
+            }),
+            &[1]
+        )
+        .is_err());
     }
 
     #[test]

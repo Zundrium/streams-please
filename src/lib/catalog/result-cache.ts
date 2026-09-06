@@ -54,8 +54,9 @@ export function createCatalogResultCache(options: CatalogCacheOptions = {}) {
     for (const item of stored) {
       if (!isRecord(item) || !timestamp(item.savedAt) || !isRecord(item.request) || !isRecord(item.data)) continue;
       const request = item.request as unknown as CatalogRequest;
-      if ((request.kind !== 'search' && request.kind !== 'season')
+      if ((request.kind !== 'search' && request.kind !== 'season' && request.kind !== 'recommendations')
         || (request.kind === 'search' && typeof request.query !== 'string')
+        || (request.kind === 'recommendations' && !Array.isArray(request.ids))
         || !validCatalogRequest(request) || typeof item.data.provider !== 'string'
         || !/^[a-z0-9-]{1,32}$/.test(item.data.provider)) continue;
       const data = normalizeCatalogResponse(item.data, item.data.provider, request);
@@ -90,7 +91,11 @@ export function createCatalogResultCache(options: CatalogCacheOptions = {}) {
       const data = normalizeCatalogResponse(value, value.provider, request);
       if (!validCatalogRequest(request) || !data) throw new Error('Cannot cache invalid catalog data.');
       const savedAt = now();
-      memory.set(entryKey(data.provider, request), { savedAt, data: structuredClone(data), request: { ...request } });
+      memory.set(entryKey(data.provider, request), {
+        savedAt,
+        data: structuredClone(data),
+        request: request.kind === 'recommendations' ? { ...request, ids: [...request.ids] } : { ...request }
+      });
       const retained = [...memory.entries()].sort(([, a], [, b]) => b.savedAt - a.savedAt).slice(0, MAX_ENTRIES);
       let serialized = JSON.stringify(retained.map(([, entry]) => entry));
       while (serialized.length > MAX_CACHE_BYTES && retained.length) {

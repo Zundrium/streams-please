@@ -11,11 +11,14 @@
     Meh,
     Play,
     RectangleHorizontal,
+    RefreshCw,
+    Sparkles,
     ThumbsDown
   } from '@lucide/svelte';
   import { Badge } from '$lib/components/ui/badge';
   import { Button } from '$lib/components/ui/button';
   import { Switch } from '$lib/components/ui/switch';
+  import { Tabs, TabsList, TabsTrigger } from '$lib/components/ui/tabs';
   import AnimatedProgress from '$lib/components/shared/AnimatedProgress.svelte';
   import CatalogLoading from '$lib/components/catalog/CatalogLoading.svelte';
   import CatalogNotice from '$lib/components/catalog/CatalogNotice.svelte';
@@ -24,16 +27,33 @@
   import RevealFrame from '$lib/components/shared/RevealFrame.svelte';
   import RevealImage from '$lib/components/shared/RevealImage.svelte';
   import { isTauri } from '$lib/backend';
-  import { currentSeason, preferredTitle, saveProviderMapping, shiftSeason } from '$lib/catalog';
+  import {
+    currentSeason,
+    loadProviderMappings,
+    preferredTitle,
+    saveProviderMapping,
+    shiftSeason
+  } from '$lib/catalog';
   import { createSeasonCatalog } from '$lib/catalog/season.svelte';
-  import { catalogSourceLabel } from '$lib/catalog/providers';
+  import {
+    catalogSourceLabel,
+    type CatalogProvenance,
+    type CatalogSearchResponse
+  } from '$lib/catalog/providers';
   import CatalogStatusBadge from '$lib/components/catalog/CatalogStatusBadge.svelte';
+  import { createRecommendationDiscovery } from '$lib/discovery/recommendations.svelte';
+  import {
+    filterReviewedRecommendations,
+    matchAvailableRecommendations,
+    mergeRecommendationDetails
+  } from '$lib/discovery/recommendations';
   import { libraryEntryMatches } from '$lib/library';
   import { youtubeTrailerSearchPlaybackUrl } from '$lib/trailers';
   import {
     type AnimeSeason,
     type AniListSeasonResponse,
     type AniListSeasonShow,
+    type CatalogMedia,
     type DayName,
     type DiscoveryVerdict,
     type LibraryEntry,
@@ -48,16 +68,20 @@
   const TEXT_REVEAL_DURATION_MS = 360;
   const SEASON_ORDER: AnimeSeason[] = ['WINTER', 'SPRING', 'SUMMER', 'FALL'];
 
+  type DiscoveryMode = 'airing' | 'recommendations';
+
   interface DiscoveryCandidate {
-    anime: AniListSeasonShow;
+    mode: DiscoveryMode;
+    anime: CatalogMedia;
     show: SubsPleaseScheduleShow;
-    season: AnimeSeason;
-    year: number;
+    season?: AnimeSeason;
+    year?: number;
     day?: DayName;
   }
 
   let {
     loadSeason,
+    loadRecommendations,
     loadIndex,
     loadSchedule,
     loadShow,
@@ -68,12 +92,14 @@
     onCloseTrailer
   }: {
     loadSeason: (season: AnimeSeason, year: number) => Promise<AniListSeasonResponse>;
+    loadRecommendations: (ids: number[]) => Promise<CatalogSearchResponse>;
     loadIndex: () => Promise<SubsPleaseIndexResponse>;
     loadSchedule: (timezone: string) => Promise<SubsPleaseScheduleResponse>;
     loadShow: (
       slug: string,
       timezone: string,
-      anilistId?: number
+      anilistId?: number,
+      includeMetadata?: boolean
     ) => Promise<SubsPleaseShowResponse>;
     libraryEntries: LibraryEntry[];
     onDecide: (
@@ -105,9 +131,13 @@
     timezone,
     initialSeason
   });
+  const recommendationDiscovery = createRecommendationDiscovery((ids) =>
+    loadRecommendations(ids)
+  );
 
   let selectedSeason = $derived(seasonCatalog.season);
   let selectedYear = $derived(seasonCatalog.year);
+  let discoveryMode = $state<DiscoveryMode>('airing');
   let presentedCandidate = $state<DiscoveryCandidate | null>(null);
   let details = $state<SubsPleaseShowResponse | null>(null);
   let loadedCandidateKey = $state('');
@@ -124,6 +154,7 @@
   let discoveryPageElement = $state<HTMLElement | null>(null);
   let trailerSurface = $state<HTMLElement | null>(null);
   let decisionPending = $state(false);
+  let trailerLifecycleGeneration = 0;
 
   let selectedIsCurrentSeason = $derived(
     selectedSeason === initialSeason.season && selectedYear === initialSeason.year
@@ -132,15 +163,12 @@
     seasonOrdinal(selectedSeason, selectedYear) <
       seasonOrdinal(furthestSeason.season, furthestSeason.year)
   );
-  let discoveryLoading = $derived(
-    seasonCatalog.catalogLoading || seasonCatalog.providerLoading
-  );
-  let discoveryError = $derived(seasonCatalog.catalogError || seasonCatalog.providerError);
-  let allCandidates = $derived.by((): DiscoveryCandidate[] =>
+  let allAiringCandidates = $derived.by((): DiscoveryCandidate[] =>
     seasonCatalog.seasonMatches.flatMap((match): DiscoveryCandidate[] => {
       const anime = match.anime;
       if (hasSeriesPrequel(anime) || isObviousSequelTitle(preferredTitle(anime))) return [];
       return [{
+        mode: 'airing',
         anime,
         show: {
           title: preferredTitle(anime),
@@ -161,16 +189,86 @@
       }];
     })
   );
-  let eligibleCandidates = $derived(
-    allCandidates.filter(({ show }) => !metadataSequelSlugs.includes(show.page))
+  let eligibleAiringCandidates = $derived(
+    allAiringCandidates.filter(({ show }) => !metadataSequelSlugs.includes(show.page))
   );
-  let candidates = $derived.by(() => {
+  let airingCandidates = $derived.by(() => {
     const checked = libraryEntries.filter((entry) => entry.discoveryVerdict);
-    return eligibleCandidates.filter(
+    return eligibleAiringCandidates.filter(
       ({ anime, show }) =>
         !checked.some((entry) => libraryEntryMatches(entry, anime.id, show.page))
     );
   });
+  let availableRecommendationMatches = $derived.by(() =>
+    matchAvailableRecommendations(
+      recommendationDiscovery.catalog?.results ?? [],
+      seasonCatalog.providerIndex?.shows ?? [],
+      loadProviderMappings()
+    )
+  );
+  let recommendationMatches = $derived.by(() =>
+    filterReviewedRecommendations(availableRecommendationMatches, libraryEntries)
+  );
+  let eligibleRecommendationCandidates = $derived.by((): DiscoveryCandidate[] =>
+    availableRecommendationMatches.map(({ anime, provider }) => ({
+      mode: 'recommendations',
+      anime,
+      show: {
+        title: preferredTitle(anime),
+        page: provider.page,
+        image_url: anime.coverImage?.extraLarge ?? anime.coverImage?.large ?? '',
+        time: '',
+        anilist_id: anime.id
+      },
+      season: anime.season,
+      year: anime.seasonYear
+    }))
+  );
+  let recommendationCandidates = $derived.by((): DiscoveryCandidate[] =>
+    recommendationMatches.map(({ anime, provider }) => ({
+      mode: 'recommendations',
+      anime,
+      show: {
+        title: preferredTitle(anime),
+        page: provider.page,
+        image_url: anime.coverImage?.extraLarge ?? anime.coverImage?.large ?? '',
+        time: '',
+        anilist_id: anime.id
+      },
+      season: anime.season,
+      year: anime.seasonYear
+    }))
+  );
+  let eligibleCandidates = $derived(
+    discoveryMode === 'airing' ? eligibleAiringCandidates : eligibleRecommendationCandidates
+  );
+  let candidates = $derived(
+    discoveryMode === 'airing' ? airingCandidates : recommendationCandidates
+  );
+  let recommendationRequestReady = $derived(recommendationDiscovery.seedIds.length > 0);
+  let discoveryLoading = $derived(
+    discoveryMode === 'airing'
+      ? seasonCatalog.catalogLoading || seasonCatalog.providerLoading
+      : recommendationRequestReady &&
+        (recommendationDiscovery.loading || seasonCatalog.providerLoading)
+  );
+  let discoveryError = $derived(
+    discoveryMode === 'airing'
+      ? seasonCatalog.catalogError || seasonCatalog.providerError
+      : recommendationRequestReady
+        ? recommendationDiscovery.error || seasonCatalog.providerError
+        : ''
+  );
+  let activeProvenance = $derived<CatalogProvenance | undefined>(
+    discoveryMode === 'airing'
+      ? seasonCatalog.catalog?.provenance
+      : recommendationDiscovery.catalog?.provenance
+  );
+  let activeCacheWarning = $derived(
+    discoveryMode === 'airing'
+      ? seasonCatalog.catalog?.cacheWarning
+      : recommendationDiscovery.catalog?.cacheWarning
+  );
   let currentCandidate = $derived(candidates[0]);
   let currentCandidateKey = $derived(candidateKey(currentCandidate));
   let presentedCandidateKey = $derived(candidateKey(presentedCandidate));
@@ -250,13 +348,16 @@
     };
     window.addEventListener('keydown', onKeyDown);
     return () => {
+      trailerLifecycleGeneration += 1;
       seasonCatalog.dispose();
+      recommendationDiscovery.dispose();
       window.removeEventListener('keydown', onKeyDown);
     };
   });
 
   $effect(() => {
     const page = discoveryPageElement;
+    discoveryMode;
     selectedSeason;
     selectedYear;
     if (!page) return;
@@ -301,7 +402,7 @@
     requestCandidateDetails(candidate)
       .then((nextDetails) => {
         if (cancelled || currentCandidateKey !== key) return;
-        if (nextDetails.has_series_prequel) {
+        if (candidate.mode === 'airing' && nextDetails.has_series_prequel) {
           excludeMetadataSequel(candidate.show.page);
           return;
         }
@@ -343,6 +444,7 @@
   $effect(() => {
     const key = presentedCandidateKey;
     const desktop = isTauri();
+    const generation = trailerLifecycleGeneration;
     if (
       !autoplay ||
       !detailsReady ||
@@ -370,24 +472,65 @@
       })
     )
       .then(() => {
-        if (presentedCandidateKey === key) autoplayedCandidateKey = key;
+        if (generation === trailerLifecycleGeneration && presentedCandidateKey === key) {
+          autoplayedCandidateKey = key;
+        }
       })
       .catch(() => undefined)
       .finally(() => {
-        if (autoplayingCandidateKey === key) autoplayingCandidateKey = '';
+        if (generation === trailerLifecycleGeneration && autoplayingCandidateKey === key) {
+          autoplayingCandidateKey = '';
+        }
       });
   });
 
   function candidateKey(candidate: DiscoveryCandidate | null | undefined): string {
     return candidate
-      ? `${candidate.season}:${candidate.year}:${candidate.anime.id}:${candidate.show.page}`
+      ? `${candidate.mode}:${candidate.anime.id}:${candidate.show.page}`
       : '';
   }
 
-  function requestCandidateDetails(
+  async function requestCandidateDetails(
     candidate: DiscoveryCandidate
   ): Promise<SubsPleaseShowResponse> {
-    return loadShow(candidate.show.page, timezone, candidate.anime.id);
+    const nextDetails = await loadShow(
+      candidate.show.page,
+      timezone,
+      candidate.anime.id,
+      candidate.mode === 'airing'
+    );
+    return candidate.mode === 'recommendations'
+      ? mergeRecommendationDetails(
+          nextDetails,
+          candidate.anime,
+          recommendationDiscovery.catalog?.provenance?.label
+        )
+      : nextDetails;
+  }
+
+  function selectDiscoveryMode(value: string): void {
+    if (value !== 'airing' && value !== 'recommendations') return;
+    if (value === discoveryMode) return;
+    trailerLifecycleGeneration += 1;
+    trailerTheaterMode = false;
+    autoplayedCandidateKey = '';
+    autoplayingCandidateKey = '';
+    discoveryMode = value;
+    if (value === 'recommendations') {
+      void recommendationDiscovery.enter(libraryEntries);
+    } else {
+      recommendationDiscovery.leave();
+    }
+    void onCloseTrailer();
+  }
+
+  function refreshRecommendations(): void {
+    if (discoveryMode !== 'recommendations') return;
+    trailerLifecycleGeneration += 1;
+    autoplayedCandidateKey = '';
+    autoplayingCandidateKey = '';
+    void onCloseTrailer();
+    void recommendationDiscovery.refresh(libraryEntries);
   }
 
   function excludeMetadataSequel(slug: string): void {
@@ -437,7 +580,10 @@
         year: 'numeric'
       }).format(new Date(year, month - 1, day));
     }
-    return `${seasonLabel(candidate.season)} ${candidate.year}`;
+    if (candidate.season && candidate.year) {
+      return `${seasonLabel(candidate.season)} ${candidate.year}`;
+    }
+    return 'Release date unavailable';
   }
 
   function isObviousSequelTitle(value: string): boolean {
@@ -505,10 +651,10 @@
   class="h-full min-h-0 overflow-x-clip overflow-y-auto text-(--text)"
   style="overflow-anchor: none"
   data-content-state={discoveryError || visibleDetailsError ? 'error' : discoveryLoading || (currentCandidate && !detailsReady) ? 'loading' : mediaRevealReady ? 'media-enabled' : 'text-ready'}
-  aria-label="Discover seasonal anime"
+  aria-label="Discover anime"
 >
-  <ContextToolbar class="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] gap-4 sm:gap-8">
-    <div class="col-start-1 row-start-1 min-w-0 w-full max-w-sm justify-self-start">
+  <ContextToolbar class="grid h-auto min-h-16 grid-cols-[minmax(0,1fr)_auto] gap-3 py-3 md:h-16 md:grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] md:gap-8 md:py-0">
+    <div class="col-start-1 row-start-2 flex min-w-0 w-full max-w-sm items-center gap-2 justify-self-start md:row-start-1">
       {#if !discoveryError && (discoveryLoading || eligibleCandidates.length)}
         <AnimatedProgress
           value={reviewedCount}
@@ -521,41 +667,56 @@
           loadingText="Loading discovery progress"
         />
       {/if}
+      {#if discoveryMode === 'recommendations' && recommendationRequestReady}
+        <Button
+          variant="ghost"
+          size="icon"
+          class="size-9 shrink-0"
+          disabled={recommendationDiscovery.loading}
+          aria-label="Refresh recommendations"
+          onclick={refreshRecommendations}
+        >
+          <RefreshCw class="size-4 {recommendationDiscovery.loading ? 'animate-spin' : ''}" />
+        </Button>
+      {/if}
     </div>
 
-    <SeasonNavigator
-      season={selectedSeason}
-      year={selectedYear}
-      current={selectedIsCurrentSeason}
-      {canMoveNext}
-      nextTitle={canMoveNext ? 'Next season' : 'Discovery looks up to one season ahead'}
-      ariaLabel="Discovery season"
-      onPrevious={() => moveSeason(-1)}
-      onNext={() => moveSeason(1)}
-    />
-
-    <label class="col-start-3 row-start-1 flex items-center gap-2.5 justify-self-end text-sm font-medium text-(--text)/70">
-      <span>Autoplay</span>
-      <Switch
-        class="focus-visible:ring-2 focus-visible:ring-(--text)/24"
-        checked={autoplay}
-        aria-label="Autoplay trailers"
-        onCheckedChange={(checked) => (autoplay = checked)}
+    {#if discoveryMode === 'airing'}
+      <div class="col-start-2 row-start-2 justify-self-end md:row-start-1 md:justify-self-center">
+      <SeasonNavigator
+        season={selectedSeason}
+        year={selectedYear}
+        current={selectedIsCurrentSeason}
+        {canMoveNext}
+        nextTitle={canMoveNext ? 'Next season' : 'Discovery looks up to one season ahead'}
+        ariaLabel="Discovery season"
+        onPrevious={() => moveSeason(-1)}
+        onNext={() => moveSeason(1)}
       />
-    </label>
+      </div>
+    {:else}
+      <p class="col-start-2 row-start-1 hidden text-center text-xs font-medium text-(--text)/42 md:block">
+        Based on your recent loves
+      </p>
+    {/if}
+
+    <Tabs
+      value={discoveryMode}
+      onValueChange={selectDiscoveryMode}
+      class="col-span-2 col-start-1 row-start-1 gap-0 justify-self-end md:col-span-1 md:col-start-3"
+    >
+      <TabsList aria-label="Discovery mode" class="gap-0.5 p-0.5">
+        <TabsTrigger value="airing" class="px-3 py-1.5">Airing</TabsTrigger>
+        <TabsTrigger value="recommendations" class="px-3 py-1.5">Recommendations</TabsTrigger>
+      </TabsList>
+    </Tabs>
   </ContextToolbar>
 
   <div class="relative mx-auto flex min-h-[calc(100%_-_4rem)] max-w-[100rem] flex-col px-5 py-7 lg:px-10 lg:py-8">
-    {#if seasonCatalog.catalog?.provenance}
-      <p class="mb-4 flex flex-wrap items-center gap-2 text-xs text-(--text)/45" role="status">
-        <span>{catalogSourceLabel(seasonCatalog.catalog.provenance)}</span>
-        <CatalogStatusBadge provenance={seasonCatalog.catalog.provenance} warning={seasonCatalog.catalog.cacheWarning} />
-      </p>
-    {/if}
     {#if seasonCatalog.providerIndex?.cacheWarning}
       <CatalogNotice kind="warning" title="Saved archive" description={seasonCatalog.providerIndex.cacheWarning} class="mb-6" />
     {/if}
-    {#if seasonCatalog.scheduleError}
+    {#if discoveryMode === 'airing' && seasonCatalog.scheduleError}
       <CatalogNotice
         kind="warning"
         class="mb-6"
@@ -566,16 +727,24 @@
       />
     {/if}
 
-    {#if seasonCatalog.catalogError || seasonCatalog.providerError}
+    {#if discoveryError}
       <section class="grid min-h-[60vh] place-items-center">
         <div class="w-full max-w-xl space-y-4">
-          {#if seasonCatalog.catalogError}
+          {#if discoveryMode === 'airing' && seasonCatalog.catalogError}
             <CatalogNotice
               kind="error"
               title="Season catalog unavailable"
               description={seasonCatalog.catalogError}
               actionLabel="Retry catalog"
               onAction={() => void seasonCatalog.refreshSeason()}
+            />
+          {:else if discoveryMode === 'recommendations' && recommendationDiscovery.error}
+            <CatalogNotice
+              kind="error"
+              title="Recommendations unavailable"
+              description={recommendationDiscovery.error}
+              actionLabel="Try again"
+              onAction={refreshRecommendations}
             />
           {/if}
           {#if seasonCatalog.providerError}
@@ -592,7 +761,9 @@
     {:else if discoveryLoading}
       <CatalogLoading
         class="min-h-[60vh]"
-        label={`Finding shows for ${seasonLabel(selectedSeason)} ${selectedYear}`}
+        label={discoveryMode === 'airing'
+          ? `Finding shows for ${seasonLabel(selectedSeason)} ${selectedYear}`
+          : 'Finding recommendations you can watch'}
       />
     {:else if currentCandidate && !presentedDetailsReady && !visibleDetailsError}
       <CatalogLoading class="min-h-[60vh]" label="Loading the next show" />
@@ -610,11 +781,38 @@
     {:else if !currentCandidate}
       <section class="grid flex-1 place-items-center py-20 text-center">
         <div class="max-w-md">
-          {#if eligibleCandidates.length}
+          {#if discoveryMode === 'recommendations' && !recommendationRequestReady}
+            <span class="mx-auto grid size-16 place-items-center rounded-full bg-pink-500/10 text-pink-500"><Heart class="size-8" /></span>
+            <h2 class="mt-5 text-2xl font-semibold tracking-[-0.045em]">Love a show to get recommendations</h2>
+            <p class="mt-2 text-sm leading-6 text-(--text)/45">Recommendations use canonical AniList IDs from up to ten of your most recently loved shows.</p>
+            <Button class="mt-6 gap-2" onclick={() => selectDiscoveryMode('airing')}><Sparkles class="size-4" /> Browse airing shows</Button>
+          {:else if eligibleCandidates.length}
             <span class="mx-auto grid size-16 place-items-center rounded-full bg-chart-2/12 text-chart-2"><CheckCircle2 class="size-8" /></span>
-            <h2 class="mt-5 text-2xl font-semibold tracking-[-0.045em]">You checked every new show in {seasonLabel(selectedSeason)} {selectedYear}</h2>
-            <p class="mt-2 text-sm leading-6 text-(--text)/45">Your choices are saved in the library. You can revisit another season or review the shows you kept.</p>
-            <Button class="mt-6 gap-2" onclick={onOpenLibrary}><Check class="size-4" /> View checked shows</Button>
+            <h2 class="mt-5 text-2xl font-semibold tracking-[-0.045em]">
+              {discoveryMode === 'airing'
+                ? `You checked every new show in ${seasonLabel(selectedSeason)} ${selectedYear}`
+                : 'You checked every playable recommendation'}
+            </h2>
+            <p class="mt-2 text-sm leading-6 text-(--text)/45">
+              {discoveryMode === 'airing'
+                ? 'Your choices are saved in the library. You can revisit another season or review the shows you kept.'
+                : 'Your choices are saved in the library. Refresh when you want a new snapshot based on your latest loves.'}
+            </p>
+            <div class="mt-6 flex flex-wrap justify-center gap-2">
+              <Button class="gap-2" onclick={onOpenLibrary}><Check class="size-4" /> View checked shows</Button>
+              {#if discoveryMode === 'recommendations'}
+                <Button variant="ghost" class="gap-2" onclick={refreshRecommendations}><RefreshCw class="size-4" /> Refresh</Button>
+              {/if}
+            </div>
+          {:else if discoveryMode === 'recommendations'}
+            <span class="mx-auto grid size-16 place-items-center rounded-full bg-(--text)/6 text-(--text)/35"><Sparkles class="size-8" /></span>
+            <h2 class="mt-5 text-2xl font-semibold tracking-[-0.045em]">No playable recommendations yet</h2>
+            <p class="mt-2 text-sm leading-6 text-(--text)/45">
+              {recommendationDiscovery.catalog?.results.length
+                ? 'Recommendations were found, but none could be confidently matched to the SubsPlease archive. Only confirmed matches are shown for playback.'
+                : 'No recommendations were found from this snapshot. Only titles with a confirmed SubsPlease archive match can appear here.'}
+            </p>
+            <Button variant="ghost" class="mt-6 gap-2" onclick={refreshRecommendations}><RefreshCw class="size-4" /> Refresh recommendations</Button>
           {:else}
             <span class="mx-auto grid size-16 place-items-center rounded-full bg-(--text)/6 text-(--text)/35"><Film class="size-8" /></span>
             <h2 class="mt-5 text-2xl font-semibold tracking-[-0.045em]">Nothing discoverable yet</h2>
@@ -640,8 +838,19 @@
                   <span class="grid size-full place-items-center"><Film class="size-5 text-(--text)/20" /></span>
                 {/if}
               </div>
-              <div class="min-w-0 pt-0.5">
-                <h2 id={titleId} class="text-3xl font-semibold leading-[1.02] tracking-[-0.055em] lg:text-4xl">{decodeEntities(details.title)}</h2>
+              <div class="min-w-0 flex-1 pt-0.5">
+                <div class="flex items-start gap-4">
+                  <h2 id={titleId} class="min-w-0 flex-1 text-3xl font-semibold leading-[1.02] tracking-[-0.055em] lg:text-4xl">{decodeEntities(details.title)}</h2>
+                  <label class="flex shrink-0 items-center gap-2.5 pt-1 text-sm font-medium text-(--text)/70">
+                    <span class="hidden sm:inline">Autoplay</span>
+                    <Switch
+                      class="focus-visible:ring-2 focus-visible:ring-(--text)/24"
+                      checked={autoplay}
+                      aria-label="Autoplay trailers"
+                      onCheckedChange={(checked) => (autoplay = checked)}
+                    />
+                  </label>
+                </div>
                 <div class="mt-3 flex flex-wrap gap-2" aria-label="Show tags and details">
                   {#each details.genres?.slice(0, 4) ?? [] as genre (genre)}
                     <Badge class="bg-blue-500/12 text-blue-600 ring-1 ring-inset ring-blue-500/15 dark:text-blue-300">{genre}</Badge>
@@ -650,6 +859,15 @@
                   {#if details.format}<Badge class="bg-(--text)/6 text-(--text)/58">{metadataLabel(details.format)}</Badge>{/if}
                   {#if details.status}<Badge class="bg-(--text)/6 text-(--text)/58">{metadataLabel(details.status)}</Badge>{/if}
                   <Badge class="bg-(--text)/6 text-(--text)/58"><Clock3 class="size-3" /> {candidateTiming(presentedCandidate)}</Badge>
+                  {#if activeProvenance}
+                    <Badge
+                      class="bg-(--text)/6 text-(--text)/58"
+                      title={[catalogSourceLabel(activeProvenance), activeCacheWarning].filter(Boolean).join(' · ')}
+                    >
+                      {catalogSourceLabel(activeProvenance)}
+                    </Badge>
+                    <CatalogStatusBadge provenance={activeProvenance} warning={activeCacheWarning} />
+                  {/if}
                 </div>
               </div>
             </header>

@@ -1,10 +1,11 @@
 import type { AnimeSeason, CatalogMedia, CatalogSeasonMedia } from '$lib/types';
 import { normalizeSearchResponse, normalizeSeasonResponse } from '$lib/catalog/cache';
 
-export type CatalogCapability = 'search' | 'season';
+export type CatalogCapability = 'search' | 'season' | 'recommendations';
 export type CatalogRequest =
   | { kind: 'search'; query: string }
-  | { kind: 'season'; season: AnimeSeason; year: number };
+  | { kind: 'season'; season: AnimeSeason; year: number }
+  | { kind: 'recommendations'; ids: number[] };
 
 export interface CatalogProvider {
   id: string;
@@ -35,19 +36,25 @@ export interface CatalogSearchResponse {
 }
 
 export function catalogRequestKey(request: CatalogRequest): string {
-  return request.kind === 'search'
-    ? `search:${request.query.trim().toLocaleLowerCase()}`
-    : `season:${request.season}:${request.year}`;
+  if (request.kind === 'search') return `search:${request.query.trim().toLocaleLowerCase()}`;
+  if (request.kind === 'season') return `season:${request.season}:${request.year}`;
+  return `recommendations:${[...new Set(request.ids)].sort((left, right) => left - right).join(',')}`;
 }
 
 export function validCatalogRequest(request: CatalogRequest): boolean {
-  return request.kind === 'search'
-    ? new TextEncoder().encode(request.query.trim()).length >= 2
-      && new TextEncoder().encode(request.query.trim()).length <= 160
-      && !/[\u0000-\u001f\u007f-\u009f]/.test(request.query)
-    : request.kind === 'season'
-      && ['WINTER', 'SPRING', 'SUMMER', 'FALL'].includes(request.season)
+  if (request.kind === 'search') {
+    const queryLength = new TextEncoder().encode(request.query.trim()).length;
+    return queryLength >= 2 && queryLength <= 160 && !/[\u0000-\u001f\u007f-\u009f]/.test(request.query);
+  }
+  if (request.kind === 'season') {
+    return ['WINTER', 'SPRING', 'SUMMER', 'FALL'].includes(request.season)
       && Number.isSafeInteger(request.year) && request.year >= 1940 && request.year <= 2200;
+  }
+  return Array.isArray(request.ids)
+    && request.ids.length >= 1
+    && request.ids.length <= 10
+    && new Set(request.ids).size === request.ids.length
+    && request.ids.every((id) => Number.isSafeInteger(id) && id > 0 && id <= 2_147_483_647);
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -67,7 +74,7 @@ export function normalizeCatalogProviders(value: unknown): CatalogProvider[] | u
       id: item.id,
       label: item.label,
       capabilities: item.capabilities.filter((capability): capability is CatalogCapability =>
-        capability === 'search' || capability === 'season')
+        capability === 'search' || capability === 'season' || capability === 'recommendations')
     });
   }
   return providers;

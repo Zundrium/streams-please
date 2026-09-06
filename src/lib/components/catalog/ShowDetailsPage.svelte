@@ -176,8 +176,8 @@
     ).sort((left, right) => {
       const leftEpisode = Number.parseFloat(left.episode);
       const rightEpisode = Number.parseFloat(right.episode);
-      if (Number.isFinite(leftEpisode) && Number.isFinite(rightEpisode)) return leftEpisode - rightEpisode;
-      return new Date(left.release_date).getTime() - new Date(right.release_date).getTime();
+      if (Number.isFinite(leftEpisode) && Number.isFinite(rightEpisode)) return rightEpisode - leftEpisode;
+      return new Date(right.release_date).getTime() - new Date(left.release_date).getTime();
     });
   });
   let exactTrailerUrl = $derived.by(() => {

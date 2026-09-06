@@ -1,4 +1,4 @@
-use std::{future::Future, path::PathBuf, pin::Pin, sync::Arc};
+use std::{collections::HashSet, future::Future, path::PathBuf, pin::Pin, sync::Arc};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -8,11 +8,13 @@ pub mod anilist;
 mod identity;
 mod jikan;
 mod kitsu;
+mod myanimelist;
 pub mod subsplease;
 
 use identity::IdentityResolver;
 
 const MAX_CATALOG_QUERY_LENGTH: usize = 160;
+const MAX_RECOMMENDATION_SEEDS: usize = 10;
 const MIN_CATALOG_YEAR: i32 = 1940;
 const MAX_CATALOG_YEAR: i32 = 2200;
 
@@ -43,6 +45,7 @@ impl CatalogSeason {
 pub enum CatalogRequest {
     Search { query: String },
     Season { season: CatalogSeason, year: i32 },
+    Recommendations { ids: Vec<i64> },
 }
 
 impl CatalogRequest {
@@ -53,6 +56,7 @@ impl CatalogRequest {
                 Err("Invalid catalog season year.".into())
             }
             Self::Season { .. } => Ok(()),
+            Self::Recommendations { ids } => validate_recommendation_ids(ids),
         }
     }
 
@@ -60,12 +64,13 @@ impl CatalogRequest {
         match self {
             Self::Search { .. } => CatalogCapability::Search,
             Self::Season { .. } => CatalogCapability::Season,
+            Self::Recommendations { .. } => CatalogCapability::Recommendations,
         }
     }
 
     fn season_context(&self) -> (Option<CatalogSeason>, Option<i32>) {
         match self {
-            Self::Search { .. } => (None, None),
+            Self::Search { .. } | Self::Recommendations { .. } => (None, None),
             Self::Season { season, year } => (Some(*season), Some(*year)),
         }
     }
@@ -82,11 +87,25 @@ fn validate_catalog_query(query: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_recommendation_ids(ids: &[i64]) -> Result<(), String> {
+    if ids.is_empty()
+        || ids.len() > MAX_RECOMMENDATION_SEEDS
+        || ids.iter().any(|id| !valid_catalog_id(*id))
+        || ids.iter().copied().collect::<HashSet<_>>().len() != ids.len()
+    {
+        return Err(format!(
+            "Choose between 1 and {MAX_RECOMMENDATION_SEEDS} unique valid AniList IDs for recommendations."
+        ));
+    }
+    Ok(())
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "lowercase")]
 pub enum CatalogCapability {
     Search,
     Season,
+    Recommendations,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -338,7 +357,9 @@ trait CatalogAdapter: Send + Sync {
 pub struct CatalogState {
     http: reqwest::Client,
     anilist: Arc<anilist::AniListClient>,
+    identity: Arc<IdentityResolver>,
     adapters: Vec<Arc<dyn CatalogAdapter>>,
+    providers: Vec<CatalogProvider>,
 }
 
 impl CatalogState {
@@ -360,15 +381,20 @@ impl CatalogState {
                 identity.clone(),
             )),
             Arc::new(jikan::JikanAdapter::new(http.clone(), identity.clone())),
-            Arc::new(kitsu::KitsuAdapter::new(http.clone(), identity)),
+            Arc::new(kitsu::KitsuAdapter::new(http.clone(), identity.clone())),
+        ];
+        let providers = vec![
+            adapters[0].descriptor(),
+            myanimelist::descriptor(),
+            adapters[1].descriptor(),
+            adapters[2].descriptor(),
         ];
 
-        for (index, adapter) in adapters.iter().enumerate() {
-            let descriptor = adapter.descriptor();
-            if descriptor.id.is_empty()
-                || adapters[..index]
+        for (index, descriptor) in providers.iter().enumerate() {
+            if !valid_provider_id(descriptor.id)
+                || providers[..index]
                     .iter()
-                    .any(|registered| registered.descriptor().id == descriptor.id)
+                    .any(|registered| registered.id == descriptor.id)
             {
                 return Err("The catalog provider registry is invalid.".into());
             }
@@ -377,19 +403,23 @@ impl CatalogState {
         Ok(Self {
             http,
             anilist,
+            identity,
             adapters,
+            providers,
         })
     }
 
-    fn adapter(&self, provider: &str) -> Result<&Arc<dyn CatalogAdapter>, String> {
-        if provider.is_empty()
-            || provider.len() > 32
-            || !provider
-                .bytes()
-                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
-        {
+    fn provider(&self, provider: &str) -> Result<&CatalogProvider, String> {
+        if !valid_provider_id(provider) {
             return Err("Invalid catalog provider.".into());
         }
+        self.providers
+            .iter()
+            .find(|descriptor| descriptor.id == provider)
+            .ok_or_else(|| format!("Unknown catalog provider: {provider}."))
+    }
+
+    fn adapter(&self, provider: &str) -> Result<&Arc<dyn CatalogAdapter>, String> {
         self.adapters
             .iter()
             .find(|adapter| adapter.descriptor().id == provider)
@@ -397,46 +427,56 @@ impl CatalogState {
     }
 }
 
-#[tauri::command]
+fn valid_provider_id(provider: &str) -> bool {
+    !provider.is_empty()
+        && provider.len() <= 32
+        && provider
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+}
+
+#[tauri::command(rename_all = "camelCase")]
 pub async fn catalog_request(
     app: tauri::AppHandle,
     state: State<'_, CatalogState>,
     provider: String,
     request: CatalogRequest,
+    my_anime_list_client_id: Option<String>,
 ) -> Result<CatalogResponse, String> {
     request.validate()?;
+    let descriptor = state.provider(&provider)?;
+    if !descriptor.capabilities.contains(&request.capability()) {
+        return Err(format!(
+            "{provider} does not support this catalog operation."
+        ));
+    }
     let cache_dir = app
         .path()
         .app_cache_dir()
         .map_err(|error| format!("The catalog cache directory is unavailable: {error}"))?
         .join("catalog");
-    let adapter = state.adapter(&provider)?;
-    if !adapter
-        .descriptor()
-        .capabilities
-        .contains(&request.capability())
-    {
-        return Err(format!(
-            "{provider} does not support this catalog operation."
-        ));
+    if provider == myanimelist::PROVIDER_ID {
+        let client_id = myanimelist::validate_client_id(my_anime_list_client_id.as_deref())?;
+        let adapter = myanimelist::MyAnimeListAdapter::new(
+            state.http.clone(),
+            state.identity.clone(),
+            &client_id,
+        )?;
+        return adapter.request(request, cache_dir).await;
     }
-    adapter.request(request, cache_dir).await
+    state.adapter(&provider)?.request(request, cache_dir).await
 }
 
 #[tauri::command]
 pub fn catalog_providers(state: State<'_, CatalogState>) -> Vec<CatalogProvider> {
-    state
-        .adapters
-        .iter()
-        .map(|adapter| adapter.descriptor())
-        .collect()
+    state.providers.clone()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        validate_catalog_query, CatalogMedia, CatalogRequest, CatalogResponse, CatalogSeason,
-        CatalogState,
+        validate_catalog_query, CatalogCapability, CatalogMedia, CatalogRequest, CatalogResponse,
+        CatalogSeason, CatalogState,
     };
 
     #[test]
@@ -462,6 +502,38 @@ mod tests {
             "kind": "season",
             "season": "spring",
             "year": 2026
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn deserializes_and_validates_the_recommendations_contract() {
+        let request: CatalogRequest = serde_json::from_value(serde_json::json!({
+            "kind": "recommendations",
+            "ids": [154587, 11061]
+        }))
+        .unwrap();
+        assert!(request.validate().is_ok());
+        assert_eq!(request.capability(), CatalogCapability::Recommendations);
+        assert_eq!(request.season_context(), (None, None));
+
+        assert!(CatalogRequest::Recommendations {
+            ids: (1..=10).collect(),
+        }
+        .validate()
+        .is_ok());
+        for ids in [
+            Vec::new(),
+            vec![1, 1],
+            vec![0],
+            vec![i64::from(i32::MAX) + 1],
+            (1..=11).collect(),
+        ] {
+            assert!(CatalogRequest::Recommendations { ids }.validate().is_err());
+        }
+        assert!(serde_json::from_value::<CatalogRequest>(serde_json::json!({
+            "kind": "recommendation",
+            "ids": [1]
         }))
         .is_err());
     }
@@ -502,17 +574,39 @@ mod tests {
         assert_eq!(value["warnings"], serde_json::json!(["coverage warning"]));
         assert_eq!(value["season"], "WINTER");
         assert_eq!(value["year"], 2026);
+
+        let recommendations = serde_json::to_value(CatalogResponse::new(
+            "anilist",
+            &CatalogRequest::Recommendations { ids: vec![42] },
+            Vec::new(),
+            Vec::new(),
+        ))
+        .unwrap();
+        assert!(recommendations.get("season").is_none());
+        assert!(recommendations.get("year").is_none());
     }
 
     #[test]
     fn registry_is_provider_driven_and_stably_ordered() {
         let state = CatalogState::new().unwrap();
         let providers = state
-            .adapters
+            .providers
             .iter()
-            .map(|adapter| adapter.descriptor().id)
+            .map(|provider| provider.id)
             .collect::<Vec<_>>();
-        assert_eq!(providers, ["anilist", "jikan", "kitsu"]);
+        assert_eq!(providers, ["anilist", "myanimelist", "jikan", "kitsu"]);
+        for provider in [
+            &state.providers[0],
+            &state.providers[1],
+            &state.providers[2],
+        ] {
+            assert!(provider
+                .capabilities
+                .contains(&CatalogCapability::Recommendations));
+        }
+        assert!(!state.providers[3]
+            .capabilities
+            .contains(&CatalogCapability::Recommendations));
         assert_eq!(CatalogSeason::Fall.as_str(), "FALL");
     }
 }

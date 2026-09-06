@@ -12,19 +12,20 @@ StreamsPlease is a local Tauri v2 desktop player for legal or personally owned B
 - adding external `.ass`, `.ssa`, `.srt`, `.vtt`, and `.sub` files;
 - live download, upload, and peer status, plus pausing P2P and stopping the session;
 - a local media cache in the OS-specific app cache directory;
-- multi-provider seasonal browsing with previous/next season navigation, using AniList, Jikan, and Kitsu in a configurable priority order with saved-result fallback;
+- multi-provider seasonal browsing with previous/next season navigation, using AniList, official MyAnimeList, Jikan, and Kitsu in a configurable priority order with saved-result fallback;
 - global catalog title search with persistent offline results, source/age labels, and SubsPlease archive availability checks;
 - direct SubsPlease archive browsing without an AniList dependency;
 - SubsPlease availability filtering, weekly release times, and historical episode access;
 - Discord-capturable YouTube trailer search through the same in-process libmpv player;
-- signed startup updates from private GitHub releases;
+- airing discovery and recommendations based on loved series, with trailer previews;
+- signed startup update checks from private GitHub releases, with explicit approval before downloading and installing;
 - a browser preview mode for UI development without native Tauri APIs.
 
 ## Architecture
 
 ```text
 SvelteKit UI + Lily components (Tauri WebView)
-  ├─ catalog coordinator ──> native provider registry ──> AniList / Jikan / Kitsu
+  ├─ catalog coordinator ──> native provider registry ──> AniList / MyAnimeList / Jikan / Kitsu
   │                              └─ persistent cross-provider identity resolver
   ├─ release catalog ────> SubsPlease availability/releases
   ├─ Tauri commands ──> librqbit session ──> trackers / DHT / peers
@@ -86,7 +87,7 @@ npm run tauri build
 
 The public updater key is bundled in `src-tauri/tauri.conf.json`. Keep the corresponding private key outside the repository and configure it as the `TAURI_SIGNING_PRIVATE_KEY` GitHub Actions secret. Configure `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` too when the key is password-protected.
 
-Set `STREAMSPLEASE_GITHUB_TOKEN` as a GitHub Actions secret containing a fine-grained token limited to `Zundrium/streams-please` with **Contents: read** permission. Release builds compile that token into the executable so startup checks need no user configuration. GitHub has no releases-only permission, and anyone with the executable can extract the token and read the private repository. Revoking or expiring it also prevents existing builds from downloading later updates. The Windows release workflow signs the installers and publishes `latest.json`; the app verifies, passively installs, and restarts for newer releases.
+Set `STREAMSPLEASE_GITHUB_TOKEN` as a GitHub Actions secret containing a fine-grained token limited to `Zundrium/streams-please` with **Contents: read** permission. Release builds compile that token into the executable so startup checks need no user configuration. GitHub has no releases-only permission, and anyone with the executable can extract the token and read the private repository. Revoking or expiring it also prevents existing builds from downloading later updates. The Windows release workflow signs the installers and publishes `latest.json`; the app asks for approval before downloading, then verifies, installs, and restarts for newer releases. Choose **Later** to keep using the current version. Versions older than 0.6.0 still use their original automatic-update behavior when upgrading to this version.
 
 ## Usage
 
@@ -97,7 +98,12 @@ Set `STREAMSPLEASE_GITHUB_TOKEN` as a GitHub Actions secret containing a fine-gr
 5. Pause P2P or stop the session when you are done. Stopping forgets the torrent but preserves cache files that have already been written.
 
 The **Search** tab searches across seasons and checks each result against the SubsPlease
-archive. AniList is preferred by default; reorder AniList, Jikan, and Kitsu in **Account settings**.
+archive. AniList is preferred by default; reorder AniList, official MyAnimeList, Jikan, and Kitsu in **Account settings**.
+The official MyAnimeList API requires your public application **Client ID**, obtained from
+[MyAnimeList API settings](https://myanimelist.net/apiconfig). Enter the Client ID, not a client secret
+or OAuth token. It is saved locally and sent only to native official MyAnimeList requests as
+`X-MAL-CLIENT-ID`. Without it, the official adapter is skipped; Jikan remains a credential-free,
+unofficial source of MyAnimeList data.
 New requests use the saved order. During an outage, validated saved results take priority over
 the next provider. Compact badges beside catalog counts identify failed and replacement providers;
 source, cache age, and coverage details are available on the badge. Search results use the shared
@@ -105,11 +111,19 @@ poster cards, including archive-only results with saved artwork or a placeholder
 identities. Archive titles remain accessible when catalog providers cannot be reached.
 
 The **SubsPlease** tab starts with a normalized season catalog and filters it against the SubsPlease
-show archive. Use the previous and next controls to browse other seasons, or choose **Archive**
-to browse SubsPlease directly, including when AniList is unavailable. AniList IDs are
+show archive. Use the previous and next controls to browse other seasons. The Archive toolbar
+button is removed; the archive fallback remains available when the seasonal catalog fails. AniList IDs are
 the canonical identity for saved shows; the optional SubsPlease slug and numeric ID are
 retained only for weekly timing and episode retrieval. Selecting an episode passes the
 chosen magnet link to the same local player flow.
+
+The **Discovery** toolbar switches between **Airing** and **Recommendations**. Recommendations
+use up to ten of your most recently loved shows, routed through AniList, MyAnimeList, or Jikan
+according to provider priority. Only confidently matched SubsPlease archive titles are shown;
+unmapped titles are never guessed. Reviewed shows are excluded. Seeds stay fixed while you review
+the queue; refresh or re-enter the mode to use your latest loves. Recommendation metadata is retained
+without requiring AniList details enrichment. Autoplay sits beside the series title, and source/cache
+age appears beside its date. Episode lists run newest-first; library timing uses a compact next-airing badge.
 
 Select a trailer from Discovery, Library, or SubsPlease details to open it in StreamsPlease's native player. The desktop app asks yt-dlp for the first YouTube result matching `<series title> trailer English subtitles`; AniList's trailer remains the browser-preview fallback. Discovery trailers start inside the page's trailer frame and can be expanded with the theater or full-screen controls. Closing a trailer restores the active episode at its previous position and leaves it paused.
 
@@ -123,7 +137,7 @@ The **Legal Sintel demo** button enters a Creative Commons/open movie torrent so
 - `src/lib/components/ui/`: locally owned Lily primitives.
 - `src/lib/catalog/`: typed request client, validated storage, title matching, and cancellable page state.
 - `src/lib/backend.ts` and `src/lib/backend/preview.ts`: desktop invocation and deterministic preview fixtures.
-- `src-tauri/src/catalog/`: catalog adapter registry, AniList/Jikan/Kitsu adapters, persistent identity resolution, and independent SubsPlease releases.
+- `src-tauri/src/catalog/`: catalog adapter registry, AniList/MyAnimeList/Jikan/Kitsu adapters, persistent identity resolution, and independent SubsPlease releases.
 - `src-tauri/src/lib.rs`: torrent engine, loopback stream server, runtime setup, and command registration.
 - `tests/`: Node regression tests for matching, caches, async state, preview identity, and library refresh.
 
@@ -131,7 +145,7 @@ The **Legal Sintel demo** button enters a Creative Commons/open movie torrent so
 
 The native `CatalogAdapter` registry declares provider IDs, labels, and supported capabilities.
 `catalog_providers` exposes that ordered registry, and `catalog_request` accepts a provider plus a
-search or season request. Adapters return the same normalized `CatalogMedia` envelope; frontend
+search, season, or canonical-ID recommendation request, plus an optional MyAnimeList Client ID. Adapters return the same normalized `CatalogMedia` envelope; frontend
 components do not parse provider responses. Existing AniList type aliases and IPC commands remain
 compatible. Details enrichment still uses the existing AniList/SubsPlease path independently of
 these listing capabilities.
@@ -149,7 +163,11 @@ attempts to bypass access restrictions. Jikan lists are SFW, with up to 25 searc
 season pages of 25 items. A season only includes matching year/season TV, TV_SHORT, and ONA items.
 Kitsu returns up to 20 search results or four season pages of 20 items, excluding adult items
 and validating the requested season/year and TV/ONA formats. Its season boundaries follow Kitsu's
-December–February winter convention. Artwork uses the explicitly allowed
+December–February winter convention. If a later Kitsu page fails, validated earlier pages remain
+available with an incomplete-coverage warning rather than losing the entire season.
+Official MyAnimeList returns up to 50 search items or 100 seasonal items; recommendations use
+verified reverse ID mappings and bounded detail requests. All official MAL requests are paced,
+size-limited, and stop contacting the API during a cooldown after systemic errors. Artwork uses the explicitly allowed
 `https://cdn.myanimelist.net` (Jikan) and `https://media.kitsu.app` (Kitsu) image origins;
 no new WebView API/network permissions are needed.
 
@@ -175,6 +193,8 @@ Remote artwork and trailer embeds still need network access; episode buttons use
 fixtures. Library episode refresh skips optional metadata and preserves existing progress.
 
 ## Known limitations
+
+- Official MyAnimeList queries have deterministic mock HTTP coverage but need a valid Client ID for live verification. Provider request/response fixtures, malformed payloads, identity mapping, pagination, cooldowns, recommendation state, and update consent are covered by the Rust and Node test suites. Mock tests do not prove provider uptime or native trailer/updater safety.
 
 - Simultaneous catalog/mapping outages or unmapped titles can still limit fresh search and seasonal Discovery. Optional details enrichment remains AniList-dependent; SubsPlease details and saved library episodes remain available when SubsPlease is reachable. Jikan and Kitsu listings do not supply AniList relation/prequel or next-airing data; Kitsu listings also lack genres.
 

@@ -7,10 +7,12 @@
 
   let {
     status,
+    onAccept,
     onRetry,
     onDismiss
   }: {
     status: AppUpdateStatus;
+    onAccept: () => void;
     onRetry: () => void;
     onDismiss: () => void;
   } = $props();
@@ -30,7 +32,27 @@
 </script>
 
 <div class="fixed bottom-5 right-5 z-100 w-[min(24rem,calc(100vw-2.5rem))]" aria-live="polite">
-  {#if status.phase === 'downloading'}
+  {#if status.phase === 'available'}
+    <div class="rounded-3xl border border-(--text)/10 bg-(--bg-elevated) p-5 shadow-2xl">
+      <div class="flex items-start gap-3">
+        <span class="grid size-9 shrink-0 place-items-center rounded-full bg-(--text) text-(--bg)"><Download class="size-4" /></span>
+        <span class="min-w-0 flex-1">
+          <strong class="block text-sm">StreamsPlease {status.version} is available</strong>
+          <small class="mt-1 block text-(--text)/45">You have {status.currentVersion}. Downloading and installing starts only after you agree.</small>
+        </span>
+      </div>
+      {#if status.notes}
+        <details class="mt-3 text-sm text-(--text)/65">
+          <summary class="cursor-pointer text-(--text)/85">What’s new</summary>
+          <p class="mt-2 whitespace-pre-wrap">{status.notes}</p>
+        </details>
+      {/if}
+      <div class="mt-4 flex flex-wrap gap-2">
+        <Button size="sm" class="gap-2" onclick={onAccept}><Download class="size-3.5" /> Download and install</Button>
+        <Button variant="ghost" size="sm" onclick={onDismiss}>Later</Button>
+      </div>
+    </div>
+  {:else if status.phase === 'downloading'}
     <div class="rounded-3xl border border-(--text)/10 bg-(--bg-elevated) p-5 shadow-2xl" role="status">
       <div class="flex items-start gap-3">
         <span class="grid size-9 shrink-0 place-items-center rounded-full bg-(--text) text-(--bg)"><Download class="size-4" /></span>
@@ -44,7 +66,7 @@
   {:else}
     <Alert variant="destructive" class="pr-12 shadow-2xl">
       <AlertCircle class="size-4" />
-      <AlertTitle>Automatic update failed</AlertTitle>
+      <AlertTitle>Update failed</AlertTitle>
       <AlertDescription>{status.message}</AlertDescription>
       <div class="mt-3 flex gap-2">
         <Button variant="ghost" size="sm" class="gap-2" onclick={onRetry}><RefreshCw class="size-3.5" /> Try again</Button>

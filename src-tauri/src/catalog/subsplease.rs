@@ -9,7 +9,7 @@ use super::{
     CatalogState,
 };
 
-const SUBSPLEASE_ORIGIN: &str = "https://subsplease.org";
+const SUBSPLEASE_ORIGIN: &str = "https://subsplease.org/";
 
 #[derive(Debug, PartialEq)]
 enum MetadataRequest<'a> {
@@ -39,6 +39,44 @@ fn validate_timezone(timezone: &str) -> Result<(), String> {
         return Err("Invalid time zone.".into());
     }
     Ok(())
+}
+
+fn subsplease_url(segments: &[&str], query: &[(&str, &str)]) -> Result<reqwest::Url, String> {
+    let mut url = reqwest::Url::parse(SUBSPLEASE_ORIGIN)
+        .map_err(|error| format!("The SubsPlease endpoint is invalid: {error}"))?;
+    {
+        let mut path = url
+            .path_segments_mut()
+            .map_err(|_| "The SubsPlease endpoint cannot contain path segments.".to_string())?;
+        path.pop_if_empty();
+        for segment in segments {
+            path.push(segment);
+        }
+        path.push("");
+    }
+    if !query.is_empty() {
+        let mut pairs = url.query_pairs_mut();
+        for (key, value) in query {
+            pairs.append_pair(key, value);
+        }
+    }
+    Ok(url)
+}
+
+fn subsplease_schedule_url(timezone: &str) -> Result<reqwest::Url, String> {
+    subsplease_url(&["api"], &[("f", "schedule"), ("tz", timezone)])
+}
+
+fn subsplease_index_url() -> Result<reqwest::Url, String> {
+    subsplease_url(&["shows"], &[])
+}
+
+fn subsplease_show_url(slug: &str) -> Result<reqwest::Url, String> {
+    subsplease_url(&["shows", slug], &[])
+}
+
+fn subsplease_releases_url(timezone: &str, sid: &str) -> Result<reqwest::Url, String> {
+    subsplease_url(&["api"], &[("f", "show"), ("tz", timezone), ("sid", sid)])
 }
 
 async fn subsplease_text(request: reqwest::RequestBuilder) -> Result<String, String> {
@@ -204,13 +242,7 @@ pub async fn subsplease_schedule(
     timezone: String,
 ) -> Result<Value, String> {
     validate_timezone(&timezone)?;
-    let body = subsplease_text(
-        state
-            .http
-            .get(format!("{SUBSPLEASE_ORIGIN}/api/"))
-            .query(&[("f", "schedule"), ("tz", timezone.as_str())]),
-    )
-    .await?;
+    let body = subsplease_text(state.http.get(subsplease_schedule_url(&timezone)?)).await?;
     let data: Value = serde_json::from_str(&body)
         .map_err(|error| format!("Invalid schedule response: {error}"))?;
     if !data.get("schedule").is_some_and(Value::is_object) {
@@ -221,7 +253,7 @@ pub async fn subsplease_schedule(
 
 #[tauri::command]
 pub async fn subsplease_index(state: State<'_, CatalogState>) -> Result<Value, String> {
-    let page = subsplease_text(state.http.get(format!("{SUBSPLEASE_ORIGIN}/shows/"))).await?;
+    let page = subsplease_text(state.http.get(subsplease_index_url()?)).await?;
     let shows = parse_subsplease_index(&page);
     if shows.is_empty() {
         return Err("SubsPlease did not return its show index.".into());
@@ -243,8 +275,7 @@ pub async fn subsplease_show(
         validate_anilist_id(id)?;
     }
 
-    let page =
-        subsplease_text(state.http.get(format!("{SUBSPLEASE_ORIGIN}/shows/{slug}/"))).await?;
+    let page = subsplease_text(state.http.get(subsplease_show_url(&slug)?)).await?;
     let sid = first_capture(
         r#"(?s)id=[\"']show-release-table[\"'][^>]*sid=[\"'](\d+)[\"']"#,
         &page,
@@ -268,11 +299,7 @@ pub async fn subsplease_show(
     )
     .unwrap_or_default();
     let releases_request =
-        subsplease_text(state.http.get(format!("{SUBSPLEASE_ORIGIN}/api/")).query(&[
-            ("f", "show"),
-            ("tz", timezone.as_str()),
-            ("sid", sid.as_str()),
-        ]));
+        subsplease_text(state.http.get(subsplease_releases_url(&timezone, &sid)?));
     let metadata_request = show_metadata(
         &state,
         metadata_request(include_metadata.unwrap_or(true), anilist_id, title.as_str()),
@@ -358,7 +385,8 @@ pub async fn subsplease_show(
 mod tests {
     use super::{
         first_capture, metadata_request, normalize_releases, parse_subsplease_index, strip_html,
-        validate_subsplease_slug, validate_timezone, MetadataRequest,
+        subsplease_index_url, subsplease_releases_url, subsplease_schedule_url,
+        subsplease_show_url, validate_subsplease_slug, validate_timezone, MetadataRequest,
     };
 
     #[test]
@@ -367,6 +395,36 @@ mod tests {
         assert!(validate_subsplease_slug("../one-piece").is_err());
         assert!(validate_timezone("Europe/Amsterdam").is_ok());
         assert!(validate_timezone("Europe/Amsterdam?x=1").is_err());
+    }
+
+    #[test]
+    fn builds_every_subsplease_request_from_fixed_routes() {
+        let schedule = subsplease_schedule_url("Europe/Amsterdam").unwrap();
+        assert_eq!(
+            schedule.origin().ascii_serialization(),
+            "https://subsplease.org"
+        );
+        assert_eq!(schedule.path(), "/api/");
+        assert_eq!(
+            schedule.query().unwrap(),
+            "f=schedule&tz=Europe%2FAmsterdam"
+        );
+
+        let index = subsplease_index_url().unwrap();
+        assert_eq!(index.as_str(), "https://subsplease.org/shows/");
+
+        let show = subsplease_show_url("frieren-beyond-journeys-end").unwrap();
+        assert_eq!(
+            show.as_str(),
+            "https://subsplease.org/shows/frieren-beyond-journeys-end/"
+        );
+
+        let releases = subsplease_releases_url("Europe/Amsterdam", "476").unwrap();
+        assert_eq!(releases.path(), "/api/");
+        assert_eq!(
+            releases.query().unwrap(),
+            "f=show&tz=Europe%2FAmsterdam&sid=476"
+        );
     }
 
     #[test]

@@ -293,13 +293,70 @@ export function normalizeSearchResponse(value: unknown): AniListSearchResult[] |
   for (const item of value) {
     const media = normalizeRelationNode(item);
     if (!media || !isRecord(item)) return undefined;
-    const episodes = optionalInteger(item.episodes);
     const idMal = optionalInteger(item.idMal, 1);
-    if (episodes === INVALID || idMal === INVALID) return undefined;
+    const description = optionalString(item.description, 100_000);
+    const bannerImage = optionalString(item.bannerImage, 2_000);
+    const genres = optionalStringArray(item.genres, MAX_GENRES, 100);
+    const startDate = normalizeDate(item.startDate);
+    const endDate = normalizeDate(item.endDate);
+    const episodes = optionalInteger(item.episodes);
+    const duration = optionalInteger(item.duration);
+    const averageScore = optionalInteger(item.averageScore);
+    const popularity = optionalInteger(item.popularity);
+    const relations = normalizeRelations(item.relations);
+    if (
+      [
+        idMal, description, bannerImage, genres, startDate, endDate, episodes, duration,
+        averageScore, popularity, relations
+      ].some((field) => field === INVALID)
+    ) {
+      return undefined;
+    }
+
+    let trailer: AniListSearchResult['trailer'];
+    if (item.trailer !== undefined && item.trailer !== null) {
+      if (!isRecord(item.trailer)) return undefined;
+      const id = optionalString(item.trailer.id, 500);
+      const site = optionalString(item.trailer.site, 100);
+      const thumbnail = optionalString(item.trailer.thumbnail, 2_000);
+      if (typeof id !== 'string' || !id || typeof site !== 'string' || !site || thumbnail === INVALID) {
+        return undefined;
+      }
+      trailer = { id, site };
+      if (typeof thumbnail === 'string') trailer.thumbnail = thumbnail;
+    }
+
+    let nextAiringEpisode: AniListSearchResult['nextAiringEpisode'];
+    if (item.nextAiringEpisode !== undefined && item.nextAiringEpisode !== null) {
+      if (!isRecord(item.nextAiringEpisode)) return undefined;
+      const episode = optionalInteger(item.nextAiringEpisode.episode, 1);
+      const airingAt = optionalInteger(item.nextAiringEpisode.airingAt, 1);
+      const timeUntilAiring = optionalInteger(item.nextAiringEpisode.timeUntilAiring);
+      if (
+        typeof episode !== 'number' ||
+        typeof airingAt !== 'number' ||
+        typeof timeUntilAiring !== 'number'
+      ) {
+        return undefined;
+      }
+      nextAiringEpisode = { episode, airingAt, timeUntilAiring };
+    }
+
     results.set(media.id, {
       ...media,
+      ...(typeof idMal === 'number' ? { idMal } : {}),
+      ...(typeof description === 'string' ? { description } : {}),
+      ...(trailer ? { trailer } : {}),
+      ...(typeof bannerImage === 'string' ? { bannerImage } : {}),
+      ...(Array.isArray(genres) ? { genres } : {}),
+      ...(startDate && startDate !== INVALID ? { startDate } : {}),
+      ...(endDate && endDate !== INVALID ? { endDate } : {}),
       ...(typeof episodes === 'number' ? { episodes } : {}),
-      ...(typeof idMal === 'number' ? { idMal } : {})
+      ...(typeof duration === 'number' ? { duration } : {}),
+      ...(typeof averageScore === 'number' ? { averageScore } : {}),
+      ...(typeof popularity === 'number' ? { popularity } : {}),
+      ...(nextAiringEpisode ? { nextAiringEpisode } : {}),
+      ...(relations && relations !== INVALID ? { relations } : {})
     });
   }
   return [...results.values()];
