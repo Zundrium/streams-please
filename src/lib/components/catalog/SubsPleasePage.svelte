@@ -209,11 +209,6 @@
     return providerImageUrl(scheduledProvider(show.page)?.show.image_url ?? '');
   }
 
-  function scheduleLabel(schedule?: SubsPleaseScheduleShow, day?: DayName): string {
-    if (!schedule?.time) return 'Archive';
-    return `${day?.slice(0, 3) ?? ''} ${schedule.time}`.trim();
-  }
-
   function openAvailableShow(item: SeasonCatalogMatch): void {
     navigationGeneration += 1;
     if (item.confidence >= CONFIRMED_PROVIDER_MATCH_CONFIDENCE) {
@@ -437,9 +432,8 @@
                   imageUrl={archivePosterUrl(provider)}
                   verdict={entry?.discoveryVerdict}
                   bottomLeft="Archive"
-                  bottomRight={scheduled?.show.time
-                    ? `${scheduled.day.slice(0, 3)} ${scheduled.show.time}`
-                    : ''}
+                  airingDay={scheduled?.day}
+                  airingTime={scheduled?.show.time}
                   onOpen={() => openArchiveShow(provider)}
                 />
               {/each}
@@ -543,7 +537,9 @@
                   imageUrl={posterUrl(item)}
                   verdict={entry?.discoveryVerdict}
                   bottomLeft={item.anime.episodes ? `${item.anime.episodes} eps` : 'Episodes TBA'}
-                  bottomRight={`SP ${scheduleLabel(item.schedule, item.day)}`}
+                  airingDay={item.day}
+                  airingTime={item.schedule?.time}
+                  bottomRight="Archive"
                   onOpen={() => openAvailableShow(item)}
                 />
               {/each}

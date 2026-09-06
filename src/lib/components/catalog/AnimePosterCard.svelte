@@ -1,9 +1,10 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
   import { Film } from '@lucide/svelte';
+  import { Badge } from '$lib/components/ui/badge';
   import RevealImage from '$lib/components/shared/RevealImage.svelte';
   import TasteIndicator from '$lib/components/catalog/TasteIndicator.svelte';
-  import type { DiscoveryVerdict } from '$lib/types';
+  import type { DayName, DiscoveryVerdict } from '$lib/types';
 
   let {
     title,
@@ -11,6 +12,8 @@
     verdict,
     bottomLeft = '',
     bottomRight = '',
+    airingDay,
+    airingTime = '',
     notice = '',
     onOpen,
     bottomLeftContent,
@@ -22,12 +25,20 @@
     verdict?: DiscoveryVerdict;
     bottomLeft?: string;
     bottomRight?: string;
+    airingDay?: DayName;
+    airingTime?: string;
     notice?: string;
     onOpen?: () => void;
     bottomLeftContent?: Snippet;
     posterOverlay?: Snippet;
     footer?: Snippet;
   } = $props();
+
+  let bottomRightLabel = $derived(
+    airingTime
+      ? airingDay ? `Next on ${airingDay.slice(0, 3)} ${airingTime}` : `Next at ${airingTime}`
+      : bottomRight
+  );
 </script>
 
 <article class="group relative min-w-0">
@@ -69,15 +80,19 @@
       class="absolute right-3 top-3 z-10 size-7 [&_svg]:size-3.5"
     />
 
-    <span class="absolute inset-x-3 {posterOverlay ? 'bottom-16' : 'bottom-3'} flex items-end justify-between gap-2 text-[10px] font-medium text-white/78">
-      <span class="min-w-0">
+    <span class="absolute inset-x-3 {posterOverlay ? 'bottom-16' : 'bottom-3'} flex flex-wrap items-end justify-between gap-2 text-[10px] font-medium text-white/78">
+      <span class="min-w-0 max-w-full shrink-0">
         {#if bottomLeftContent}
           {@render bottomLeftContent()}
         {:else}
           <span class="block truncate">{bottomLeft}</span>
         {/if}
       </span>
-      <span class="min-w-0 truncate text-right">{bottomRight}</span>
+      {#if bottomRightLabel}
+        <Badge class="ml-auto max-w-full bg-black/65 px-2.5 py-1 text-[10px] text-white backdrop-blur-md">
+          {bottomRightLabel}
+        </Badge>
+      {/if}
     </span>
 
     {#if posterOverlay}
