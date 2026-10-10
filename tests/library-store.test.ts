@@ -40,6 +40,10 @@ test('mutations persist new entries and skip writes when nothing changes', () =>
   store.setVerdict(details, schedule, undefined, 'love');
   assert.equal(store.entries[0].discoveryVerdict, 'love');
   assert.equal(saves.length, 5);
+  store.setResumePoint({ anilistId: 5, slug: 'show' }, '02', 95, 1400);
+  assert.equal(store.entries[0].resumePoint?.position, 95);
+  store.setResumePoint({ anilistId: 5, slug: 'show' }, '02', 95.4, 1400);
+  assert.equal(saves.length, 6);
 });
 
 test('a failed save keeps the in-memory change and logs once', () => {

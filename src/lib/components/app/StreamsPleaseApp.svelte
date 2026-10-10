@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onMount, tick, untrack } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
   import * as libmpv from 'tauri-plugin-libmpv-api';
   import type { MpvEvent, MpvEventFromProperties, VideoMarginRatio } from 'tauri-plugin-libmpv-api';
@@ -36,7 +36,12 @@
   import { posterUrl } from '$lib/catalog';
   import { createCatalogClient } from '$lib/catalog/client';
   import { errorMessage } from '$lib/errors';
-  import { libraryEntryMatches } from '$lib/library';
+  import {
+    WATCHED_PROGRESS_RATIO,
+    findLibraryEntryIndex,
+    libraryEntryMatches,
+    resumePosition
+  } from '$lib/library';
   import { LibraryStore } from '$lib/library-store.svelte';
   import { episodeMediaUrl, openEpisodeStream } from '$lib/player/episode-stream';
   import {
@@ -140,6 +145,7 @@
   const TORRENT_STATUS_INTERVAL_MS = 1_000;
   const PLAYER_UI_HIDE_DELAY_MS = 5_000;
   const SEEK_STEP_SECONDS = 10;
+  const RESUME_SAVE_INTERVAL_SECONDS = 10;
   const PREVIEW_TRACKS: MpvTrack[] = [
     { id: 1, type: 'video', codec: 'h264', selected: true },
     { id: 2, type: 'audio', lang: 'jpn', title: 'Japanese', codec: 'aac', selected: true },
@@ -186,6 +192,9 @@
   let preferredQuality = $state<PlaybackQuality>('1080');
   let preferredSubtitleLanguage = $state<SubtitleLanguage>('en');
   let autoMarkedPlaybackKey = '';
+  let pendingResumeTime = 0;
+  let episodeStartTime = 0;
+  let lastResumeSave = { key: '', time: 0, paused: false };
   let phase = $state<Phase>('idle');
   let error = $state('');
   let updateStatus = $state<AppUpdateStatus | null>(null);
@@ -229,6 +238,7 @@
     watchdogMs: PLAYBACK_START_TIMEOUT_MS,
     phase: () => phase,
     onPhase: (nextPhase, message) => {
+      if (nextPhase === 'ready') episodeStartTime = 0;
       phase = nextPhase;
       if (message !== undefined) error = message;
     }
@@ -542,11 +552,19 @@
     const episode = playingEpisode;
     const duration = playback.duration;
     const time = playback.time;
-    if (!episode || duration <= 0 || time / duration < 0.8) return;
+    if (!episode || duration <= 0 || time / duration < WATCHED_PROGRESS_RATIO) return;
     const key = episodePlaybackKey(episode);
     if (autoMarkedPlaybackKey === key) return;
     autoMarkedPlaybackKey = key;
     setEpisodeWatched({ anilistId: episode.anilistId, slug: episode.slug }, episode.episode, true);
+  });
+
+  $effect(() => {
+    const episode = playingEpisode;
+    const time = displayedPlaybackTime;
+    const { duration, paused } = playback;
+    if (!episode || phase !== 'ready' || time <= 0) return;
+    untrack(() => recordResumePoint(episode, time, duration, paused));
   });
 
   $effect(() => {
@@ -933,7 +951,7 @@
       isReady: () => phase === 'ready',
       markReady: () => stream.markReady(),
       margins: currentVideoMargins,
-      resumeAt: () => seekTarget ?? playback.time,
+      resumeAt: () => seekTarget ?? Math.max(playback.time, episodeStartTime),
       livePeers: () => stream.livePeers,
       startTimeoutMs: PLAYBACK_START_TIMEOUT_MS,
       probeIntervalMs: PLAYBACK_PROBE_INTERVAL_MS
@@ -951,6 +969,7 @@
     stats = null;
     tracks = [];
     seekTarget = null;
+    episodeStartTime = 0;
   }
 
   async function beginEpisode(torrent: CurrentTorrent): Promise<void> {
@@ -958,7 +977,9 @@
     stats = null;
     current = torrent;
     phase = 'buffering';
-    playback = { ...playback, paused: false, time: 0, duration: 0 };
+    episodeStartTime = pendingResumeTime;
+    pendingResumeTime = 0;
+    playback = { ...playback, paused: false, time: episodeStartTime, duration: 0 };
 
     if (isTauri()) {
       await mpv.ensure();
@@ -975,8 +996,9 @@
     return false;
   }
 
-  async function startTorrent(releaseMagnet: string): Promise<boolean> {
+  async function startTorrent(releaseMagnet: string, resumeTime = 0): Promise<boolean> {
     error = '';
+    pendingResumeTime = resumeTime;
     const magnet = releaseMagnet.trim();
     if (!magnet.startsWith('magnet:?')) return failPlayback('Enter a valid magnet link.');
     if (isTauri() && runtime && !runtime.mpvAvailable) {
@@ -1034,7 +1056,40 @@
     nextEpisode = plan.episode;
   }
 
+  function recordResumePoint(
+    episode: EpisodePlaybackRequest,
+    time: number,
+    duration: number,
+    paused: boolean
+  ): void {
+    const key = episodePlaybackKey(episode);
+    if (
+      key === lastResumeSave.key &&
+      paused === lastResumeSave.paused &&
+      Math.abs(time - lastResumeSave.time) < RESUME_SAVE_INTERVAL_SECONDS
+    ) {
+      return;
+    }
+    lastResumeSave = { key, time, paused };
+    library.setResumePoint({ anilistId: episode.anilistId, slug: episode.slug }, episode.episode, time, duration);
+  }
+
+  function flushResumePoint(): void {
+    if (!playingEpisode || phase !== 'ready' || displayedPlaybackTime <= 0) return;
+    lastResumeSave = { key: '', time: 0, paused: false };
+    recordResumePoint(playingEpisode, displayedPlaybackTime, playback.duration, playback.paused);
+  }
+
+  function savedResumeTime(request: EpisodePlaybackRequest): number {
+    const entries = library.entries;
+    return resumePosition(
+      entries[findLibraryEntryIndex(entries, request.anilistId, request.slug)],
+      request.episode
+    );
+  }
+
   async function playSubsPleaseRelease(request: EpisodePlaybackRequest) {
+    flushResumePoint();
     const generation = episodeRequests.next();
     const originView = activeView === 'player' ? episodeOriginView : activeView;
     nextEpisode = null;
@@ -1046,7 +1101,7 @@
     queueOpen = false;
     playingEpisode = null;
     autoMarkedPlaybackKey = '';
-    const started = await startTorrent(request.magnet);
+    const started = await startTorrent(request.magnet, savedResumeTime(request));
     if (!started || !episodeRequests.isCurrent(generation)) return;
     playingEpisode = request;
     void prepareNextEpisode(request, generation);

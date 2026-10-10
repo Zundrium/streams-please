@@ -393,6 +393,13 @@ export interface SubsPleaseShowResponse {
   };
 }
 
+export interface EpisodeResumePoint {
+  episode: string;
+  position: number;
+  duration?: number;
+  updatedAt: string;
+}
+
 export interface LibraryEntry {
   anilistId?: number;
   slug: string;
@@ -414,6 +421,7 @@ export interface LibraryEntry {
   episodeCount?: number;
   availableEpisodes: string[];
   watchedEpisodes: string[];
+  resumePoint?: EpisodeResumePoint;
   addedAt: string;
   updatedAt: string;
 }
@@ -427,6 +435,7 @@ export interface LibraryBackupEntry {
   discoveryVerdict?: DiscoveryVerdict;
   checkedAt?: string;
   watchedEpisodes: string[];
+  resumePoint?: EpisodeResumePoint;
   addedAt: string;
   updatedAt: string;
 }

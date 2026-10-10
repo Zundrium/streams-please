@@ -46,6 +46,7 @@ function fallbackEntry(backup: LibraryBackupEntry, existing: readonly LibraryEnt
       discoveryVerdict: backup.discoveryVerdict,
       checkedAt: backup.checkedAt,
       watchedEpisodes: [...backup.watchedEpisodes],
+      resumePoint: backup.resumePoint,
       addedAt: backup.addedAt,
       updatedAt: backup.updatedAt
     };
@@ -63,6 +64,7 @@ function fallbackEntry(backup: LibraryBackupEntry, existing: readonly LibraryEnt
     checkedAt: backup.checkedAt,
     availableEpisodes: [],
     watchedEpisodes: [...backup.watchedEpisodes],
+    resumePoint: backup.resumePoint,
     addedAt: backup.addedAt,
     updatedAt: backup.updatedAt
   };
@@ -92,6 +94,7 @@ async function hydrateBackup(
     discoveryVerdict: backup.discoveryVerdict,
     checkedAt: backup.checkedAt,
     watchedEpisodes: backup.watchedEpisodes,
+    resumePoint: backup.resumePoint,
     addedAt: backup.addedAt,
     updatedAt: backup.updatedAt
   };

@@ -8,9 +8,11 @@ import {
   firstUnwatchedEpisode,
   nextUnwatchedEpisode,
   parseLibraryExport,
+  resumePosition,
   saveLibrary,
   setEpisodeProgress,
   setEpisodeWatched,
+  setResumePoint,
   syncLibraryShow,
   toggleEpisodeWatched,
   toggleLibraryShow,
@@ -259,4 +261,75 @@ test('firstUnwatchedEpisode starts new series at the first released episode', ()
   assert.equal(firstUnwatchedEpisode(['10', '2', '1'], ['1']), '2');
   assert.equal(firstUnwatchedEpisode(['1', '2'], ['1', '2']), undefined);
   assert.equal(firstUnwatchedEpisode([]), undefined);
+});
+
+test('setResumePoint stores one position per series and skips trivial or finished positions', () => {
+  const entries = [entry({ anilistId: 7, slug: 'real-slug' })];
+  const identity = { anilistId: 7, slug: 'other-slug' };
+  const saved = setResumePoint(entries, identity, '02', 754.6, 1420.2, T1);
+  assert.deepEqual(saved[0].resumePoint, { episode: '02', position: 754, duration: 1420, updatedAt: T1 });
+  assert.equal(saved[0].updatedAt, T1);
+  assert.equal(entries[0].resumePoint, undefined);
+  assert.equal(setResumePoint(saved, identity, '02', 754.9, 1420, T2), saved);
+  assert.equal(setResumePoint(saved, identity, '02', 5, 1420, T2), saved);
+  assert.equal(setResumePoint(saved, identity, '02', 1200, 1420, T2), saved);
+  assert.equal(setResumePoint(saved, { slug: 'missing' }, '02', 300, 1420, T2), saved);
+  const moved = setResumePoint(saved, identity, '03', 300, 0, T2);
+  assert.deepEqual(moved[0].resumePoint, { episode: '03', position: 300, updatedAt: T2 });
+  const watched = setEpisodeWatched(entries, identity, '01', true, T1);
+  assert.equal(setResumePoint(watched, identity, '01', 300, 1420, T2), watched);
+});
+
+test('resumePosition only applies to the saved, unwatched episode', () => {
+  const item = entry({ resumePoint: { episode: '02', position: 120, updatedAt: T1 } });
+  assert.equal(resumePosition(item, '02'), 120);
+  assert.equal(resumePosition(item, '03'), 0);
+  assert.equal(resumePosition(undefined, '02'), 0);
+  assert.equal(resumePosition({ ...item, watchedEpisodes: ['02'] }, '02'), 0);
+});
+
+test('marking the resumed episode watched clears the resume point', () => {
+  const entries = [entry({ resumePoint: { episode: '02', position: 120, updatedAt: T0 } })];
+  assert.equal(setEpisodeWatched(entries, { slug: 'show-a' }, '01', true, T1)[0].resumePoint?.episode, '02');
+  assert.equal(setEpisodeWatched(entries, { slug: 'show-a' }, '02', true, T1)[0].resumePoint, undefined);
+  assert.equal(setEpisodeProgress(entries, { slug: 'show-a' }, 2, T1)[0].resumePoint, undefined);
+});
+
+test('resume points survive sync, storage, export, and merges', () => {
+  const point = { episode: '02', position: 120, duration: 1400, updatedAt: T1 };
+  const show = details('show-a', 1);
+  const schedule = scheduleShow('show-a', 1);
+  const seeded = setResumePoint(toggleLibraryShow([], show, schedule, undefined, T0), { slug: 'show-a' }, '02', 120, 1400, T1);
+  const synced = syncLibraryShow(seeded, details('show-a', 1, ['01', '02', '03', '04']), schedule, undefined, T2);
+  assert.deepEqual(synced[0].resumePoint, point);
+
+  const storage = new MemoryStorage();
+  storage.values.set('streamsplease.library.v2', JSON.stringify([
+    entry({ resumePoint: point }),
+    entry({ anilistId: 2, slug: 'bad-point', resumePoint: { episode: '01', position: -4, updatedAt: T1 } as never }),
+    entry({ anilistId: 3, slug: 'watched-point', watchedEpisodes: ['01'], resumePoint: { episode: '01', position: 30, updatedAt: T1 } })
+  ]));
+  const loaded = withStorage(storage, () => loadLibrary());
+  assert.deepEqual(loaded[0].resumePoint, point);
+  assert.equal(loaded[1].resumePoint, undefined);
+  assert.equal(loaded[2].resumePoint, undefined);
+
+  assert.deepEqual(parseLibraryExport(createLibraryExport([entry({ resumePoint: point })]))[0].resumePoint, point);
+  assert.throws(() => parseLibraryExport(JSON.stringify({
+    format: 'streamsplease-library',
+    version: 1,
+    entries: [{ ...entry(), resumePoint: { episode: '01', position: 'soon', updatedAt: T1 } }]
+  })), /invalid entry/);
+
+  const later = { episode: '03', position: 60, updatedAt: T2 };
+  const [merged] = mergeLibraryEntries(
+    [entry({ resumePoint: later, updatedAt: T0 })],
+    [entry({ resumePoint: point, updatedAt: T1 })]
+  );
+  assert.deepEqual(merged.resumePoint, later);
+  const [finished] = mergeLibraryEntries(
+    [entry({ resumePoint: later, updatedAt: T0 })],
+    [entry({ watchedEpisodes: ['03'], updatedAt: T1 })]
+  );
+  assert.equal(finished.resumePoint, undefined);
 });

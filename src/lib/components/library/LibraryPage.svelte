@@ -25,8 +25,10 @@
   import {
     libraryEntryMatches,
     nextUnwatchedEpisode,
+    resumePosition,
     watchedCount
   } from '$lib/library';
+  import { formatPlaybackTime } from '$lib/player/playback-state';
   import type {
     AniListRelationNode,
     DayName,
@@ -290,6 +292,7 @@
   {@const aired = entry.availableEpisodes.length}
   {@const waiting = Math.max(0, aired - watched)}
   {@const nextEpisode = nextUnwatchedEpisode(entry)}
+  {@const resumeAt = nextEpisode ? resumePosition(entry, nextEpisode) : 0}
   {@const playError = quickPlayError?.slug === entry.slug ? quickPlayError.message : ''}
   <AnimePosterCard
     title={entry.title}
@@ -306,8 +309,15 @@
           type="button"
           class="pointer-events-auto inline-flex max-w-full items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-bold shadow-[0_8px_20px_-8px_rgba(0,0,0,0.9)] ring-1 ring-black/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/80 disabled:cursor-wait disabled:opacity-65 {playError ? 'bg-red-500 text-white hover:bg-red-600' : 'bg-white text-black hover:bg-white/80'}"
           disabled={Boolean(quickPlaySlug)}
-          aria-label={`${playError ? 'Retry' : 'Play'} episode ${nextEpisode} of ${entry.title}`}
-          title={playError || `Play next unwatched episode: ${nextEpisode}`}
+          aria-label={playError
+            ? `Retry episode ${nextEpisode} of ${entry.title}`
+            : resumeAt
+              ? `Resume episode ${nextEpisode} of ${entry.title} at ${formatPlaybackTime(resumeAt)}`
+              : `Play episode ${nextEpisode} of ${entry.title}`}
+          title={playError ||
+            (resumeAt
+              ? `Resume episode ${nextEpisode} at ${formatPlaybackTime(resumeAt)}`
+              : `Play next unwatched episode: ${nextEpisode}`)}
           onclick={() => void playNextEpisode(entry)}
         >
           {#if quickPlaySlug === entry.slug}
@@ -315,7 +325,9 @@
           {:else}
             <Play class="size-3.5" fill="currentColor" />
           {/if}
-          <span class="truncate">{playError ? 'Retry' : 'Play'} E{nextEpisode}</span>
+          <span class="truncate">
+            {#if playError}Retry E{nextEpisode}{:else if resumeAt}E{nextEpisode} · {formatPlaybackTime(resumeAt)}{:else}Play E{nextEpisode}{/if}
+          </span>
         </button>
         {#if playError}
           <span class="sr-only" role="alert">{entry.title}: {playError}</span>

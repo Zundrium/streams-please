@@ -4,6 +4,7 @@ import { errorMessage, toError } from '../src/lib/errors.ts';
 import { mpvInitialOptions, subtitleLanguagePreference } from '../src/lib/player/mpv-config.ts';
 import {
   applyPlaybackProperty,
+  formatPlaybackTime,
   nextPlaybackSpeed,
   percentToTime,
   reconcileSeekTarget,
@@ -105,4 +106,11 @@ test('error helpers normalize unknown rejection values', () => {
   assert.equal(toError('plain').message, 'plain');
   const original = new Error('kept');
   assert.equal(toError(original), original);
+});
+
+test('playback times format as clock values', () => {
+  assert.equal(formatPlaybackTime(0), '0:00');
+  assert.equal(formatPlaybackTime(754.9), '12:34');
+  assert.equal(formatPlaybackTime(3_725), '1:02:05');
+  assert.equal(formatPlaybackTime(Number.NaN), '0:00');
 });

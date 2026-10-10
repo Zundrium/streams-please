@@ -2,6 +2,7 @@ import {
   DAY_ORDER,
   type DayName,
   type DiscoveryVerdict,
+  type EpisodeResumePoint,
   type LibraryBackupEntry,
   type LibraryEntry,
   type SubsPleaseScheduleShow,
@@ -19,6 +20,8 @@ const EXPORT_VERSION = 1;
 const MAX_LIBRARY_ENTRIES = 10_000;
 const MAX_EPISODES_PER_ENTRY = 10_000;
 export const MAX_LIBRARY_FILE_BYTES = 5_000_000;
+export const WATCHED_PROGRESS_RATIO = 0.8;
+export const RESUME_MIN_SECONDS = 10;
 
 function unique(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
@@ -61,6 +64,31 @@ function optionalStringArray(value: unknown): string[] | undefined {
   return Array.isArray(value) ? stringArray(value) : undefined;
 }
 
+function episodeLabel(value: unknown): string | undefined {
+  const episode = optionalString(value);
+  return episode && episode.length <= 64 && !/\p{Cc}/u.test(episode) ? episode : undefined;
+}
+
+function resumePoint(value: unknown): EpisodeResumePoint | undefined {
+  if (!isRecord(value)) return undefined;
+  const episode = episodeLabel(value.episode);
+  const position = optionalNumber(value.position);
+  const duration = optionalNumber(value.duration);
+  const updatedAt = optionalDate(value.updatedAt);
+  if (!episode || position === undefined || position < 0 || !updatedAt) return undefined;
+  if (duration !== undefined && duration <= 0) return undefined;
+  return duration === undefined
+    ? { episode, position, updatedAt }
+    : { episode, position, duration, updatedAt };
+}
+
+function activeResumePoint(
+  point: EpisodeResumePoint | undefined,
+  watchedEpisodes: readonly string[]
+): EpisodeResumePoint | undefined {
+  return point && !watchedEpisodes.includes(point.episode) ? point : undefined;
+}
+
 function dayName(value: unknown): DayName | undefined {
   return typeof value === 'string' && DAY_ORDER.some((day) => day === value)
     ? (value as DayName)
@@ -100,10 +128,7 @@ function isLibraryBackupEntry(value: unknown): value is LibraryBackupEntry {
   const validEpisodes = (field: unknown) =>
     Array.isArray(field) &&
     field.length <= MAX_EPISODES_PER_ENTRY &&
-    field.every((item) => {
-      const episode = optionalString(item);
-      return Boolean(episode && episode.length <= 64 && !/\p{Cc}/u.test(episode));
-    });
+    field.every((item) => episodeLabel(item) !== undefined);
 
   return Boolean(subspleaseSlug(value.slug)) &&
     validBoolean(value.following) &&
@@ -114,7 +139,8 @@ function isLibraryBackupEntry(value: unknown): value is LibraryBackupEntry {
     optionalField(value, 'subspleaseId', validId) &&
     optionalField(value, 'libraryDismissed', validBoolean) &&
     optionalField(value, 'discoveryVerdict', (field) => discoveryVerdict(field) !== undefined) &&
-    optionalField(value, 'checkedAt', validDate);
+    optionalField(value, 'checkedAt', validDate) &&
+    optionalField(value, 'resumePoint', (field) => resumePoint(field) !== undefined);
 }
 
 function normalizeLibraryEntry(value: unknown, now: string): LibraryEntry | undefined {
@@ -126,6 +152,7 @@ function normalizeLibraryEntry(value: unknown, now: string): LibraryEntry | unde
   const metadataId = optionalId(value.metadataId);
   const verdict = discoveryVerdict(value.discoveryVerdict);
   const libraryDismissed = optionalBoolean(value.libraryDismissed);
+  const watchedEpisodes = sortEpisodeNumbers(unique(stringArray(value.watchedEpisodes)));
   return {
     anilistId: optionalId(value.anilistId) ?? metadataId,
     slug,
@@ -149,7 +176,8 @@ function normalizeLibraryEntry(value: unknown, now: string): LibraryEntry | unde
     airingTime: optionalString(value.airingTime),
     episodeCount: optionalNumber(value.episodeCount),
     availableEpisodes: sortEpisodeNumbers(unique(stringArray(value.availableEpisodes))),
-    watchedEpisodes: sortEpisodeNumbers(unique(stringArray(value.watchedEpisodes))),
+    watchedEpisodes,
+    resumePoint: activeResumePoint(resumePoint(value.resumePoint), watchedEpisodes),
     addedAt: optionalDate(value.addedAt) ?? now,
     updatedAt: optionalDate(value.updatedAt) ?? now
   };
@@ -199,6 +227,10 @@ function mergeLibraryEntry(current: LibraryEntry, imported: LibraryEntry): Libra
   const importedUpdatedAt = Date.parse(imported.updatedAt);
   const newer = importedUpdatedAt >= currentUpdatedAt ? imported : current;
   const older = newer === imported ? current : imported;
+  const watchedEpisodes = sortEpisodeNumbers(unique([
+    ...current.watchedEpisodes,
+    ...imported.watchedEpisodes
+  ]));
   return {
     ...older,
     ...newer,
@@ -206,15 +238,24 @@ function mergeLibraryEntry(current: LibraryEntry, imported: LibraryEntry): Libra
     subspleaseId: newer.subspleaseId ?? older.subspleaseId,
     metadataId: newer.metadataId ?? older.metadataId,
     availableEpisodes: newer.availableEpisodes,
-    watchedEpisodes: sortEpisodeNumbers(unique([
-      ...current.watchedEpisodes,
-      ...imported.watchedEpisodes
-    ])),
+    watchedEpisodes,
+    resumePoint: activeResumePoint(
+      latestResumePoint(current.resumePoint, imported.resumePoint),
+      watchedEpisodes
+    ),
     addedAt:
       Date.parse(current.addedAt) <= Date.parse(imported.addedAt)
         ? current.addedAt
         : imported.addedAt
   };
+}
+
+function latestResumePoint(
+  left: EpisodeResumePoint | undefined,
+  right: EpisodeResumePoint | undefined
+): EpisodeResumePoint | undefined {
+  if (!left || !right) return left ?? right;
+  return Date.parse(right.updatedAt) > Date.parse(left.updatedAt) ? right : left;
 }
 
 export function sortEpisodeNumbers(values: string[]): string[] {
@@ -299,6 +340,7 @@ export function createLibraryExport(entries: LibraryEntry[]): string {
     discoveryVerdict: entry.discoveryVerdict,
     checkedAt: entry.checkedAt,
     watchedEpisodes: sortEpisodeNumbers(unique(entry.watchedEpisodes)),
+    resumePoint: entry.resumePoint,
     addedAt: entry.addedAt,
     updatedAt: entry.updatedAt
   }));
@@ -478,6 +520,7 @@ export function entryFromShow(
       unique(Object.values(details.episode ?? {}).map((release) => release.episode))
     ),
     watchedEpisodes: previous?.watchedEpisodes ?? [],
+    resumePoint: previous?.resumePoint,
     addedAt: previous?.addedAt ?? now,
     updatedAt: now
   };
@@ -516,6 +559,11 @@ export function firstUnwatchedEpisode(
 
 export function nextUnwatchedEpisode(entry: LibraryEntry): string | undefined {
   return firstUnwatchedEpisode(entry.availableEpisodes, entry.watchedEpisodes);
+}
+
+export function resumePosition(entry: LibraryEntry | undefined, episode: string): number {
+  const point = entry ? activeResumePoint(entry.resumePoint, entry.watchedEpisodes) : undefined;
+  return point?.episode === episode ? point.position : 0;
 }
 
 function deepEqual(left: unknown, right: unknown): boolean {
@@ -670,7 +718,20 @@ export function setEpisodeWatched(
   const watchedEpisodes = watched
     ? [...entry.watchedEpisodes, episode]
     : entry.watchedEpisodes.filter((value) => value !== episode);
-  return replaceAt(entries, index, { ...entry, watchedEpisodes, updatedAt: now });
+  return replaceAt(entries, index, withWatchedEpisodes(entry, watchedEpisodes, now));
+}
+
+function withWatchedEpisodes(
+  entry: LibraryEntry,
+  watchedEpisodes: string[],
+  now: string
+): LibraryEntry {
+  return {
+    ...entry,
+    watchedEpisodes,
+    resumePoint: activeResumePoint(entry.resumePoint, watchedEpisodes),
+    updatedAt: now
+  };
 }
 
 export function toggleEpisodeWatched(
@@ -702,5 +763,34 @@ export function setEpisodeProgress(
   const count = Math.min(Math.max(Math.round(progressCount), 0), entry.availableEpisodes.length);
   const watchedEpisodes = sortEpisodeNumbers(entry.availableEpisodes).slice(0, count);
   if (deepEqual(watchedEpisodes, entry.watchedEpisodes)) return entries;
-  return replaceAt(entries, index, { ...entry, watchedEpisodes, updatedAt: now });
+  return replaceAt(entries, index, withWatchedEpisodes(entry, watchedEpisodes, now));
+}
+
+export function setResumePoint(
+  entries: LibraryEntry[],
+  identity: LibraryIdentity,
+  episode: string,
+  position: number,
+  duration: number,
+  now = new Date().toISOString()
+): LibraryEntry[] {
+  const index = findLibraryEntryIndex(entries, identity.anilistId, identity.slug);
+  if (index < 0 || !Number.isFinite(position) || position < RESUME_MIN_SECONDS) return entries;
+  const entry = entries[index];
+  if (entry.watchedEpisodes.includes(episode)) return entries;
+  const knownDuration = Number.isFinite(duration) && duration > 0 ? Math.round(duration) : undefined;
+  if (knownDuration && position / knownDuration >= WATCHED_PROGRESS_RATIO) return entries;
+  const seconds = Math.floor(position);
+  const previous = entry.resumePoint;
+  if (
+    previous?.episode === episode &&
+    previous.position === seconds &&
+    previous.duration === knownDuration
+  ) {
+    return entries;
+  }
+  const point: EpisodeResumePoint = knownDuration
+    ? { episode, position: seconds, duration: knownDuration, updatedAt: now }
+    : { episode, position: seconds, updatedAt: now };
+  return replaceAt(entries, index, { ...entry, resumePoint: point, updatedAt: now });
 }

@@ -97,6 +97,7 @@ Set `STREAMSPLEASE_GITHUB_TOKEN` as a GitHub Actions secret containing a fine-gr
 3. Switch embedded audio and subtitles through the player or details panel.
 4. Use **External subtitle** to add a local subtitle file.
 5. Starting another episode releases the previous torrent. Fully downloaded episodes keep seeding until they reach the target ratio and are then deleted; partial downloads are paused and kept so they can resume quickly. When the cache exceeds 10 GB, the least recently watched episodes that are not playing are removed first. Seeding state and upload totals survive restarts. **Account settings → Seeding & cache** can cap the total upload rate (64 KiB/s minimum, unlimited by default); the header always shows the current total download and upload speed.
+6. Each library show remembers where you stopped in an unwatched episode. Starting that episode again resumes from the saved position, and the Library and show pages label it with the time. The position is saved every 10 seconds and whenever playback pauses. It is cleared once the episode is marked watched, which happens automatically at 80%.
 
 The **Search** tab searches across seasons and checks each result against the SubsPlease
 archive. AniList is preferred by default; reorder AniList, official MyAnimeList, Jikan, and Kitsu in **Account settings**.

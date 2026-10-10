@@ -14,6 +14,7 @@
   } from '@lucide/svelte';
   import { Button } from '$lib/components/ui/button';
   import { Slider } from '$lib/components/ui/slider';
+  import { formatPlaybackTime } from '$lib/player/playback-state';
 
   type BufferedRange = {
     start: number;
@@ -64,17 +65,6 @@
 
   const TIMELINE_STEP = 0.05;
 
-  function formatTime(seconds: number): string {
-    if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
-    const rounded = Math.floor(seconds);
-    const hours = Math.floor(rounded / 3600);
-    const minutes = Math.floor((rounded % 3600) / 60);
-    const remainder = rounded % 60;
-    return hours
-      ? `${hours}:${String(minutes).padStart(2, '0')}:${String(remainder).padStart(2, '0')}`
-      : `${minutes}:${String(remainder).padStart(2, '0')}`;
-  }
-
   function normalizeTimelineValue(value: number): number {
     const clamped = Math.max(0, Math.min(100, value));
     const stepsPerPercent = 1 / TIMELINE_STEP;
@@ -110,7 +100,7 @@
   role="presentation"
 >
   <div class="grid grid-cols-[3rem_minmax(0,1fr)_3rem] items-center gap-3 text-xs text-white/55">
-    <span>{formatTime(displayedTime)}</span>
+    <span>{formatPlaybackTime(displayedTime)}</span>
     <Slider
       type="single"
       value={timelineValue}
@@ -122,7 +112,7 @@
       onValueChange={(value) => previewSeek(Number(value))}
       onValueCommit={(value) => commitSeek(Number(value))}
     />
-    <span class="text-right">{formatTime(duration)}</span>
+    <span class="text-right">{formatPlaybackTime(duration)}</span>
   </div>
 
   <div class="flex items-center justify-between gap-3">

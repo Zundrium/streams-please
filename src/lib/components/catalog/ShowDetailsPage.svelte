@@ -43,7 +43,8 @@
   import { decodeEntities, errorMessage, metadataLabel, posterUrl, preferredTitle } from '$lib/catalog';
   import { preferredDownload, trailerLinks } from '$lib/catalog/media';
   import { buildEpisodeSupplements, episodeNumberKey } from '$lib/episodeMetadata';
-  import { firstUnwatchedEpisode } from '$lib/library';
+  import { firstUnwatchedEpisode, resumePosition } from '$lib/library';
+  import { formatPlaybackTime } from '$lib/player/playback-state';
   import {
     youtubeTrailerSearchPageUrl,
     youtubeTrailerSearchPlaybackUrl
@@ -195,6 +196,9 @@
   );
   let nextEpisodeKey = $derived(
     nextEpisodeRelease ? `${nextEpisodeRelease.show}-${nextEpisodeRelease.episode}` : ''
+  );
+  let nextEpisodeResumeAt = $derived(
+    nextEpisodeRelease ? resumePosition(libraryEntry, nextEpisodeRelease.episode) : 0
   );
   let continuingSeries = $derived(
     Boolean(
@@ -552,11 +556,17 @@
                 size="lg"
                 class="gap-2"
                 disabled={Boolean(playingKey)}
-                aria-label={`${continuingSeries ? 'Continue with' : 'Play'} episode ${nextEpisodeRelease.episode} of ${decodeEntities(details?.title || show.title)}`}
+                aria-label={nextEpisodeResumeAt
+                  ? `Resume episode ${nextEpisodeRelease.episode} of ${decodeEntities(details?.title || show.title)} at ${formatPlaybackTime(nextEpisodeResumeAt)}`
+                  : `${continuingSeries ? 'Continue with' : 'Play'} episode ${nextEpisodeRelease.episode} of ${decodeEntities(details?.title || show.title)}`}
                 onclick={() => nextEpisodeRelease && void playRelease(nextEpisodeKey, nextEpisodeRelease, nextEpisodeDownload)}
               >
                 {#if playingKey === nextEpisodeKey}<Spinner class="size-4 border-(--bg)/20 border-t-(--bg)" />{:else}<Play class="size-4" fill="currentColor" />{/if}
-                {continuingSeries ? 'Continue' : 'Play'} episode {nextEpisodeRelease.episode}
+                {#if nextEpisodeResumeAt}
+                  Resume episode {nextEpisodeRelease.episode} · {formatPlaybackTime(nextEpisodeResumeAt)}
+                {:else}
+                  {continuingSeries ? 'Continue' : 'Play'} episode {nextEpisodeRelease.episode}
+                {/if}
               </Button>
             {/if}
             <Button
@@ -689,6 +699,7 @@
                 {@const preferred = preferredDownload(release, preferredQuality)}
                 {@const releaseKey = `${release.show}-${release.episode}`}
                 {@const watched = isWatched(release.episode)}
+                {@const resumeAt = resumePosition(libraryEntry, release.episode)}
                 {@const releasedToday = wasReleasedToday(release.release_date)}
                 {@const supplement = episodeSupplements.get(episodeNumberKey(release.episode))}
                 {@const image = supplement?.thumbnail ?? ''}
@@ -712,6 +723,9 @@
                         <small class="mt-1 block text-[11px] text-(--text)/34">
                           {qualityLabel(release)}{supplement?.site ? ` · ${supplement.site} episode data` : ''}
                         </small>
+                        {#if resumeAt}
+                          <small class="mt-1 block text-[11px] font-medium text-(--text)/58">Stopped at {formatPlaybackTime(resumeAt)}</small>
+                        {/if}
                         <small class="mt-1 block text-(--text)/38 sm:hidden">{releaseDate(release.release_date)}</small>
                       </div>
                     </div>
@@ -737,10 +751,13 @@
                       size="sm"
                       class="gap-2"
                       disabled={!preferred || playingKey === releaseKey}
+                      aria-label={resumeAt
+                        ? `Resume episode ${release.episode} at ${formatPlaybackTime(resumeAt)}`
+                        : `Play episode ${release.episode}`}
                       onclick={() => void playRelease(releaseKey, release, preferred)}
                     >
                       {#if playingKey === releaseKey}<Spinner class="size-3.5" />{:else}<Play class="size-3.5" fill="currentColor" />{/if}
-                      <span class="hidden sm:inline">Play</span>
+                      <span class="hidden sm:inline">{resumeAt ? 'Resume' : 'Play'}</span>
                     </Button>
                   </td>
                 </tr>

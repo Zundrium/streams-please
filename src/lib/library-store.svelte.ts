@@ -5,6 +5,7 @@ import {
   saveLibrary,
   setEpisodeProgress,
   setEpisodeWatched,
+  setResumePoint,
   syncLibraryShow,
   toggleEpisodeWatched,
   toggleLibraryShow,
@@ -65,6 +66,15 @@ export class LibraryStore {
 
   setEpisodeProgress = (slug: string, progressCount: number): void => {
     this.commit(setEpisodeProgress(this.entries, { slug }, progressCount));
+  };
+
+  setResumePoint = (
+    identity: LibraryIdentity,
+    episode: string,
+    position: number,
+    duration: number
+  ): void => {
+    this.commit(setResumePoint(this.entries, identity, episode, position, duration));
   };
 
   importBackups = async (
