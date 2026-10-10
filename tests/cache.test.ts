@@ -25,18 +25,6 @@ function seasonResponse(): AniListSeasonResponse {
   };
 }
 
-test('catalog cache normalizes and expires persisted season data', () => {
-  const storage = new MemoryStorage();
-  let now = 1_000;
-  const cache = createCatalogCache({ storage, now: () => now });
-  cache.saveSeason(seasonResponse());
-
-  assert.equal(cache.loadSeason('SUMMER', 2026, 500)?.shows[0].title.romaji, 'Preview Show');
-  now = 1_501;
-  assert.equal(cache.loadSeason('SUMMER', 2026, 500), undefined);
-  assert.equal(cache.loadStaleSeason('SUMMER', 2026)?.shows.length, 1);
-});
-
 test('catalog cache rejects malformed nested AniList fields and omits null optionals', () => {
   const show = { id: 1, title: { romaji: 'Preview Show' }, season: 'SUMMER', seasonYear: 2026 };
   const malformedShows = [
@@ -81,29 +69,6 @@ test('catalog cache deduplicates AniList IDs and only accepts backend-safe provi
   }), { shows: [{ title: 'Preview', page: 'preview-show-2' }] });
   assert.equal(normalizeProviderIndex({ shows: [{ title: 'Unsafe', page: '../preview' }] }), undefined);
   assert.equal(normalizeProviderIndex({ shows: [{ title: 'Uppercase', page: 'Preview' }] }), undefined);
-});
-
-test('catalog cache ignores malformed, wrong-season, and future-dated data', () => {
-  const storage = new MemoryStorage();
-  const cache = createCatalogCache({ storage, now: () => 1_000 });
-  storage.setItem(
-    'streamsplease.season-cache.v1',
-    JSON.stringify({
-      entries: {
-        'SUMMER:2026': {
-          savedAt: 1_001,
-          data: { season: 'SUMMER', year: 2026, shows: [] }
-        },
-        'FALL:2026': {
-          savedAt: 900,
-          data: { season: 'SUMMER', year: 2026, shows: [] }
-        }
-      }
-    })
-  );
-
-  assert.equal(cache.loadStaleSeason('SUMMER', 2026), undefined);
-  assert.equal(cache.loadStaleSeason('FALL', 2026), undefined);
 });
 
 test('catalog cache keeps preview data separate and tolerates failed writes', () => {

@@ -1,16 +1,24 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    sync::Arc,
+    time::Duration,
 };
 
-use reqwest::{header::HeaderValue, StatusCode, Url};
+use reqwest::{
+    header::{HeaderName, HeaderValue},
+    StatusCode, Url,
+};
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::Semaphore;
 
 use super::{
+    days_in_month,
+    http::{
+        interpret_json, ProviderFailure, ProviderHttp, ProviderPolicy, ProviderResponse,
+        MAX_JSON_RESPONSE_BYTES, NETWORK_COOLDOWN, REJECTED_COOLDOWN,
+    },
     identity::{IdentityResolver, ProviderId},
+    nonempty, push_skipped_items_warning, valid_catalog_year, valid_description, valid_text,
     AdapterFuture, CatalogAdapter, CatalogCapability, CatalogCoverImage, CatalogMedia,
     CatalogProvider, CatalogRequest, CatalogResponse, CatalogSeason, CatalogTitle,
 };
@@ -18,21 +26,24 @@ use super::{
 pub(super) const PROVIDER_ID: &str = "myanimelist";
 
 const MAL_API_BASE: &str = "https://api.myanimelist.net/v2/";
+const MAL_CLIENT_ID_HEADER: &str = "x-mal-client-id";
 const MAL_CLIENT_ID_MAX_BYTES: usize = 128;
-const MAL_REQUEST_INTERVAL: Duration = Duration::from_millis(1_100);
-const MAL_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
-const MAL_CACHE_LIMIT: usize = 32;
-const MAL_MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+static MAL_POLICY: ProviderPolicy = ProviderPolicy {
+    label: "MyAnimeList",
+    accept: "application/json",
+    max_concurrent_requests: 1,
+    request_interval: Duration::from_millis(1_100),
+    cache_ttl: Duration::from_secs(5 * 60),
+    cache_limit: 32,
+    max_response_bytes: MAX_JSON_RESPONSE_BYTES,
+    network_cooldown: Some(NETWORK_COOLDOWN),
+    interpret: interpret_mal_response,
+};
 const MAL_SEARCH_LIMIT: usize = 50;
 const MAL_SEASON_LIMIT: usize = 100;
 const MAL_MAX_RECOMMENDATIONS_PER_SEED: usize = 500;
 const MAL_RECOMMENDATION_MAPPING_LIMIT: usize = 200;
 const MAL_RECOMMENDATION_DETAIL_LIMIT: usize = 50;
-const MAL_DEFAULT_RATE_COOLDOWN_SECONDS: u64 = 30;
-const MAL_MAX_RATE_COOLDOWN_SECONDS: u64 = 5 * 60;
-const MAL_NETWORK_COOLDOWN: Duration = Duration::from_secs(30);
-const MAL_SERVER_COOLDOWN: Duration = Duration::from_secs(60);
-const MAL_AUTH_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 const MAL_FIELDS: &str = "id,title,main_picture,alternative_titles,start_date,end_date,synopsis,mean,num_list_users,nsfw,media_type,status,genres,num_episodes,start_season,average_episode_duration";
 
 const CAPABILITIES: &[CatalogCapability] = &[
@@ -41,23 +52,9 @@ const CAPABILITIES: &[CatalogCapability] = &[
     CatalogCapability::Recommendations,
 ];
 
-struct CacheEntry {
-    expires_at: Instant,
-    value: Value,
-}
-
-struct RequestControl {
-    cache: HashMap<String, CacheEntry>,
-    cooldown_until: Option<Instant>,
-    next_request_at: Instant,
-}
-
 struct MyAnimeListClient {
-    http: reqwest::Client,
     api_base: Url,
-    client_id: HeaderValue,
-    in_flight: Semaphore,
-    control: Mutex<RequestControl>,
+    http: ProviderHttp,
 }
 
 pub(super) struct MyAnimeListAdapter {
@@ -232,7 +229,7 @@ impl MyAnimeListAdapter {
         cache_dir: &std::path::Path,
     ) -> Result<(Vec<CatalogMedia>, Vec<String>), String> {
         let url = mal_search_url(&self.client.api_base, query)?;
-        let payload = self.client.request(url).await?;
+        let payload = self.client.http.get_json(url).await?;
         let page = parse_mal_page(payload, MAL_SEARCH_LIMIT)?;
         let mut warnings = Vec::new();
         if page.paging.next.is_some() {
@@ -250,7 +247,7 @@ impl MyAnimeListAdapter {
         cache_dir: &std::path::Path,
     ) -> Result<(Vec<CatalogMedia>, Vec<String>), String> {
         let url = mal_season_url(&self.client.api_base, season, year)?;
-        let payload = self.client.request(url).await?;
+        let payload = self.client.http.get_json(url).await?;
         let page = parse_mal_page(payload, MAL_SEASON_LIMIT)?;
         if !page
             .season
@@ -310,7 +307,8 @@ impl MyAnimeListAdapter {
             };
             let result = self
                 .client
-                .request(mal_recommendations_url(&self.client.api_base, mal_id)?)
+                .http
+                .get_json(mal_recommendations_url(&self.client.api_base, mal_id)?)
                 .await
                 .and_then(|payload| parse_mal_recommendations(payload, mal_id));
             match result {
@@ -380,11 +378,13 @@ impl MyAnimeListAdapter {
 
         let mut items = Vec::new();
         let mut adult = 0;
+        let mut skipped = 0;
         let mut failed_details = Vec::new();
         for (mal_id, anilist_id) in mapped {
             let result = self
                 .client
-                .request(mal_details_url(&self.client.api_base, mal_id)?)
+                .http
+                .get_json(mal_details_url(&self.client.api_base, mal_id)?)
                 .await
                 .and_then(|payload| parse_mal_anime(payload, mal_id));
             let anime = match result {
@@ -398,15 +398,17 @@ impl MyAnimeListAdapter {
                 adult += 1;
                 continue;
             }
-            let item = normalize_mal_anime(anime, anilist_id)?;
-            item.validate("MyAnimeList")?;
-            items.push(item);
+            match normalize_mal_anime(anime, anilist_id) {
+                Ok(item) if item.validate("MyAnimeList").is_ok() => items.push(item),
+                _ => skipped += 1,
+            }
         }
         if adult > 0 {
             warnings.push(format!(
                 "MyAnimeList returned {adult} recommendation(s) not marked safe for work; they were omitted."
             ));
         }
+        push_skipped_items_warning(&mut warnings, "MyAnimeList", skipped);
         if !failed_details.is_empty() {
             warnings.push(format!(
                 "Details were unavailable for {} MyAnimeList recommendation(s); those items were omitted. First failure: {}",
@@ -432,10 +434,14 @@ impl MyAnimeListAdapter {
     ) -> Result<(Vec<CatalogMedia>, Vec<String>), String> {
         let mut adult = 0;
         let mut outside_season = 0;
+        let mut skipped = 0;
         let mut seen = HashSet::new();
         let mut valid = Vec::new();
         for edge in edges {
-            validate_mal_anime(&edge.node)?;
+            if validate_mal_anime(&edge.node).is_err() {
+                skipped += 1;
+                continue;
+            }
             if !mal_is_safe(&edge.node) {
                 adult += 1;
                 continue;
@@ -461,6 +467,7 @@ impl MyAnimeListAdapter {
             ));
         }
         if valid.is_empty() {
+            push_skipped_items_warning(&mut warnings, "MyAnimeList", skipped);
             return Ok((Vec::new(), warnings));
         }
 
@@ -482,10 +489,12 @@ impl MyAnimeListAdapter {
                 missing_mappings += 1;
                 continue;
             };
-            let item = normalize_mal_anime(anime, anilist_id)?;
-            item.validate("MyAnimeList")?;
-            items.push(item);
+            match normalize_mal_anime(anime, anilist_id) {
+                Ok(item) if item.validate("MyAnimeList").is_ok() => items.push(item),
+                _ => skipped += 1,
+            }
         }
+        push_skipped_items_warning(&mut warnings, "MyAnimeList", skipped);
         if missing_mappings > 0 {
             warnings.push(format!(
                 "{missing_mappings} MyAnimeList item(s) were omitted because no verified canonical AniList mapping was available."
@@ -529,189 +538,30 @@ impl CatalogAdapter for MyAnimeListAdapter {
 impl MyAnimeListClient {
     fn new(http: reqwest::Client, api_base: Url, client_id: HeaderValue) -> Self {
         Self {
-            http,
             api_base,
-            client_id,
-            in_flight: Semaphore::new(1),
-            control: Mutex::new(RequestControl {
-                cache: HashMap::new(),
-                cooldown_until: None,
-                next_request_at: Instant::now(),
-            }),
+            http: ProviderHttp::new(http, &MAL_POLICY)
+                .with_header(HeaderName::from_static(MAL_CLIENT_ID_HEADER), client_id),
         }
-    }
-
-    async fn request(&self, url: Url) -> Result<Value, String> {
-        let cache_key = url.as_str().to_owned();
-        if let Some(value) = self.cached(&cache_key)? {
-            return Ok(value);
-        }
-        let _permit = self
-            .in_flight
-            .acquire()
-            .await
-            .map_err(|_| "The MyAnimeList request queue is unavailable.".to_string())?;
-        if let Some(value) = self.cached(&cache_key)? {
-            return Ok(value);
-        }
-
-        let wait = self.reserve_request()?;
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
-        }
-        self.check_cooldown()?;
-
-        let response = match self
-            .http
-            .get(url)
-            .header("Accept", "application/json")
-            .header("X-MAL-CLIENT-ID", self.client_id.clone())
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                self.begin_cooldown(MAL_NETWORK_COOLDOWN)?;
-                return Err(format!(
-                    "MyAnimeList is unreachable: {error}. This request will not retry automatically."
-                ));
-            }
-        };
-        let status = response.status();
-        let retry_after = response
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        if matches!(status, StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN) {
-            self.begin_cooldown(MAL_AUTH_COOLDOWN)?;
-            return Err(format!(
-                "MyAnimeList rejected the configured Client ID (HTTP {status}). Check it in Settings."
-            ));
-        }
-        if status == StatusCode::TOO_MANY_REQUESTS {
-            let cooldown = mal_retry_after(retry_after.as_deref());
-            self.begin_cooldown(cooldown)?;
-            return Err(format!(
-                "MyAnimeList is rate limiting requests. Try again in {} seconds; this request will not retry automatically.",
-                cooldown.as_secs()
-            ));
-        }
-        if status.is_server_error() {
-            self.begin_cooldown(MAL_SERVER_COOLDOWN)?;
-            return Err(format!(
-                "MyAnimeList returned an HTTP {status} server error; this request will not retry automatically."
-            ));
-        }
-        if !status.is_success() {
-            return Err(format!("MyAnimeList returned an HTTP {status} error."));
-        }
-
-        let value = match read_bounded_json(response).await {
-            Ok(value) => value,
-            Err(error) => {
-                self.begin_cooldown(MAL_NETWORK_COOLDOWN)?;
-                return Err(format!(
-                    "{error} This request will not retry automatically."
-                ));
-            }
-        };
-        self.cache(cache_key, value.clone())?;
-        Ok(value)
-    }
-
-    fn cached(&self, key: &str) -> Result<Option<Value>, String> {
-        let now = Instant::now();
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The MyAnimeList request state is unavailable.".to_string())?;
-        control.cache.retain(|_, entry| entry.expires_at > now);
-        Ok(control.cache.get(key).map(|entry| entry.value.clone()))
-    }
-
-    fn cache(&self, key: String, value: Value) -> Result<(), String> {
-        let now = Instant::now();
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The MyAnimeList request state is unavailable.".to_string())?;
-        control.cache.retain(|_, entry| entry.expires_at > now);
-        if !control.cache.contains_key(&key) && control.cache.len() >= MAL_CACHE_LIMIT {
-            if let Some(oldest_key) = control
-                .cache
-                .iter()
-                .min_by_key(|(_, entry)| entry.expires_at)
-                .map(|(key, _)| key.clone())
-            {
-                control.cache.remove(&oldest_key);
-            }
-        }
-        control.cache.insert(
-            key,
-            CacheEntry {
-                expires_at: now + MAL_CACHE_TTL,
-                value,
-            },
-        );
-        Ok(())
-    }
-
-    fn reserve_request(&self) -> Result<Duration, String> {
-        let now = Instant::now();
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The MyAnimeList request state is unavailable.".to_string())?;
-        reserve_mal_request(&mut control, now)
-    }
-
-    fn check_cooldown(&self) -> Result<(), String> {
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The MyAnimeList request state is unavailable.".to_string())?;
-        ensure_mal_available(&mut control, Instant::now())
-    }
-
-    fn begin_cooldown(&self, duration: Duration) -> Result<(), String> {
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The MyAnimeList request state is unavailable.".to_string())?;
-        control.cooldown_until = Some(Instant::now() + duration);
-        Ok(())
     }
 }
 
-fn reserve_mal_request(control: &mut RequestControl, now: Instant) -> Result<Duration, String> {
-    ensure_mal_available(control, now)?;
-    let request_at = control.next_request_at.max(now);
-    control.next_request_at = request_at + MAL_REQUEST_INTERVAL;
-    Ok(request_at.saturating_duration_since(now))
-}
-
-fn ensure_mal_available(control: &mut RequestControl, now: Instant) -> Result<(), String> {
-    let Some(until) = control.cooldown_until else {
-        return Ok(());
-    };
-    if until <= now {
-        control.cooldown_until = None;
-        return Ok(());
+fn interpret_mal_response(
+    policy: &ProviderPolicy,
+    response: &ProviderResponse,
+) -> Result<Value, ProviderFailure> {
+    if matches!(
+        response.status,
+        StatusCode::UNAUTHORIZED | StatusCode::FORBIDDEN
+    ) {
+        return Err(ProviderFailure::cooldown(
+            REJECTED_COOLDOWN,
+            format!(
+                "MyAnimeList rejected the configured Client ID (HTTP {}). Check it in Settings.",
+                response.status
+            ),
+        ));
     }
-    let remaining = until.saturating_duration_since(now);
-    let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
-    Err(format!(
-        "MyAnimeList requests are cooling down. Try again in {seconds} seconds."
-    ))
-}
-
-fn mal_retry_after(retry_after: Option<&str>) -> Duration {
-    let seconds = retry_after
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(MAL_DEFAULT_RATE_COOLDOWN_SECONDS)
-        .clamp(1, MAL_MAX_RATE_COOLDOWN_SECONDS);
-    Duration::from_secs(seconds)
+    interpret_json(policy, response)
 }
 
 fn mal_search_url(api_base: &Url, query: &str) -> Result<Url, String> {
@@ -779,33 +629,6 @@ fn mal_url(api_base: &Url, segments: &[&str], query: &[(&str, String)]) -> Resul
         }
     }
     Ok(url)
-}
-
-async fn read_bounded_json(mut response: reqwest::Response) -> Result<Value, String> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > MAL_MAX_RESPONSE_BYTES as u64)
-    {
-        return Err("The MyAnimeList response is too large.".into());
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| format!("The MyAnimeList response could not be read: {error}"))?
-    {
-        append_bounded(&mut bytes, &chunk, MAL_MAX_RESPONSE_BYTES)?;
-    }
-    serde_json::from_slice(&bytes)
-        .map_err(|error| format!("MyAnimeList returned invalid JSON: {error}"))
-}
-
-fn append_bounded(target: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) -> Result<(), String> {
-    if chunk.len() > max_bytes.saturating_sub(target.len()) {
-        return Err("The MyAnimeList response is too large.".into());
-    }
-    target.extend_from_slice(chunk);
-    Ok(())
 }
 
 fn parse_mal_page(value: Value, item_limit: usize) -> Result<MalPage, String> {
@@ -879,7 +702,7 @@ fn validate_mal_identity(anime: &MalAnime) -> Result<(), String> {
     if anime.id <= 0
         || anime.id > i64::from(i32::MAX)
         || anime.title.trim().is_empty()
-        || !valid_mal_text(&anime.title, 500)
+        || !valid_text(&anime.title, 500)
         || anime
             .main_picture
             .as_ref()
@@ -894,44 +717,40 @@ fn validate_mal_anime(anime: &MalAnime) -> Result<(), String> {
     validate_mal_identity(anime)?;
     if anime.alternative_titles.as_ref().is_some_and(|titles| {
         titles.synonyms.len() > 100
-            || titles
-                .synonyms
-                .iter()
-                .any(|value| !valid_mal_text(value, 500))
+            || titles.synonyms.iter().any(|value| !valid_text(value, 500))
             || titles
                 .en
                 .as_ref()
-                .is_some_and(|value| !valid_mal_text(value, 500))
+                .is_some_and(|value| !valid_text(value, 500))
             || titles
                 .ja
                 .as_ref()
-                .is_some_and(|value| !valid_mal_text(value, 500))
-    }) || anime.synopsis.as_ref().is_some_and(|value| {
-        value.len() > 100_000
-            || value
-                .chars()
-                .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
+                .is_some_and(|value| !valid_text(value, 500))
     }) || anime
-        .mean
-        .is_some_and(|value| !value.is_finite() || !(0.0..=10.0).contains(&value))
+        .synopsis
+        .as_ref()
+        .is_some_and(|value| !valid_description(value))
+        || anime
+            .mean
+            .is_some_and(|value| !value.is_finite() || !(0.0..=10.0).contains(&value))
         || anime.num_list_users.is_some_and(|value| value < 0)
         || anime
             .nsfw
             .as_ref()
-            .is_some_and(|value| !valid_mal_text(value, 32))
+            .is_some_and(|value| !valid_text(value, 32))
         || anime
             .media_type
             .as_ref()
-            .is_some_and(|value| !valid_mal_text(value, 32))
+            .is_some_and(|value| !valid_text(value, 32))
         || anime
             .status
             .as_ref()
-            .is_some_and(|value| !valid_mal_text(value, 64))
+            .is_some_and(|value| !valid_text(value, 64))
         || anime.genres.len() > 100
         || anime
             .genres
             .iter()
-            .any(|genre| genre.id <= 0 || !valid_mal_text(&genre.name, 100))
+            .any(|genre| genre.id <= 0 || !valid_text(&genre.name, 100))
         || anime
             .num_episodes
             .is_some_and(|value| !(0..=100_000).contains(&value))
@@ -961,10 +780,6 @@ fn valid_mal_picture(picture: &MalPicture) -> bool {
         .into_iter()
         .flatten()
         .all(super::valid_https_url)
-}
-
-fn valid_mal_text(value: &str, max_len: usize) -> bool {
-    value.len() <= max_len && !value.chars().any(char::is_control)
 }
 
 fn mal_is_safe(anime: &MalAnime) -> bool {
@@ -1048,16 +863,6 @@ fn parse_mal_date(value: &str) -> Option<Value> {
     Some(json!({ "year": year, "month": month, "day": day }))
 }
 
-fn days_in_month(year: i32, month: u32) -> Option<u32> {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => Some(31),
-        4 | 6 | 9 | 11 => Some(30),
-        2 if year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) => Some(29),
-        2 => Some(28),
-        _ => None,
-    }
-}
-
 fn normalize_mal_anime(mut anime: MalAnime, anilist_id: i64) -> Result<CatalogMedia, String> {
     let alternative_titles = anime.alternative_titles.take().unwrap_or_default();
     let english = nonempty(alternative_titles.en);
@@ -1082,7 +887,7 @@ fn normalize_mal_anime(mut anime: MalAnime, anilist_id: i64) -> Result<CatalogMe
         .start_season
         .as_ref()
         .and_then(mal_start_season)
-        .filter(|(_, year)| (1940..=2200).contains(year));
+        .filter(|(_, year)| valid_catalog_year(*year));
     let genres = (!anime.genres.is_empty())
         .then(|| anime.genres.into_iter().map(|genre| genre.name).collect());
     let site_url = mal_site_url(anime.id)?;
@@ -1112,8 +917,11 @@ fn normalize_mal_anime(mut anime: MalAnime, anilist_id: i64) -> Result<CatalogMe
         duration: anime
             .average_episode_duration
             .filter(|value| *value > 0)
-            .map(|seconds| (seconds + 30) / 60),
-        average_score: anime.mean.map(|mean| (mean * 10.0).round() as i64),
+            .map(|seconds| ((seconds + 30) / 60).clamp(1, 24 * 60)),
+        average_score: anime
+            .mean
+            .filter(|mean| mean.is_finite())
+            .map(|mean| (mean * 10.0).round().clamp(0.0, 100.0) as i64),
         popularity: anime.num_list_users,
         site_url: Some(site_url),
         next_airing_episode: None,
@@ -1168,10 +976,6 @@ fn mal_site_url(mal_id: i64) -> Result<String, String> {
     Ok(url.to_string())
 }
 
-fn nonempty(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.trim().is_empty())
-}
-
 fn extend_unique(target: &mut Vec<String>, values: Vec<String>) {
     for value in values {
         if !target.contains(&value) {
@@ -1195,13 +999,15 @@ mod tests {
     use serde_json::{json, Value};
 
     use super::{
-        aggregate_mal_recommendations, append_bounded, mal_details_url, mal_recommendations_url,
-        mal_retry_after, mal_search_url, mal_season_url, parse_mal_anime, parse_mal_page,
-        parse_mal_recommendations, reserve_mal_request, validate_client_id, MalAnime,
-        MyAnimeListAdapter, MyAnimeListClient, RequestControl, MAL_CACHE_LIMIT, MAL_FIELDS,
-        MAL_MAX_RESPONSE_BYTES, MAL_REQUEST_INTERVAL,
+        aggregate_mal_recommendations, mal_details_url, mal_recommendations_url, mal_search_url,
+        mal_season_url, parse_mal_anime, parse_mal_page, parse_mal_recommendations,
+        validate_client_id, MalAnime, MyAnimeListAdapter, MAL_FIELDS, MAL_POLICY,
     };
-    use crate::catalog::{identity::IdentityResolver, CatalogSeason};
+    use crate::catalog::{
+        http::{Penalty, RequestControl},
+        identity::IdentityResolver,
+        CatalogSeason,
+    };
 
     struct MockResponse {
         status: u16,
@@ -1694,44 +1500,54 @@ mod tests {
         assert!(validate_client_id(Some("é")).is_err());
         assert!(validate_client_id(Some(&"x".repeat(129))).is_err());
 
-        let mut bytes = vec![0; 2];
-        append_bounded(&mut bytes, &[1, 2], 4).unwrap();
-        assert!(append_bounded(&mut bytes, &[3], 4).is_err());
-        assert_eq!(MAL_MAX_RESPONSE_BYTES, 2 * 1024 * 1024);
+        assert_eq!(MAL_POLICY.max_response_bytes, 2 * 1024 * 1024);
 
-        let client = MyAnimeListClient::new(
-            reqwest::Client::new(),
-            Url::parse(super::MAL_API_BASE).unwrap(),
-            reqwest::header::HeaderValue::from_static("client-id"),
-        );
-        for index in 0..=MAL_CACHE_LIMIT {
-            client.cache(index.to_string(), json!(index)).unwrap();
+        let now = Instant::now();
+        let mut control = RequestControl::new(now);
+        for index in 0..=MAL_POLICY.cache_limit {
+            control.store(index.to_string(), json!(index), &MAL_POLICY, now);
         }
-        assert_eq!(client.control.lock().unwrap().cache.len(), MAL_CACHE_LIMIT);
+        assert_eq!(MAL_POLICY.cache_limit, 32);
+        assert_eq!(control.cache_len(), MAL_POLICY.cache_limit);
     }
 
     #[test]
     fn bounds_rate_limit_cooldowns_and_paces_requests() {
-        assert_eq!(mal_retry_after(Some("0")), Duration::from_secs(1));
-        assert_eq!(mal_retry_after(Some("9999")), Duration::from_secs(300));
-        assert_eq!(mal_retry_after(None), Duration::from_secs(30));
+        assert_eq!(MAL_POLICY.max_concurrent_requests, 1);
+        assert_eq!(MAL_POLICY.network_cooldown, Some(Duration::from_secs(30)));
 
         let now = Instant::now();
-        let mut control = RequestControl {
-            cache: HashMap::new(),
-            cooldown_until: None,
-            next_request_at: now,
-        };
+        let mut control = RequestControl::new(now);
+        assert_eq!(control.reserve(&MAL_POLICY, now).unwrap(), Duration::ZERO);
         assert_eq!(
-            reserve_mal_request(&mut control, now).unwrap(),
-            Duration::ZERO
+            control.reserve(&MAL_POLICY, now).unwrap(),
+            Duration::from_millis(1_100)
         );
-        assert_eq!(
-            reserve_mal_request(&mut control, now).unwrap(),
-            MAL_REQUEST_INTERVAL
-        );
-        control.cooldown_until = Some(now + Duration::from_secs(30));
-        assert!(reserve_mal_request(&mut control, now).is_err());
+        control.penalize(Penalty::Cooldown(Duration::from_secs(30)), "", now);
+        assert!(control
+            .reserve(&MAL_POLICY, now)
+            .unwrap_err()
+            .starts_with("MyAnimeList requests are cooling down"));
+
+        for status in [
+            reqwest::StatusCode::UNAUTHORIZED,
+            reqwest::StatusCode::FORBIDDEN,
+        ] {
+            let failure = super::interpret_mal_response(
+                &MAL_POLICY,
+                &crate::catalog::http::ProviderResponse {
+                    status,
+                    retry_after: None,
+                    body: Vec::new(),
+                },
+            )
+            .unwrap_err();
+            assert_eq!(
+                failure.penalty,
+                Some(Penalty::Cooldown(Duration::from_secs(5 * 60)))
+            );
+            assert!(failure.message.contains("configured Client ID"));
+        }
     }
 
     #[test]
@@ -1747,5 +1563,39 @@ mod tests {
         assert_eq!(value["averageScore"], 85);
         assert_eq!(value["duration"], 24);
         assert_eq!(value["siteUrl"], "https://myanimelist.net/anime/5114");
+    }
+
+    #[test]
+    fn keeps_very_short_episode_durations_valid() {
+        let mut value = anime(5114, "white", "spring", 2009);
+        value["average_episode_duration"] = json!(20);
+        value["mean"] = json!(10.0);
+        let anime: MalAnime = serde_json::from_value(value).unwrap();
+        let media = super::normalize_mal_anime(anime, 11061).unwrap();
+        assert_eq!(media.duration, Some(1));
+        assert_eq!(media.average_score, Some(100));
+        assert!(media.validate("MyAnimeList").is_ok());
+    }
+
+    #[tokio::test]
+    async fn skips_invalid_items_without_failing_the_page() {
+        let directory = tempfile::tempdir().unwrap();
+        write_identity_cache(directory.path(), &[(100, 1), (200, 2)]);
+        let mut invalid = anime(2, "white", "summer", 2026);
+        invalid["mean"] = json!(11);
+        let server = MockServer::start(vec![response(json!({
+            "data": [
+                {"node": anime(1, "white", "summer", 2026)},
+                {"node": invalid}
+            ],
+            "paging": {}
+        }))]);
+        let adapter = adapter_for(&server, directory.path());
+        let (items, warnings) = adapter.search("Example", directory.path()).await.unwrap();
+        assert_eq!(items.iter().map(|item| item.id).collect::<Vec<_>>(), [100]);
+        assert!(warnings.contains(
+            &"1 catalog item(s) from MyAnimeList were skipped because they were invalid.".into()
+        ));
+        server.finish();
     }
 }

@@ -1,55 +1,44 @@
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    collections::{BTreeMap, HashSet},
+    sync::Arc,
+    time::Duration,
 };
 
-use reqwest::{StatusCode, Url};
+use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-use tokio::sync::Semaphore;
 
 use super::{
+    days_in_month,
+    http::{
+        interpret_json, ProviderHttp, ProviderPolicy, MAX_JSON_RESPONSE_BYTES, NETWORK_COOLDOWN,
+    },
     identity::{IdentityResolver, ProviderId},
-    AdapterFuture, CatalogAdapter, CatalogCapability, CatalogCoverImage, CatalogMedia,
+    nonempty, push_skipped_items_warning, valid_catalog_year, valid_description, valid_https_url,
+    valid_text, AdapterFuture, CatalogAdapter, CatalogCapability, CatalogCoverImage, CatalogMedia,
     CatalogProvider, CatalogRequest, CatalogResponse, CatalogSeason, CatalogTitle,
 };
 
 const KITSU_API_BASE: &str = "https://kitsu.io/api/edge/";
-const KITSU_REQUEST_INTERVAL: Duration = Duration::from_millis(1_100);
-const KITSU_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
-const KITSU_CACHE_LIMIT: usize = 128;
-const KITSU_MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+static KITSU_POLICY: ProviderPolicy = ProviderPolicy {
+    label: "Kitsu",
+    accept: "application/vnd.api+json",
+    max_concurrent_requests: 1,
+    request_interval: Duration::from_millis(1_100),
+    cache_ttl: Duration::from_secs(5 * 60),
+    cache_limit: 128,
+    max_response_bytes: MAX_JSON_RESPONSE_BYTES,
+    network_cooldown: Some(NETWORK_COOLDOWN),
+    interpret: interpret_json,
+};
 const KITSU_PAGE_LIMIT: usize = 20;
 const KITSU_MAX_SEASON_PAGES: usize = 4;
 const KITSU_MAX_REPORTED_OFFSET: usize = 1_000_000;
-const KITSU_DEFAULT_RATE_COOLDOWN_SECONDS: u64 = 30;
-const KITSU_MAX_RATE_COOLDOWN_SECONDS: u64 = 5 * 60;
-const KITSU_NETWORK_COOLDOWN: Duration = Duration::from_secs(30);
-const KITSU_SERVER_COOLDOWN: Duration = Duration::from_secs(60);
-const KITSU_FORBIDDEN_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
 const CAPABILITIES: &[CatalogCapability] = &[CatalogCapability::Search, CatalogCapability::Season];
 
-struct CacheEntry {
-    expires_at: Instant,
-    value: Value,
-}
-
-struct RequestControl {
-    cache: HashMap<String, CacheEntry>,
-    cooldown_until: Option<Instant>,
-    next_request_at: Instant,
-}
-
-struct KitsuClient {
-    http: reqwest::Client,
-    in_flight: Semaphore,
-    control: Mutex<RequestControl>,
-}
-
 pub(super) struct KitsuAdapter {
-    client: KitsuClient,
+    client: ProviderHttp,
     identity: Arc<IdentityResolver>,
 }
 
@@ -133,7 +122,7 @@ struct KitsuDate {
 impl KitsuAdapter {
     pub(super) fn new(http: reqwest::Client, identity: Arc<IdentityResolver>) -> Self {
         Self {
-            client: KitsuClient::new(http),
+            client: ProviderHttp::new(http, &KITSU_POLICY),
             identity,
         }
     }
@@ -144,7 +133,7 @@ impl KitsuAdapter {
         cache_dir: &std::path::Path,
     ) -> Result<(Vec<CatalogMedia>, Vec<String>), String> {
         let url = kitsu_search_url(query)?;
-        let payload = self.client.request(url.clone()).await?;
+        let payload = self.client.get_json(url.clone()).await?;
         let page = parse_kitsu_page(payload, &url, 0, KITSU_PAGE_LIMIT)?;
         let mut warnings = Vec::new();
         if page.links.next.is_some() {
@@ -168,7 +157,7 @@ impl KitsuAdapter {
             let url = kitsu_season_url(season, year, offset)?;
             let page = match self
                 .client
-                .request(url.clone())
+                .get_json(url.clone())
                 .await
                 .and_then(|payload| parse_kitsu_page(payload, &url, offset, KITSU_PAGE_LIMIT))
             {
@@ -206,10 +195,14 @@ impl KitsuAdapter {
     ) -> Result<(Vec<CatalogMedia>, Vec<String>), String> {
         let mut adult = 0;
         let mut outside_season = 0;
+        let mut skipped = 0;
         let mut valid = Vec::new();
         let mut seen = HashSet::new();
         for item in anime {
-            validate_kitsu_anime(&item)?;
+            if validate_kitsu_anime(&item).is_err() {
+                skipped += 1;
+                continue;
+            }
             if item.attributes.nsfw {
                 adult += 1;
                 continue;
@@ -236,6 +229,7 @@ impl KitsuAdapter {
             ));
         }
         if valid.is_empty() {
+            push_skipped_items_warning(&mut warnings, "Kitsu", skipped);
             return Ok((Vec::new(), warnings));
         }
 
@@ -258,10 +252,12 @@ impl KitsuAdapter {
                 missing_mappings += 1;
                 continue;
             };
-            let item = normalize_kitsu_anime(anime, anilist_id)?;
-            item.validate("Kitsu")?;
-            items.push(item);
+            match normalize_kitsu_anime(anime, anilist_id) {
+                Ok(item) if item.validate("Kitsu").is_ok() => items.push(item),
+                _ => skipped += 1,
+            }
         }
+        push_skipped_items_warning(&mut warnings, "Kitsu", skipped);
 
         if missing_mappings > 0 {
             warnings.push(format!(
@@ -303,162 +299,6 @@ impl CatalogAdapter for KitsuAdapter {
     }
 }
 
-impl KitsuClient {
-    fn new(http: reqwest::Client) -> Self {
-        Self {
-            http,
-            in_flight: Semaphore::new(1),
-            control: Mutex::new(RequestControl {
-                cache: HashMap::new(),
-                cooldown_until: None,
-                next_request_at: Instant::now(),
-            }),
-        }
-    }
-
-    async fn request(&self, url: Url) -> Result<Value, String> {
-        let cache_key = url.as_str().to_owned();
-        if let Some(value) = self.cached(&cache_key)? {
-            return Ok(value);
-        }
-        let _permit = self
-            .in_flight
-            .acquire()
-            .await
-            .map_err(|_| "The Kitsu request queue is unavailable.".to_string())?;
-        if let Some(value) = self.cached(&cache_key)? {
-            return Ok(value);
-        }
-
-        let wait = self.reserve_request()?;
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
-        }
-        self.check_cooldown()?;
-
-        let response = match self
-            .http
-            .get(url)
-            .header("Accept", "application/vnd.api+json")
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                self.begin_cooldown(KITSU_NETWORK_COOLDOWN)?;
-                return Err(format!(
-                    "Kitsu is unreachable: {error}. This request will not retry automatically."
-                ));
-            }
-        };
-        let status = response.status();
-        let retry_after = response
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        if status == StatusCode::TOO_MANY_REQUESTS {
-            let cooldown = kitsu_retry_after(retry_after.as_deref());
-            self.begin_cooldown(cooldown)?;
-            return Err(format!(
-                "Kitsu is rate limiting requests. Try again in {} seconds; this request will not retry automatically.",
-                cooldown.as_secs()
-            ));
-        }
-        if status == StatusCode::FORBIDDEN {
-            self.begin_cooldown(KITSU_FORBIDDEN_COOLDOWN)?;
-            return Err(
-                "Kitsu rejected this request (HTTP 403); this request will not retry automatically."
-                    .into(),
-            );
-        }
-        if status.is_server_error() {
-            self.begin_cooldown(KITSU_SERVER_COOLDOWN)?;
-            return Err(format!(
-                "Kitsu returned an HTTP {status} server error; this request will not retry automatically."
-            ));
-        }
-        if !status.is_success() {
-            return Err(format!("Kitsu returned an HTTP {status} error."));
-        }
-
-        let value = match read_bounded_json(response).await {
-            Ok(value) => value,
-            Err(error) => {
-                self.begin_cooldown(KITSU_NETWORK_COOLDOWN)?;
-                return Err(format!(
-                    "{error} This request will not retry automatically."
-                ));
-            }
-        };
-        self.cache(cache_key, value.clone())?;
-        Ok(value)
-    }
-
-    fn cached(&self, key: &str) -> Result<Option<Value>, String> {
-        let now = Instant::now();
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The Kitsu request state is unavailable.".to_string())?;
-        control.cache.retain(|_, entry| entry.expires_at > now);
-        Ok(control.cache.get(key).map(|entry| entry.value.clone()))
-    }
-
-    fn cache(&self, key: String, value: Value) -> Result<(), String> {
-        let now = Instant::now();
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The Kitsu request state is unavailable.".to_string())?;
-        control.cache.retain(|_, entry| entry.expires_at > now);
-        if !control.cache.contains_key(&key) && control.cache.len() >= KITSU_CACHE_LIMIT {
-            if let Some(oldest_key) = control
-                .cache
-                .iter()
-                .min_by_key(|(_, entry)| entry.expires_at)
-                .map(|(key, _)| key.clone())
-            {
-                control.cache.remove(&oldest_key);
-            }
-        }
-        control.cache.insert(
-            key,
-            CacheEntry {
-                expires_at: now + KITSU_CACHE_TTL,
-                value,
-            },
-        );
-        Ok(())
-    }
-
-    fn reserve_request(&self) -> Result<Duration, String> {
-        let now = Instant::now();
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The Kitsu request state is unavailable.".to_string())?;
-        reserve_kitsu_request(&mut control, now)
-    }
-
-    fn check_cooldown(&self) -> Result<(), String> {
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The Kitsu request state is unavailable.".to_string())?;
-        ensure_kitsu_available(&mut control, Instant::now())
-    }
-
-    fn begin_cooldown(&self, duration: Duration) -> Result<(), String> {
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The Kitsu request state is unavailable.".to_string())?;
-        control.cooldown_until = Some(Instant::now() + duration);
-        Ok(())
-    }
-}
-
 fn kitsu_season_page_failure(loaded_items: usize, error: String) -> Result<String, String> {
     if loaded_items == 0 {
         Err(error)
@@ -467,36 +307,6 @@ fn kitsu_season_page_failure(loaded_items: usize, error: String) -> Result<Strin
             "Kitsu season results are partial because a later page was unavailable: {error}"
         ))
     }
-}
-
-fn reserve_kitsu_request(control: &mut RequestControl, now: Instant) -> Result<Duration, String> {
-    ensure_kitsu_available(control, now)?;
-    let request_at = control.next_request_at.max(now);
-    control.next_request_at = request_at + KITSU_REQUEST_INTERVAL;
-    Ok(request_at.saturating_duration_since(now))
-}
-
-fn ensure_kitsu_available(control: &mut RequestControl, now: Instant) -> Result<(), String> {
-    let Some(until) = control.cooldown_until else {
-        return Ok(());
-    };
-    if until <= now {
-        control.cooldown_until = None;
-        return Ok(());
-    }
-    let remaining = until.saturating_duration_since(now);
-    let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
-    Err(format!(
-        "Kitsu requests are cooling down. Try again in {seconds} seconds."
-    ))
-}
-
-fn kitsu_retry_after(retry_after: Option<&str>) -> Duration {
-    let seconds = retry_after
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(KITSU_DEFAULT_RATE_COOLDOWN_SECONDS)
-        .clamp(1, KITSU_MAX_RATE_COOLDOWN_SECONDS);
-    Duration::from_secs(seconds)
 }
 
 fn kitsu_search_url(query: &str) -> Result<Url, String> {
@@ -532,32 +342,6 @@ fn kitsu_url(query: &[(&str, String)]) -> Result<Url, String> {
         }
     }
     Ok(url)
-}
-
-async fn read_bounded_json(mut response: reqwest::Response) -> Result<Value, String> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > KITSU_MAX_RESPONSE_BYTES as u64)
-    {
-        return Err("The Kitsu response is too large.".into());
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| format!("The Kitsu response could not be read: {error}"))?
-    {
-        append_bounded(&mut bytes, &chunk, KITSU_MAX_RESPONSE_BYTES)?;
-    }
-    serde_json::from_slice(&bytes).map_err(|error| format!("Kitsu returned invalid JSON: {error}"))
-}
-
-fn append_bounded(target: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) -> Result<(), String> {
-    if chunk.len() > max_bytes.saturating_sub(target.len()) {
-        return Err("The Kitsu response is too large.".into());
-    }
-    target.extend_from_slice(chunk);
-    Ok(())
 }
 
 fn parse_kitsu_page(
@@ -683,27 +467,27 @@ fn validate_kitsu_anime(anime: &KitsuAnime) -> Result<(), String> {
     if anime.resource_type != "anime"
         || parse_kitsu_id(&anime.id).is_err()
         || attributes.slug.trim().is_empty()
-        || !valid_kitsu_text(&attributes.slug, 500)
+        || !valid_text(&attributes.slug, 500)
         || attributes.canonical_title.trim().is_empty()
-        || !valid_kitsu_text(&attributes.canonical_title, 500)
+        || !valid_text(&attributes.canonical_title, 500)
         || attributes.titles.len() > 100
         || attributes
             .titles
             .iter()
-            .any(|(locale, title)| !valid_kitsu_text(locale, 100) || !valid_kitsu_text(title, 500))
+            .any(|(locale, title)| !valid_text(locale, 100) || !valid_text(title, 500))
         || attributes.abbreviated_titles.len() > 100
         || attributes
             .abbreviated_titles
             .iter()
-            .any(|title| !valid_kitsu_text(title, 500))
+            .any(|title| !valid_text(title, 500))
         || attributes
             .description
             .as_ref()
-            .is_some_and(|value| !valid_kitsu_description(value))
+            .is_some_and(|value| !valid_description(value))
         || attributes
             .synopsis
             .as_ref()
-            .is_some_and(|value| !valid_kitsu_description(value))
+            .is_some_and(|value| !valid_description(value))
         || attributes
             .average_rating
             .as_deref()
@@ -744,17 +528,6 @@ fn validate_kitsu_anime(anime: &KitsuAnime) -> Result<(), String> {
     Ok(())
 }
 
-fn valid_kitsu_text(value: &str, max_len: usize) -> bool {
-    value.len() <= max_len && !value.chars().any(char::is_control)
-}
-
-fn valid_kitsu_description(value: &str) -> bool {
-    value.len() <= 100_000
-        && !value
-            .chars()
-            .any(|character| character.is_control() && !matches!(character, '\n' | '\r' | '\t'))
-}
-
 fn valid_youtube_id(value: &str) -> bool {
     (6..=32).contains(&value.len())
         && value
@@ -773,17 +546,6 @@ fn valid_kitsu_images(image: &KitsuImageSet) -> bool {
     .into_iter()
     .flatten()
     .all(valid_https_url)
-}
-
-fn valid_https_url(value: &str) -> bool {
-    value.len() <= 2_000
-        && Url::parse(value).is_ok_and(|url| {
-            url.scheme() == "https"
-                && url.host_str().is_some()
-                && url.port_or_known_default() == Some(443)
-                && url.username().is_empty()
-                && url.password().is_none()
-        })
 }
 
 fn kitsu_score(value: &str) -> Option<i64> {
@@ -831,16 +593,6 @@ fn parse_kitsu_date(value: &str) -> Option<KitsuDate> {
     Some(KitsuDate { year, month, day })
 }
 
-fn days_in_month(year: i32, month: u32) -> Option<u32> {
-    match month {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => Some(31),
-        4 | 6 | 9 | 11 => Some(30),
-        2 if year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) => Some(29),
-        2 => Some(28),
-        _ => None,
-    }
-}
-
 fn kitsu_season(date: KitsuDate) -> Option<(CatalogSeason, i32)> {
     let (season, year) = match date.month {
         12 => (CatalogSeason::Winter, date.year.checked_add(1)?),
@@ -868,17 +620,13 @@ fn kitsu_date_json(date: KitsuDate) -> Value {
     json!({ "year": date.year, "month": date.month, "day": date.day })
 }
 
-fn nonempty(value: Option<String>) -> Option<String> {
-    value.filter(|value| !value.trim().is_empty())
-}
-
 fn normalize_kitsu_anime(anime: KitsuAnime, anilist_id: i64) -> Result<CatalogMedia, String> {
     parse_kitsu_id(&anime.id)?;
     let mut attributes = anime.attributes;
     let start_date = attributes.start_date.as_deref().and_then(parse_kitsu_date);
     let season_context = start_date
         .and_then(kitsu_season)
-        .filter(|(_, year)| (1940..=2200).contains(year));
+        .filter(|(_, year)| valid_catalog_year(*year));
     let romaji = nonempty(attributes.titles.remove("en_jp"));
     let english = nonempty(attributes.titles.remove("en"));
     let native = nonempty(attributes.titles.remove("ja_jp"));
@@ -956,19 +704,15 @@ fn kitsu_site_url(slug: &str) -> Result<String, String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{
-        collections::HashMap,
-        time::{Duration, Instant},
-    };
+    use std::time::{Duration, Instant};
 
     use serde_json::Value;
 
     use super::{
-        append_bounded, kitsu_retry_after, kitsu_search_url, kitsu_season,
-        kitsu_season_page_failure, kitsu_season_url, kitsu_url, normalize_kitsu_anime,
-        parse_kitsu_date, parse_kitsu_page, reserve_kitsu_request, KitsuAnime, RequestControl,
-        KITSU_MAX_RESPONSE_BYTES, KITSU_REQUEST_INTERVAL,
+        kitsu_search_url, kitsu_season, kitsu_season_page_failure, kitsu_season_url, kitsu_url,
+        normalize_kitsu_anime, parse_kitsu_date, parse_kitsu_page, KitsuAnime, KITSU_POLICY,
     };
+    use crate::catalog::http::{Penalty, RequestControl};
 
     fn anime(id: i64) -> KitsuAnime {
         serde_json::from_value(serde_json::json!({
@@ -1236,37 +980,41 @@ mod tests {
         assert_eq!(items[0].id, 700);
         assert_eq!(items[0].id_mal, None);
         assert!(warnings.iter().any(|warning| warning.contains("omitted")));
+
+        let mut invalid = anime(2);
+        invalid.attributes.average_rating = Some("101".into());
+        let (items, warnings) = adapter
+            .map_results(vec![invalid, anime(1)], None, directory.path(), Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(items.iter().map(|item| item.id).collect::<Vec<_>>(), [700]);
+        assert!(warnings.contains(
+            &"1 catalog item(s) from Kitsu were skipped because they were invalid.".into()
+        ));
     }
 
     #[test]
     fn rejects_requests_during_cooldown_and_spaces_requests() {
         let now = Instant::now();
-        let mut control = RequestControl {
-            cache: HashMap::new(),
-            cooldown_until: None,
-            next_request_at: now,
-        };
+        let mut control = RequestControl::new(now);
+        assert_eq!(KITSU_POLICY.max_concurrent_requests, 1);
+        assert_eq!(control.reserve(&KITSU_POLICY, now).unwrap(), Duration::ZERO);
         assert_eq!(
-            reserve_kitsu_request(&mut control, now).unwrap(),
-            Duration::ZERO
+            control.reserve(&KITSU_POLICY, now).unwrap(),
+            Duration::from_millis(1_100)
         );
-        assert_eq!(
-            reserve_kitsu_request(&mut control, now).unwrap(),
-            KITSU_REQUEST_INTERVAL
-        );
-        control.cooldown_until = Some(now + Duration::from_secs(30));
-        assert!(reserve_kitsu_request(&mut control, now).is_err());
+        control.penalize(Penalty::Cooldown(Duration::from_secs(30)), "", now);
+        assert!(control
+            .reserve(&KITSU_POLICY, now)
+            .unwrap_err()
+            .starts_with("Kitsu requests are cooling down"));
     }
 
     #[test]
     fn bounds_rate_limit_cooldowns_and_response_bytes() {
-        assert_eq!(kitsu_retry_after(Some("0")), Duration::from_secs(1));
-        assert_eq!(kitsu_retry_after(Some("9999")), Duration::from_secs(300));
-        assert_eq!(kitsu_retry_after(None), Duration::from_secs(30));
-
-        let mut bytes = vec![0; 2];
-        append_bounded(&mut bytes, &[1, 2], 4).unwrap();
-        assert!(append_bounded(&mut bytes, &[3], 4).is_err());
-        assert_eq!(KITSU_MAX_RESPONSE_BYTES, 2 * 1024 * 1024);
+        assert_eq!(KITSU_POLICY.accept, "application/vnd.api+json");
+        assert_eq!(KITSU_POLICY.network_cooldown, Some(Duration::from_secs(30)));
+        assert_eq!(KITSU_POLICY.max_response_bytes, 2 * 1024 * 1024);
+        assert_eq!(KITSU_POLICY.cache_limit, 128);
     }
 }

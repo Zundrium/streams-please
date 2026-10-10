@@ -1,4 +1,5 @@
 import { CONFIRMED_MATCH_CONFIDENCE, matchSubsPleaseSeason } from '$lib/catalog/matching';
+import { preferredTitle } from '$lib/catalog/presentation';
 import type {
   CatalogMedia,
   LibraryEntry,
@@ -68,11 +69,6 @@ export function filterReviewedRecommendations(
           entry.slug === provider.page
       )
   );
-}
-
-function preferredTitle(media: CatalogMedia): string {
-  return media.title.english || media.title.userPreferred || media.title.romaji ||
-    media.title.native || `AniList #${media.id}`;
 }
 
 export function mergeRecommendationDetails(

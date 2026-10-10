@@ -17,9 +17,11 @@
     CONFIRMED_MATCH_CONFIDENCE,
     loadProviderMappings,
     matchSubsPleaseShow,
+    posterUrl,
     preferredTitle,
     saveProviderMapping
   } from '$lib/catalog';
+  import { preferredDownload } from '$lib/catalog/media';
   import {
     libraryEntryMatches,
     nextUnwatchedEpisode,
@@ -40,7 +42,6 @@
     TrailerPlaybackRequest
   } from '$lib/types';
 
-  const SUBSPLEASE_ORIGIN = 'https://subsplease.org';
 
   let {
     entries,
@@ -177,13 +178,6 @@
     );
   }
 
-  function posterUrl(path: string): string {
-    if (!path) return '';
-    return path.startsWith('http')
-      ? path
-      : `${SUBSPLEASE_ORIGIN}${path.startsWith('/') ? '' : '/'}${path}`;
-  }
-
   function scheduleShow(entry: LibraryEntry): SubsPleaseScheduleShow {
     return {
       title: entry.title,
@@ -250,13 +244,6 @@
     selectedDay = nextDay;
   }
 
-  function preferredDownload(release: SubsPleaseRelease): SubsPleaseDownload | undefined {
-    return (
-      release.downloads.find((download) => download.res === preferredQuality) ??
-      [...release.downloads].sort((left, right) => Number(right.res) - Number(left.res))[0]
-    );
-  }
-
   async function playNextEpisode(entry: LibraryEntry): Promise<void> {
     const episode = nextUnwatchedEpisode(entry);
     if (!episode || quickPlaySlug) return;
@@ -270,7 +257,7 @@
       onShowLoaded(details, show, entry.day);
       const release = Object.values(details.episode).find((item) => item.episode === episode);
       if (!release) throw new Error(`Episode ${episode} is no longer available.`);
-      const download = preferredDownload(release);
+      const download = preferredDownload(release, preferredQuality);
       if (!download?.magnet) throw new Error(`Episode ${episode} has no playable release.`);
 
       await onPlay({

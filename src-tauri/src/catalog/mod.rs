@@ -1,10 +1,17 @@
-use std::{collections::HashSet, future::Future, path::PathBuf, pin::Pin, sync::Arc};
+use std::{
+    collections::HashSet,
+    future::Future,
+    path::PathBuf,
+    pin::Pin,
+    sync::{Arc, Mutex},
+};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{Manager, State};
 
 pub mod anilist;
+mod http;
 mod identity;
 mod jikan;
 mod kitsu;
@@ -52,7 +59,7 @@ impl CatalogRequest {
     fn validate(&self) -> Result<(), String> {
         match self {
             Self::Search { query } => validate_catalog_query(query),
-            Self::Season { year, .. } if !(MIN_CATALOG_YEAR..=MAX_CATALOG_YEAR).contains(year) => {
+            Self::Season { year, .. } if !valid_catalog_year(*year) => {
                 Err("Invalid catalog season year.".into())
             }
             Self::Season { .. } => Ok(()),
@@ -239,7 +246,7 @@ impl CatalogMedia {
             || self.popularity.is_some_and(|value| value < 0)
             || self
                 .season_year
-                .is_some_and(|year| !(MIN_CATALOG_YEAR..=MAX_CATALOG_YEAR).contains(&year))
+                .is_some_and(|year| !valid_catalog_year(year))
             || self
                 .cover_image
                 .as_ref()
@@ -349,15 +356,44 @@ fn valid_https_url(value: &str) -> bool {
         })
 }
 
+fn valid_catalog_year(year: i32) -> bool {
+    (MIN_CATALOG_YEAR..=MAX_CATALOG_YEAR).contains(&year)
+}
+
+fn days_in_month(year: i32, month: u32) -> Option<u32> {
+    match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => Some(31),
+        4 | 6 | 9 | 11 => Some(30),
+        2 if year % 400 == 0 || (year % 4 == 0 && year % 100 != 0) => Some(29),
+        2 => Some(28),
+        _ => None,
+    }
+}
+
+fn nonempty(value: Option<String>) -> Option<String> {
+    value.filter(|value| !value.trim().is_empty())
+}
+
+fn push_skipped_items_warning(warnings: &mut Vec<String>, provider: &str, skipped: usize) {
+    if skipped > 0 {
+        warnings.push(format!(
+            "{skipped} catalog item(s) from {provider} were skipped because they were invalid."
+        ));
+    }
+}
+
 trait CatalogAdapter: Send + Sync {
     fn descriptor(&self) -> CatalogProvider;
     fn request<'a>(&'a self, request: CatalogRequest, cache_dir: PathBuf) -> AdapterFuture<'a>;
 }
 
+type MyAnimeListSession = (String, Arc<myanimelist::MyAnimeListAdapter>);
+
 pub struct CatalogState {
     http: reqwest::Client,
     anilist: Arc<anilist::AniListClient>,
     identity: Arc<IdentityResolver>,
+    myanimelist: Mutex<Option<MyAnimeListSession>>,
     adapters: Vec<Arc<dyn CatalogAdapter>>,
     providers: Vec<CatalogProvider>,
 }
@@ -404,9 +440,32 @@ impl CatalogState {
             http,
             anilist,
             identity,
+            myanimelist: Mutex::new(None),
             adapters,
             providers,
         })
+    }
+
+    fn myanimelist_adapter(
+        &self,
+        client_id: &str,
+    ) -> Result<Arc<myanimelist::MyAnimeListAdapter>, String> {
+        let mut session = self
+            .myanimelist
+            .lock()
+            .map_err(|_| "The MyAnimeList client state is unavailable.".to_string())?;
+        if let Some((active_client_id, adapter)) = session.as_ref() {
+            if active_client_id == client_id {
+                return Ok(adapter.clone());
+            }
+        }
+        let adapter = Arc::new(myanimelist::MyAnimeListAdapter::new(
+            self.http.clone(),
+            self.identity.clone(),
+            client_id,
+        )?);
+        *session = Some((client_id.to_owned(), adapter.clone()));
+        Ok(adapter)
     }
 
     fn provider(&self, provider: &str) -> Result<&CatalogProvider, String> {
@@ -457,11 +516,7 @@ pub async fn catalog_request(
         .join("catalog");
     if provider == myanimelist::PROVIDER_ID {
         let client_id = myanimelist::validate_client_id(my_anime_list_client_id.as_deref())?;
-        let adapter = myanimelist::MyAnimeListAdapter::new(
-            state.http.clone(),
-            state.identity.clone(),
-            &client_id,
-        )?;
+        let adapter = state.myanimelist_adapter(&client_id)?;
         return adapter.request(request, cache_dir).await;
     }
     state.adapter(&provider)?.request(request, cache_dir).await
@@ -608,5 +663,31 @@ mod tests {
             .capabilities
             .contains(&CatalogCapability::Recommendations));
         assert_eq!(CatalogSeason::Fall.as_str(), "FALL");
+    }
+
+    #[test]
+    fn reuses_the_myanimelist_client_until_its_id_changes() {
+        let state = CatalogState::new().unwrap();
+        let first = state.myanimelist_adapter("client-a").unwrap();
+        let again = state.myanimelist_adapter("client-a").unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &again));
+        let replaced = state.myanimelist_adapter("client-b").unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first, &replaced));
+        assert!(std::sync::Arc::ptr_eq(
+            &replaced,
+            &state.myanimelist_adapter("client-b").unwrap()
+        ));
+    }
+
+    #[test]
+    fn reports_skipped_invalid_items_once() {
+        let mut warnings = Vec::new();
+        super::push_skipped_items_warning(&mut warnings, "Jikan", 0);
+        assert!(warnings.is_empty());
+        super::push_skipped_items_warning(&mut warnings, "Jikan", 2);
+        assert_eq!(
+            warnings,
+            ["2 catalog item(s) from Jikan were skipped because they were invalid."]
+        );
     }
 }

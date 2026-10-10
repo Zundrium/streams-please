@@ -1,5 +1,6 @@
 import type { AnimeSeason, CatalogMedia, CatalogSeasonMedia } from '$lib/types';
 import { normalizeSearchResponse, normalizeSeasonResponse } from '$lib/catalog/cache';
+import { isRecord } from '$lib/catalog/guards';
 
 export type CatalogCapability = 'search' | 'season' | 'recommendations';
 export type CatalogRequest =
@@ -41,11 +42,14 @@ export function catalogRequestKey(request: CatalogRequest): string {
   return `recommendations:${[...new Set(request.ids)].sort((left, right) => left - right).join(',')}`;
 }
 
+export function validSearchQuery(query: string): boolean {
+  const trimmed = query.trim();
+  const length = new TextEncoder().encode(trimmed).length;
+  return length >= 2 && length <= 160 && !/[\u0000-\u001f\u007f-\u009f]/.test(trimmed);
+}
+
 export function validCatalogRequest(request: CatalogRequest): boolean {
-  if (request.kind === 'search') {
-    const queryLength = new TextEncoder().encode(request.query.trim()).length;
-    return queryLength >= 2 && queryLength <= 160 && !/[\u0000-\u001f\u007f-\u009f]/.test(request.query);
-  }
+  if (request.kind === 'search') return validSearchQuery(request.query);
   if (request.kind === 'season') {
     return ['WINTER', 'SPRING', 'SUMMER', 'FALL'].includes(request.season)
       && Number.isSafeInteger(request.year) && request.year >= 1940 && request.year <= 2200;
@@ -55,10 +59,6 @@ export function validCatalogRequest(request: CatalogRequest): boolean {
     && request.ids.length <= 10
     && new Set(request.ids).size === request.ids.length
     && request.ids.every((id) => Number.isSafeInteger(id) && id > 0 && id <= 2_147_483_647);
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 export function normalizeCatalogProviders(value: unknown): CatalogProvider[] | undefined {

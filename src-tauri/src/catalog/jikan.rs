@@ -1,25 +1,35 @@
 use std::{
     collections::{HashMap, HashSet},
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    sync::Arc,
+    time::Duration,
 };
 
-use reqwest::{StatusCode, Url};
+use reqwest::Url;
 use serde::Deserialize;
 use serde_json::{json, Value};
-use tokio::sync::Semaphore;
 
 use super::{
+    http::{
+        interpret_json, ProviderHttp, ProviderPolicy, MAX_JSON_RESPONSE_BYTES, NETWORK_COOLDOWN,
+    },
     identity::{IdentityResolver, ProviderId},
-    AdapterFuture, CatalogAdapter, CatalogCapability, CatalogCoverImage, CatalogMedia,
-    CatalogProvider, CatalogRequest, CatalogResponse, CatalogSeason, CatalogTitle,
+    push_skipped_items_warning, valid_catalog_year, valid_description, valid_text, AdapterFuture,
+    CatalogAdapter, CatalogCapability, CatalogCoverImage, CatalogMedia, CatalogProvider,
+    CatalogRequest, CatalogResponse, CatalogSeason, CatalogTitle,
 };
 
 const JIKAN_API_BASE: &str = "https://api.jikan.moe/v4/";
-const JIKAN_REQUEST_INTERVAL: Duration = Duration::from_millis(2_100);
-const JIKAN_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
-const JIKAN_CACHE_LIMIT: usize = 128;
-const JIKAN_MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024;
+static JIKAN_POLICY: ProviderPolicy = ProviderPolicy {
+    label: "Jikan",
+    accept: "application/json",
+    max_concurrent_requests: 1,
+    request_interval: Duration::from_millis(2_100),
+    cache_ttl: Duration::from_secs(5 * 60),
+    cache_limit: 128,
+    max_response_bytes: MAX_JSON_RESPONSE_BYTES,
+    network_cooldown: Some(NETWORK_COOLDOWN),
+    interpret: interpret_json,
+};
 const JIKAN_SEARCH_LIMIT: usize = 25;
 const JIKAN_SEASON_PAGE_LIMIT: usize = 25;
 const JIKAN_MAX_SEASON_PAGES: usize = 4;
@@ -27,11 +37,6 @@ const JIKAN_MAX_RECOMMENDATIONS_PER_SEED: usize = 500;
 const JIKAN_RECOMMENDATION_MAPPING_LIMIT: usize = 200;
 const JIKAN_RECOMMENDATION_LIMIT: usize = 50;
 const JIKAN_MAX_REPORTED_PAGES: u64 = 10_000;
-const JIKAN_DEFAULT_RATE_COOLDOWN_SECONDS: u64 = 30;
-const JIKAN_MAX_RATE_COOLDOWN_SECONDS: u64 = 5 * 60;
-const JIKAN_NETWORK_COOLDOWN: Duration = Duration::from_secs(30);
-const JIKAN_SERVER_COOLDOWN: Duration = Duration::from_secs(60);
-const JIKAN_FORBIDDEN_COOLDOWN: Duration = Duration::from_secs(5 * 60);
 
 const CAPABILITIES: &[CatalogCapability] = &[
     CatalogCapability::Search,
@@ -39,25 +44,8 @@ const CAPABILITIES: &[CatalogCapability] = &[
     CatalogCapability::Recommendations,
 ];
 
-struct CacheEntry {
-    expires_at: Instant,
-    value: Value,
-}
-
-struct RequestControl {
-    cache: HashMap<String, CacheEntry>,
-    cooldown_until: Option<Instant>,
-    next_request_at: Instant,
-}
-
-struct JikanClient {
-    http: reqwest::Client,
-    in_flight: Semaphore,
-    control: Mutex<RequestControl>,
-}
-
 pub(super) struct JikanAdapter {
-    client: JikanClient,
+    client: ProviderHttp,
     identity: Arc<IdentityResolver>,
 }
 
@@ -185,7 +173,7 @@ struct JikanRecommendationAggregate {
 impl JikanAdapter {
     pub(super) fn new(http: reqwest::Client, identity: Arc<IdentityResolver>) -> Self {
         Self {
-            client: JikanClient::new(http),
+            client: ProviderHttp::new(http, &JIKAN_POLICY),
             identity,
         }
     }
@@ -196,7 +184,7 @@ impl JikanAdapter {
         cache_dir: &std::path::Path,
     ) -> Result<(Vec<CatalogMedia>, Vec<String>), String> {
         let url = jikan_search_url(query)?;
-        let payload = self.client.request(url).await?;
+        let payload = self.client.get_json(url).await?;
         let page = parse_jikan_page(payload, 1, JIKAN_SEARCH_LIMIT)?;
         let mut warnings = Vec::new();
         if page.pagination.has_next_page {
@@ -217,7 +205,7 @@ impl JikanAdapter {
         let mut warnings = Vec::new();
         for page_number in 1..=JIKAN_MAX_SEASON_PAGES {
             let url = jikan_season_url(season, year, page_number)?;
-            let payload = self.client.request(url).await?;
+            let payload = self.client.get_json(url).await?;
             let page = parse_jikan_page(payload, page_number, JIKAN_SEASON_PAGE_LIMIT)?;
             let has_next_page = page.pagination.has_next_page;
             anime.extend(page.data);
@@ -277,7 +265,7 @@ impl JikanAdapter {
             };
             let payload = match self
                 .client
-                .request(jikan_recommendations_url(mal_id)?)
+                .get_json(jikan_recommendations_url(mal_id)?)
                 .await
             {
                 Ok(payload) => payload,
@@ -330,6 +318,7 @@ impl JikanAdapter {
             }
         }
         let mut missing_mappings = 0;
+        let mut skipped = 0;
         let mut items = Vec::new();
         for aggregate in aggregates {
             let Some(anilist_id) = resolution
@@ -341,9 +330,13 @@ impl JikanAdapter {
                 continue;
             };
             let item = normalize_jikan_recommendation(aggregate.entry, anilist_id);
-            item.validate("Jikan")?;
+            if item.validate("Jikan").is_err() {
+                skipped += 1;
+                continue;
+            }
             items.push(item);
         }
+        push_skipped_items_warning(&mut warnings, "Jikan", skipped);
         if items.len() > JIKAN_RECOMMENDATION_LIMIT {
             let omitted = items.len() - JIKAN_RECOMMENDATION_LIMIT;
             items.truncate(JIKAN_RECOMMENDATION_LIMIT);
@@ -373,10 +366,14 @@ impl JikanAdapter {
         mut warnings: Vec<String>,
     ) -> Result<(Vec<CatalogMedia>, Vec<String>), String> {
         let mut filtered = 0;
+        let mut skipped = 0;
         let mut valid = Vec::new();
         let mut seen = HashSet::new();
         for item in anime {
-            validate_jikan_anime(&item)?;
+            if validate_jikan_anime(&item).is_err() {
+                skipped += 1;
+                continue;
+            }
             if requested_season
                 .is_some_and(|(season, year)| !matches_requested_season(&item, season, year))
             {
@@ -394,6 +391,7 @@ impl JikanAdapter {
         }
 
         if valid.is_empty() {
+            push_skipped_items_warning(&mut warnings, "Jikan", skipped);
             return Ok((Vec::new(), warnings));
         }
 
@@ -415,10 +413,12 @@ impl JikanAdapter {
                 missing_mappings += 1;
                 continue;
             };
-            let item = normalize_jikan_anime(anime, anilist_id)?;
-            item.validate("Jikan")?;
-            items.push(item);
+            match normalize_jikan_anime(anime, anilist_id) {
+                Ok(item) if item.validate("Jikan").is_ok() => items.push(item),
+                _ => skipped += 1,
+            }
         }
+        push_skipped_items_warning(&mut warnings, "Jikan", skipped);
 
         if missing_mappings > 0 {
             warnings.push(format!(
@@ -458,192 +458,6 @@ impl CatalogAdapter for JikanAdapter {
             Ok(CatalogResponse::new("jikan", &request, items, warnings))
         })
     }
-}
-
-impl JikanClient {
-    fn new(http: reqwest::Client) -> Self {
-        Self {
-            http,
-            in_flight: Semaphore::new(1),
-            control: Mutex::new(RequestControl {
-                cache: HashMap::new(),
-                cooldown_until: None,
-                next_request_at: Instant::now(),
-            }),
-        }
-    }
-
-    async fn request(&self, url: Url) -> Result<Value, String> {
-        let cache_key = url.as_str().to_owned();
-        if let Some(value) = self.cached(&cache_key)? {
-            return Ok(value);
-        }
-        let _permit = self
-            .in_flight
-            .acquire()
-            .await
-            .map_err(|_| "The Jikan request queue is unavailable.".to_string())?;
-        if let Some(value) = self.cached(&cache_key)? {
-            return Ok(value);
-        }
-
-        let wait = self.reserve_request()?;
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
-        }
-        self.check_cooldown()?;
-
-        let response = match self
-            .http
-            .get(url)
-            .header("Accept", "application/json")
-            .send()
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                self.begin_cooldown(JIKAN_NETWORK_COOLDOWN)?;
-                return Err(format!(
-                    "Jikan is unreachable: {error}. This request will not retry automatically."
-                ));
-            }
-        };
-        let status = response.status();
-        let retry_after = response
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        if status == StatusCode::TOO_MANY_REQUESTS {
-            let cooldown = jikan_retry_after(retry_after.as_deref());
-            self.begin_cooldown(cooldown)?;
-            return Err(format!(
-                "Jikan is rate limiting requests. Try again in {} seconds; this request will not retry automatically.",
-                cooldown.as_secs()
-            ));
-        }
-        if status == StatusCode::FORBIDDEN {
-            self.begin_cooldown(JIKAN_FORBIDDEN_COOLDOWN)?;
-            return Err(
-                "Jikan rejected this request (HTTP 403); this request will not retry automatically."
-                    .into(),
-            );
-        }
-        if status.is_server_error() {
-            self.begin_cooldown(JIKAN_SERVER_COOLDOWN)?;
-            return Err(format!(
-                "Jikan returned an HTTP {status} server error; this request will not retry automatically."
-            ));
-        }
-        if !status.is_success() {
-            return Err(format!("Jikan returned an HTTP {status} error."));
-        }
-
-        let value = match read_bounded_json(response).await {
-            Ok(value) => value,
-            Err(error) => {
-                self.begin_cooldown(JIKAN_NETWORK_COOLDOWN)?;
-                return Err(format!(
-                    "{error} This request will not retry automatically."
-                ));
-            }
-        };
-        self.cache(cache_key, value.clone())?;
-        Ok(value)
-    }
-
-    fn cached(&self, key: &str) -> Result<Option<Value>, String> {
-        let now = Instant::now();
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The Jikan request state is unavailable.".to_string())?;
-        control.cache.retain(|_, entry| entry.expires_at > now);
-        Ok(control.cache.get(key).map(|entry| entry.value.clone()))
-    }
-
-    fn cache(&self, key: String, value: Value) -> Result<(), String> {
-        let now = Instant::now();
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The Jikan request state is unavailable.".to_string())?;
-        control.cache.retain(|_, entry| entry.expires_at > now);
-        if !control.cache.contains_key(&key) && control.cache.len() >= JIKAN_CACHE_LIMIT {
-            if let Some(oldest_key) = control
-                .cache
-                .iter()
-                .min_by_key(|(_, entry)| entry.expires_at)
-                .map(|(key, _)| key.clone())
-            {
-                control.cache.remove(&oldest_key);
-            }
-        }
-        control.cache.insert(
-            key,
-            CacheEntry {
-                expires_at: now + JIKAN_CACHE_TTL,
-                value,
-            },
-        );
-        Ok(())
-    }
-
-    fn reserve_request(&self) -> Result<Duration, String> {
-        let now = Instant::now();
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The Jikan request state is unavailable.".to_string())?;
-        reserve_jikan_request(&mut control, now)
-    }
-
-    fn check_cooldown(&self) -> Result<(), String> {
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The Jikan request state is unavailable.".to_string())?;
-        ensure_jikan_available(&mut control, Instant::now())
-    }
-
-    fn begin_cooldown(&self, duration: Duration) -> Result<(), String> {
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The Jikan request state is unavailable.".to_string())?;
-        control.cooldown_until = Some(Instant::now() + duration);
-        Ok(())
-    }
-}
-
-fn reserve_jikan_request(control: &mut RequestControl, now: Instant) -> Result<Duration, String> {
-    ensure_jikan_available(control, now)?;
-    let request_at = control.next_request_at.max(now);
-    control.next_request_at = request_at + JIKAN_REQUEST_INTERVAL;
-    Ok(request_at.saturating_duration_since(now))
-}
-
-fn ensure_jikan_available(control: &mut RequestControl, now: Instant) -> Result<(), String> {
-    let Some(until) = control.cooldown_until else {
-        return Ok(());
-    };
-    if until <= now {
-        control.cooldown_until = None;
-        return Ok(());
-    }
-    let remaining = until.saturating_duration_since(now);
-    let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
-    Err(format!(
-        "Jikan requests are cooling down. Try again in {seconds} seconds."
-    ))
-}
-
-fn jikan_retry_after(retry_after: Option<&str>) -> Duration {
-    let seconds = retry_after
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .unwrap_or(JIKAN_DEFAULT_RATE_COOLDOWN_SECONDS)
-        .clamp(1, JIKAN_MAX_RATE_COOLDOWN_SECONDS);
-    Duration::from_secs(seconds)
 }
 
 fn jikan_search_url(query: &str) -> Result<Url, String> {
@@ -698,32 +512,6 @@ fn jikan_url(segments: &[&str], query: &[(&str, String)]) -> Result<Url, String>
     Ok(url)
 }
 
-async fn read_bounded_json(mut response: reqwest::Response) -> Result<Value, String> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > JIKAN_MAX_RESPONSE_BYTES as u64)
-    {
-        return Err("The Jikan response is too large.".into());
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| format!("The Jikan response could not be read: {error}"))?
-    {
-        append_bounded(&mut bytes, &chunk, JIKAN_MAX_RESPONSE_BYTES)?;
-    }
-    serde_json::from_slice(&bytes).map_err(|error| format!("Jikan returned invalid JSON: {error}"))
-}
-
-fn append_bounded(target: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) -> Result<(), String> {
-    if chunk.len() > max_bytes.saturating_sub(target.len()) {
-        return Err("The Jikan response is too large.".into());
-    }
-    target.extend_from_slice(chunk);
-    Ok(())
-}
-
 fn aggregate_jikan_recommendations(
     recommendations_by_seed: Vec<(i64, Vec<JikanRecommendation>)>,
     seed_mal_ids: &HashSet<i64>,
@@ -776,7 +564,7 @@ fn parse_jikan_recommendations(value: Value) -> Result<Vec<JikanRecommendation>,
             || recommendation.entry.mal_id <= 0
             || recommendation.entry.mal_id > i64::from(i32::MAX)
             || recommendation.entry.title.trim().is_empty()
-            || !valid_jikan_text(&recommendation.entry.title, 500)
+            || !valid_text(&recommendation.entry.title, 500)
             || recommendation
                 .entry
                 .url
@@ -844,31 +632,29 @@ fn validate_jikan_anime(anime: &JikanAnime) -> Result<(), String> {
     if anime.mal_id <= 0
         || anime.mal_id > i64::from(i32::MAX)
         || anime.title.trim().is_empty()
-        || !valid_jikan_text(&anime.title, 500)
+        || !valid_text(&anime.title, 500)
         || anime
             .title_english
             .as_ref()
-            .is_some_and(|value| !valid_jikan_text(value, 500))
+            .is_some_and(|value| !valid_text(value, 500))
         || anime
             .title_japanese
             .as_ref()
-            .is_some_and(|value| !valid_jikan_text(value, 500))
+            .is_some_and(|value| !valid_text(value, 500))
         || anime.title_synonyms.len() > 100
         || anime
             .title_synonyms
             .iter()
-            .any(|value| !valid_jikan_text(value, 500))
+            .any(|value| !valid_text(value, 500))
         || anime.genres.len() > 100
         || anime
             .genres
             .iter()
-            .any(|genre| !valid_jikan_text(&genre.name, 100))
-        || anime.synopsis.as_ref().is_some_and(|value| {
-            value.len() > 100_000
-                || value.chars().any(|character| {
-                    character.is_control() && !matches!(character, '\n' | '\r' | '\t')
-                })
-        })
+            .any(|genre| !valid_text(&genre.name, 100))
+        || anime
+            .synopsis
+            .as_ref()
+            .is_some_and(|value| !valid_description(value))
         || anime
             .episodes
             .is_some_and(|value| value <= 0 || value > 100_000)
@@ -880,10 +666,6 @@ fn validate_jikan_anime(anime: &JikanAnime) -> Result<(), String> {
         return Err("Jikan returned an invalid anime item.".into());
     }
     Ok(())
-}
-
-fn valid_jikan_text(value: &str, max_len: usize) -> bool {
-    value.len() <= max_len && !value.chars().any(char::is_control)
 }
 
 fn matches_requested_season(anime: &JikanAnime, season: CatalogSeason, year: i32) -> bool {
@@ -976,7 +758,7 @@ fn normalize_jikan_anime(mut anime: JikanAnime, anilist_id: i64) -> Result<Catal
         anime.season.as_deref().and_then(parse_jikan_season),
         anime.year,
     ) {
-        (Some(season), Some(year)) if (1940..=2200).contains(&year) => (Some(season), Some(year)),
+        (Some(season), Some(year)) if valid_catalog_year(year) => (Some(season), Some(year)),
         _ => (None, None),
     };
     let preferred = anime.title_english.as_ref().unwrap_or(&anime.title).clone();
@@ -1047,7 +829,7 @@ fn jikan_date(value: &str) -> Option<Value> {
     let month = parts.next()?.parse::<u32>().ok()?;
     let day = parts.next()?.parse::<u32>().ok()?;
     if parts.next().is_some()
-        || !(1940..=2200).contains(&year)
+        || !valid_catalog_year(year)
         || !(1..=12).contains(&month)
         || !(1..=31).contains(&day)
     {
@@ -1059,17 +841,16 @@ fn jikan_date(value: &str) -> Option<Value> {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{HashMap, HashSet},
+        collections::HashSet,
         time::{Duration, Instant},
     };
 
     use super::{
-        aggregate_jikan_recommendations, append_bounded, jikan_recommendations_url,
-        jikan_retry_after, jikan_search_url, jikan_season_url, normalize_jikan_anime,
-        normalize_jikan_recommendation, parse_jikan_page, parse_jikan_recommendations,
-        reserve_jikan_request, JikanAnime, RequestControl, JIKAN_MAX_RECOMMENDATIONS_PER_SEED,
-        JIKAN_MAX_RESPONSE_BYTES, JIKAN_REQUEST_INTERVAL,
+        aggregate_jikan_recommendations, jikan_recommendations_url, jikan_search_url,
+        jikan_season_url, normalize_jikan_anime, normalize_jikan_recommendation, parse_jikan_page,
+        parse_jikan_recommendations, JikanAnime, JIKAN_MAX_RECOMMENDATIONS_PER_SEED, JIKAN_POLICY,
     };
+    use crate::catalog::http::{Penalty, RequestControl, NETWORK_COOLDOWN};
 
     #[test]
     fn builds_every_jikan_query_from_fixed_routes() {
@@ -1262,6 +1043,18 @@ mod tests {
         assert_eq!(items[0].id, 700);
         assert_eq!(items[0].id_mal, Some(1));
         assert!(warnings.iter().any(|warning| warning.contains("omitted")));
+        let invalid = serde_json::from_value::<JikanAnime>(serde_json::json!({
+            "mal_id": 1, "title": "Example", "score": 12
+        }))
+        .unwrap();
+        let (items, warnings) = adapter
+            .map_results(vec![invalid, anime(1)], None, directory.path(), Vec::new())
+            .await
+            .unwrap();
+        assert_eq!(items.len(), 1);
+        assert!(warnings.contains(
+            &"1 catalog item(s) from Jikan were skipped because they were invalid.".into()
+        ));
         for season in [None, Some((super::CatalogSeason::Summer, 2026))] {
             assert!(adapter
                 .map_results(vec![anime(999)], season, directory.path(), Vec::new())
@@ -1306,42 +1099,34 @@ mod tests {
     #[test]
     fn rejects_requests_during_cooldown_and_recovers_after_expiry() {
         let now = Instant::now();
-        let mut control = RequestControl {
-            cache: HashMap::new(),
-            cooldown_until: Some(now + Duration::from_secs(30)),
-            next_request_at: now,
-        };
-        assert!(reserve_jikan_request(&mut control, now).is_err());
-        assert!(reserve_jikan_request(&mut control, now + Duration::from_secs(31)).is_ok());
+        let mut control = RequestControl::new(now);
+        control.penalize(Penalty::Cooldown(NETWORK_COOLDOWN), "", now);
+        assert!(control
+            .reserve(&JIKAN_POLICY, now)
+            .unwrap_err()
+            .starts_with("Jikan requests are cooling down"));
+        assert!(control
+            .reserve(&JIKAN_POLICY, now + Duration::from_secs(31))
+            .is_ok());
     }
 
     #[test]
     fn bounds_rate_limit_cooldowns_and_response_bytes() {
-        assert_eq!(jikan_retry_after(Some("0")), Duration::from_secs(1));
-        assert_eq!(jikan_retry_after(Some("9999")), Duration::from_secs(300));
-        assert_eq!(jikan_retry_after(None), Duration::from_secs(30));
-
-        let mut bytes = vec![0; 2];
-        append_bounded(&mut bytes, &[1, 2], 4).unwrap();
-        assert!(append_bounded(&mut bytes, &[3], 4).is_err());
-        assert_eq!(JIKAN_MAX_RESPONSE_BYTES, 2 * 1024 * 1024);
+        assert_eq!(JIKAN_POLICY.network_cooldown, Some(Duration::from_secs(30)));
+        assert_eq!(JIKAN_POLICY.max_response_bytes, 2 * 1024 * 1024);
+        assert_eq!(JIKAN_POLICY.cache_limit, 128);
+        assert_eq!(JIKAN_POLICY.cache_ttl, Duration::from_secs(5 * 60));
     }
 
     #[test]
     fn spaces_serialized_jikan_requests_by_at_least_two_point_one_seconds() {
         let now = Instant::now();
-        let mut control = RequestControl {
-            cache: HashMap::new(),
-            cooldown_until: None,
-            next_request_at: now,
-        };
+        let mut control = RequestControl::new(now);
+        assert_eq!(JIKAN_POLICY.max_concurrent_requests, 1);
+        assert_eq!(control.reserve(&JIKAN_POLICY, now).unwrap(), Duration::ZERO);
         assert_eq!(
-            reserve_jikan_request(&mut control, now).unwrap(),
-            Duration::ZERO
-        );
-        assert_eq!(
-            reserve_jikan_request(&mut control, now).unwrap(),
-            JIKAN_REQUEST_INTERVAL
+            control.reserve(&JIKAN_POLICY, now).unwrap(),
+            Duration::from_millis(2_100)
         );
     }
 

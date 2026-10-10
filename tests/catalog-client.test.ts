@@ -28,7 +28,7 @@ test('catalog client shares inflight searches and evicts rejected requests', asy
   let calls = 0;
   let fail = false;
   let now = Date.UTC(2026, 6, 1);
-  const client = createCatalogClient(async <T>(name: string): Promise<T> => {
+  const client = createCatalogClient(async <T>(name: string, _args?: unknown): Promise<T> => {
     if (name === 'catalog_providers') return providers as T;
     assert.equal(name, 'catalog_request');
     calls += 1;
@@ -215,7 +215,7 @@ test('catalog client skips unconfigured official MyAnimeList and sends its ID on
 test('catalog client limits concurrent catalog calls and releases synchronous failures', async () => {
   let active = 0;
   let highest = 0;
-  const call: BackendCall = <T>(name: string): Promise<T> => {
+  const call: BackendCall = <T>(name: string, _args?: unknown): Promise<T> => {
     if (name === 'catalog_providers') return Promise.resolve(providers as T);
     if (name === 'catalog_request') throw new Error('synchronous failure');
     active += 1;

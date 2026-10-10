@@ -2,6 +2,12 @@ import { currentSeason } from '$lib/catalog/presentation';
 import { validCatalogRequest, type CatalogProvider, type CatalogRequest } from '$lib/catalog/providers';
 import { normalizeMyAnimeListClientId } from '$lib/settings';
 import type {
+  BackendArgs,
+  BackendArgsTuple,
+  BackendCommand,
+  BackendResult
+} from '$lib/backend/commands';
+import type {
   AnimeSeason,
   AniListSearchResult,
   AniListSeasonResponse,
@@ -9,8 +15,7 @@ import type {
   SubsPleaseScheduleResponse,
   SubsPleaseScheduleShow,
   SubsPleaseShowResponse,
-  TorrentDetails,
-  UpdateCheckResult
+  TorrentDetails
 } from '$lib/types';
 
 export const SINTEL_MAGNET =
@@ -259,33 +264,30 @@ function previewCatalog(
 
 let mockStartedAt = Date.now();
 
-export async function callPreviewBackend<T>(
-  name: string,
-  args?: Record<string, unknown>
-): Promise<T> {
-  await new Promise((resolve) => setTimeout(resolve, name === 'add_magnet' ? 650 : 80));
-  if (name === 'runtime_info') {
-    return {
-      engine: 'librqbit',
-      engineVersion: '8.1.1-demo',
-      streamPort: 42420,
-      downloadDir: 'StreamsPlease / media',
-      mpvAvailable: true,
-      mpvVersion: 'mpv 0.40 (UI preview)',
-      trailerAvailable: true,
-      trailerRuntimeVersion: 'Browser embed (UI preview)'
-    } as T;
-  }
-  if (name === 'check_for_update') return { status: 'upToDate' } as UpdateCheckResult as T;
-  if (name === 'install_update') return undefined as T;
-  if (name === 'add_magnet') {
-    const magnet = String(args?.magnet ?? '');
-    if (!magnet.startsWith('magnet:?')) throw new Error('Enter a valid magnet link.');
+type PreviewHandlers = {
+  [K in BackendCommand]: (args: BackendArgs<K>) => BackendResult<K>;
+};
+
+const previewHandlers: PreviewHandlers = {
+  runtime_info: () => ({
+    engine: 'librqbit',
+    engineVersion: '8.1.1-demo',
+    streamPort: 42420,
+    downloadDir: 'StreamsPlease / media',
+    mpvAvailable: true,
+    mpvVersion: 'mpv 0.40 (UI preview)',
+    trailerAvailable: true,
+    trailerRuntimeVersion: 'Browser embed (UI preview)'
+  }),
+  check_for_update: () => ({ status: 'upToDate' }),
+  install_update: () => undefined,
+  add_magnet: ({ magnet }) => {
+    if (!String(magnet ?? '').startsWith('magnet:?')) throw new Error('Enter a valid magnet link.');
     mockStartedAt = Date.now();
-    return { id: 7, details: mockDetails, output_folder: mockDetails.output_folder } as T;
-  }
-  if (name === 'stream_url') return 'http://127.0.0.1:42420/torrents/7/stream/0' as T;
-  if (name === 'torrent_status') {
+    return { id: 7, details: mockDetails, output_folder: mockDetails.output_folder };
+  },
+  stream_url: () => 'http://127.0.0.1:42420/torrents/7/stream/0',
+  torrent_status: () => {
     const elapsed = (Date.now() - mockStartedAt) / 1000;
     const progress = Math.min(1_294_727_168, 92_000_000 + elapsed * 3_800_000);
     return {
@@ -297,35 +299,36 @@ export async function callPreviewBackend<T>(
         upload_speed: { mbps: 0.21, human_readable: '0.21 MiB/s' },
         snapshot: { peer_stats: { live: 18, seen: 42, connecting: 3 } }
       }
-    } as T;
+    };
+  },
+  forget_torrent: () => undefined,
+  subsplease_schedule: ({ timezone }) => ({ tz: String(timezone ?? 'Europe/Amsterdam'), schedule }),
+  subsplease_index: () => mockIndex,
+  subsplease_show: ({ slug, anilistId, includeMetadata }) =>
+    previewShow(
+      String(slug ?? ''),
+      typeof anilistId === 'number' ? anilistId : undefined,
+      includeMetadata !== false
+    ),
+  catalog_providers: () => structuredClone(catalogProviders),
+  catalog_request: ({ provider, request, myAnimeListClientId }) =>
+    previewCatalog(
+      String(provider ?? ''),
+      request,
+      typeof myAnimeListClientId === 'string' ? myAnimeListClientId : undefined
+    ),
+  export_library_file: () => false,
+  import_library_file: () => null
+};
+
+export async function callPreviewBackend<K extends BackendCommand>(
+  name: K,
+  ...[args]: BackendArgsTuple<K>
+): Promise<BackendResult<K>> {
+  await new Promise((resolve) => setTimeout(resolve, name === 'add_magnet' ? 650 : 80));
+  if (!Object.hasOwn(previewHandlers, name)) {
+    throw new Error(`The browser preview does not implement ${String(name)}.`);
   }
-  if (name === 'subsplease_schedule') {
-    return { tz: String(args?.timezone ?? 'Europe/Amsterdam'), schedule } as T;
-  }
-  if (name === 'subsplease_index') return mockIndex as T;
-  if (name === 'catalog_providers') return structuredClone(catalogProviders) as T;
-  if (name === 'catalog_request') {
-    return previewCatalog(
-      String(args?.provider ?? ''),
-      args?.request as CatalogRequest,
-      typeof args?.myAnimeListClientId === 'string' ? args.myAnimeListClientId : undefined
-    ) as T;
-  }
-  if (name === 'anilist_season') {
-    return previewSeason(
-      String(args?.season ?? 'SUMMER').toUpperCase() as AnimeSeason,
-      Number(args?.year ?? new Date().getFullYear())
-    ) as T;
-  }
-  if (name === 'anilist_search') return previewSearch(String(args?.query ?? '')) as T;
-  if (name === 'subsplease_show') {
-    return previewShow(
-      String(args?.slug ?? ''),
-      typeof args?.anilistId === 'number' ? args.anilistId : undefined,
-      args?.includeMetadata !== false
-    ) as T;
-  }
-  if (name === 'export_library_file') return false as T;
-  if (name === 'import_library_file') return null as T;
-  return undefined as T;
+  const handler = previewHandlers[name] as (args: BackendArgs<K>) => BackendResult<K>;
+  return handler((args ?? {}) as BackendArgs<K>);
 }

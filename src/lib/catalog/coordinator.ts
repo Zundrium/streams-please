@@ -6,7 +6,7 @@ import {
   catalogRequestKey, normalizeCatalogProviders, normalizeCatalogResponse, validCatalogRequest,
   type CatalogProvider, type CatalogProvenance, type CatalogRequest
 } from '$lib/catalog/providers';
-import { currentSeason, SEASON_ORDER } from '$lib/catalog/presentation';
+import { currentSeason, seasonOrdinal } from '$lib/catalog/presentation';
 
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
@@ -29,7 +29,7 @@ export function createCatalogCoordinator(call: BackendCall, options: CatalogCach
 
   function providers(): Promise<CatalogProvider[]> {
     if (!registry) {
-      registry = Promise.resolve().then(() => call<unknown>('catalog_providers')).then((value) => {
+      registry = Promise.resolve().then(() => call('catalog_providers')).then((value) => {
         const normalized = normalizeCatalogProviders(value);
         if (!normalized) throw new Error('The catalog provider registry is invalid.');
         return normalized;
@@ -41,8 +41,7 @@ export function createCatalogCoordinator(call: BackendCall, options: CatalogCach
   function freshAge(request: CatalogRequest): number {
     if (request.kind === 'search' || request.kind === 'recommendations') return 5 * MINUTE;
     const current = currentSeason(new Date(now()));
-    const delta = request.year * 4 + SEASON_ORDER.indexOf(request.season)
-      - (current.year * 4 + SEASON_ORDER.indexOf(current.season));
+    const delta = seasonOrdinal(request.season, request.year) - seasonOrdinal(current.season, current.year);
     return delta === 0 ? 15 * MINUTE : delta < 0 ? 7 * DAY : 60 * MINUTE;
   }
 
@@ -106,7 +105,7 @@ export function createCatalogCoordinator(call: BackendCall, options: CatalogCach
         errors.push(failure);
       } else {
         try {
-          const raw = await call<unknown>('catalog_request', {
+          const raw = await call('catalog_request', {
             provider: provider.id,
             request,
             ...(provider.id === 'myanimelist'

@@ -1,7 +1,7 @@
 import { errorMessage } from '$lib/catalog/presentation';
 import { loadProviderMappings, matchSubsPleaseSeason, searchArchive } from '$lib/catalog/matching';
 import type { CatalogMedia, SubsPleaseIndexResponse } from '$lib/types';
-import type { CatalogProvenance, CatalogSearchResponse } from '$lib/catalog/providers';
+import { validSearchQuery, type CatalogProvenance, type CatalogSearchResponse } from '$lib/catalog/providers';
 
 export function createCatalogSearch(
   loadSearch: (query: string) => Promise<CatalogSearchResponse>,
@@ -36,7 +36,7 @@ export function createCatalogSearch(
     providerError = '';
     animeLoading = false;
     providerLoading = false;
-    if (query.length < 2 || query.length > 160 || /[\u0000-\u001f\u007f]/.test(query)) {
+    if (!validSearchQuery(query)) {
       searchError = 'Enter between 2 and 160 characters.';
       return;
     }

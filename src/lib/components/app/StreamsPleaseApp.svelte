@@ -41,17 +41,31 @@
   import { Switch } from '$lib/components/ui/switch';
   import AppNavigation from '$lib/components/app/AppNavigation.svelte';
   import { callBackend, isTauri } from '$lib/backend';
+  import { posterUrl } from '$lib/catalog';
   import { createCatalogClient } from '$lib/catalog/client';
   import {
-    entryFromDiscovery,
-    entryFromShow,
+    applyDiscoveryVerdict,
     libraryEntryMatches,
     loadLibrary,
     mergeLibraryEntries,
     nextUnwatchedEpisode,
     saveLibrary,
-    sortEpisodeNumbers
+    setEpisodeProgress as setLibraryEpisodeProgress,
+    setEpisodeWatched as setLibraryEpisodeWatched,
+    sortEpisodeNumbers,
+    syncLibraryShow as syncLibraryEntry,
+    toggleEpisodeWatched as toggleLibraryEpisodeWatched,
+    toggleLibraryShow as toggleLibraryEntry,
+    type LibraryIdentity
   } from '$lib/library';
+  import { hydrateLibraryBackups } from '$lib/library-import';
+  import {
+    chooseVideoFile,
+    formatBytes,
+    normalizeTracks,
+    readableTitle,
+    torrentPieceRanges
+  } from '$lib/torrent/media';
   import { loadSettings, saveSettings } from '$lib/settings';
   import {
     TrailerPlayerController,
@@ -69,9 +83,7 @@
   import TasteIndicator from '$lib/components/catalog/TasteIndicator.svelte';
   import UpdateStatus from '$lib/components/app/UpdateStatus.svelte';
   import { checkForUpdate, createUpdateController, installPendingUpdate } from '$lib/updates';
-  import { DAY_ORDER } from '$lib/types';
   import type {
-    AddTorrentResponse,
     AppUpdateStatus,
     AppView,
     CurrentTorrent,
@@ -99,11 +111,6 @@
     torrent: CurrentTorrent;
     playback: PlaybackState;
     tracks: MpvTrack[];
-  };
-
-  type PlaybackBufferRange = {
-    start: number;
-    end: number;
   };
 
   type TrailerPlacement = {
@@ -154,7 +161,6 @@
     ['path', 'string', 'none'],
     ['paused-for-cache', 'flag']
   ] as const satisfies readonly MpvObservableProperty[];
-  const VIDEO_EXTENSIONS = ['.mkv', '.mk3d', '.mp4', '.m4v', '.mov', '.webm', '.avi', '.ts', '.m2ts'];
   const MIN_STREAM_START_BYTES = 1024 * 1024;
   const STREAM_RETRY_DELAY_MS = 5_000;
   const MAX_STREAM_FAILURES = 3;
@@ -163,6 +169,7 @@
   const SEEK_RECONCILE_TOLERANCE_SECONDS = 1;
   const MEDIA_LOAD_TIMEOUT_MS = 8_000;
   const NEXT_EPISODE_PROMPT_SECONDS = 80;
+  const TORRENT_STATUS_INTERVAL_MS = 1_000;
   const MPV_WINDOW_LABEL = 'main';
 
   let contentViewport = $state<HTMLElement | null>(null);
@@ -181,6 +188,8 @@
   let streamFailures = 0;
   let nextStreamRetryAt = 0;
   let streamAttemptGeneration = 0;
+  let torrentStartGeneration = 0;
+  let torrentStartQueue: Promise<unknown> = Promise.resolve();
   let bufferingWatchdogTimer: number | null = null;
   let mpvPausedForCache = false;
   let pendingSeekTime: number | null = null;
@@ -364,7 +373,7 @@
     preferredQuality = settings.preferredQuality;
     preferredSubtitleLanguage = settings.preferredSubtitleLanguage;
     startAppUpdate();
-    void callBackend<RuntimeInfo>('runtime_info')
+    void callBackend('runtime_info')
       .then((nextRuntime) => (runtime = nextRuntime))
       .catch((reason) => (error = String(reason)));
 
@@ -489,17 +498,22 @@
   $effect(() => {
     const id = current?.id;
     if (id === undefined) return;
-    const update = () => {
-      void callBackend<TorrentStats>('torrent_status', { id })
-        .then((nextStats) => {
-          statsRef = nextStats;
-          stats = nextStats;
-        })
-        .catch(() => undefined);
+    let cancelled = false;
+    let timer: number | null = null;
+    const update = async () => {
+      const nextStats = await callBackend('torrent_status', { id }).catch(() => null);
+      if (cancelled || currentRef?.id !== id) return;
+      if (nextStats) {
+        statsRef = nextStats;
+        stats = nextStats;
+      }
+      timer = window.setTimeout(() => void update(), TORRENT_STATUS_INTERVAL_MS);
     };
-    update();
-    const interval = window.setInterval(update, 1_000);
-    return () => window.clearInterval(interval);
+    void update();
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearTimeout(timer);
+    };
   });
 
   $effect(() => {
@@ -558,7 +572,7 @@
     const key = `${episode.slug}:${episode.episode}`;
     if (autoMarkedPlaybackKey === key) return;
     autoMarkedPlaybackKey = key;
-    setEpisodeWatched(episode.slug, episode.episode, true);
+    setEpisodeWatched({ anilistId: episode.anilistId, slug: episode.slug }, episode.episode, true);
   });
 
   $effect(() => {
@@ -599,103 +613,10 @@
     return () => window.clearInterval(interval);
   });
 
-  function formatBytes(bytes = 0): string {
-    if (!Number.isFinite(bytes) || bytes <= 0) return '0 B';
-    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
-    const index = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
-    const value = bytes / 1024 ** index;
-    return `${value.toFixed(index > 2 ? 2 : index > 0 ? 1 : 0)} ${units[index]}`;
-  }
-
-  function readableTitle(filename: string): string {
-    return filename
-      .replace(/\.[^.]+$/, '')
-      .replace(/^\[[^\]]+\]\s*/, '')
-      .replace(/[._]/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-  }
-
   function preferredSubtitleLanguages(): string {
     return preferredSubtitleLanguage === 'en'
       ? 'en'
       : `${preferredSubtitleLanguage},en`;
-  }
-
-  function normalizeTracks(value: unknown): MpvTrack[] {
-    if (!Array.isArray(value)) return [];
-    return value.flatMap((item) => {
-      if (!item || typeof item !== 'object') return [];
-      const source = item as Record<string, unknown>;
-      if (source.type !== 'video' && source.type !== 'audio' && source.type !== 'sub') return [];
-      return [
-        {
-          id: Number(source.id),
-          type: source.type,
-          lang: typeof source.lang === 'string' ? source.lang : undefined,
-          title: typeof source.title === 'string' ? source.title : undefined,
-          codec: typeof source.codec === 'string' ? source.codec : undefined,
-          selected: Boolean(source.selected),
-          external: Boolean(source.external)
-        }
-      ];
-    });
-  }
-
-  function inferPieceLength(totalBytes: number, pieceSlots: number): number {
-    if (totalBytes <= 0 || pieceSlots <= 0) return 0;
-    for (let exponent = 14; exponent <= 26; exponent += 1) {
-      const candidate = 2 ** exponent;
-      const actualPieces = Math.ceil(totalBytes / candidate);
-      if (actualPieces <= pieceSlots && pieceSlots - actualPieces < 8) return candidate;
-    }
-    return totalBytes / pieceSlots;
-  }
-
-  function torrentPieceRanges(
-    torrentStats: TorrentStats | null,
-    torrent: CurrentTorrent | null,
-    duration: number
-  ): PlaybackBufferRange[] {
-    const pieces = torrentStats?.pieces;
-    const files = torrent?.details.files;
-    if (!pieces?.length || !torrent || !files?.length || duration <= 0) return [];
-
-    const totalBytes =
-      torrentStats?.total_bytes || files.reduce((sum, file) => sum + file.length, 0);
-    const pieceLength = inferPieceLength(totalBytes, pieces.length);
-    const fileLength = torrent.video.length;
-    if (pieceLength <= 0 || fileLength <= 0) return [];
-
-    const fileStart = files
-      .slice(0, torrent.fileId)
-      .reduce((sum, file) => sum + file.length, 0);
-    const fileEnd = fileStart + fileLength;
-    const firstPiece = Math.max(0, Math.floor(fileStart / pieceLength));
-    const lastPiece = Math.min(pieces.length - 1, Math.ceil(fileEnd / pieceLength) - 1);
-    const visualMergeGap = Math.min(
-      0.5,
-      Math.max(0.12, (pieceLength / fileLength) * 100 * 2)
-    );
-    const ranges: PlaybackBufferRange[] = [];
-
-    for (let index = firstPiece; index <= lastPiece; index += 1) {
-      if (!pieces[index]) continue;
-      const startByte = Math.max(fileStart, index * pieceLength);
-      const endByte = Math.min(fileEnd, (index + 1) * pieceLength);
-      const range = {
-        start: ((startByte - fileStart) / fileLength) * 100,
-        end: ((endByte - fileStart) / fileLength) * 100
-      };
-      const previous = ranges[ranges.length - 1];
-      if (previous && range.start <= previous.end + visualMergeGap) {
-        previous.end = Math.max(previous.end, range.end);
-      } else {
-        ranges.push(range);
-      }
-    }
-
-    return ranges;
   }
 
   function updateTrailerPlacement() {
@@ -735,12 +656,7 @@
 
   function isMissingMpvInstance(reason: unknown): boolean {
     const message = reason instanceof Error ? reason.message : String(reason);
-    return (
-      message.includes('is not initialized') ||
-      message.includes('mpv instance not found') ||
-      message.includes('mpv worker failed') ||
-      message.includes('JoinError::Panic')
-    );
+    return message.includes('is not initialized') || message.includes('mpv instance not found');
   }
 
   async function runWithMpv<T>(operation: () => Promise<T>): Promise<T> {
@@ -756,10 +672,12 @@
   }
 
   async function syncVideoViewport() {
-    if (!isTauri() || !mpvReady || mpvMediaOwner === 'transition') return;
+    if (!isTauri() || !mpvReady || mpvInitPromise || mpvMediaOwner === 'transition') return;
     const margins = currentVideoMargins();
     if (!margins) return;
-    await runWithMpv(() => setVideoMarginRatio(margins, MPV_WINDOW_LABEL));
+    await setVideoMarginRatio(margins, MPV_WINDOW_LABEL).catch((reason) => {
+      if (!isMissingMpvInstance(reason)) console.warn('The video viewport could not be synced.', reason);
+    });
   }
 
   function scheduleVideoViewportSync() {
@@ -857,7 +775,7 @@
       };
     }
 
-    const nextRuntime = runtime ?? (await callBackend<RuntimeInfo>('runtime_info'));
+    const nextRuntime = runtime ?? (await callBackend('runtime_info'));
     if (cancelled()) return;
     runtime = nextRuntime;
     if (!nextRuntime.mpvAvailable) {
@@ -995,8 +913,8 @@
     if (!failures.length) return;
 
     try {
-      await destroyMpv(MPV_WINDOW_LABEL);
       resetMpvClient();
+      await destroyMpv(MPV_WINDOW_LABEL);
       context.requiresEpisodeReload = Boolean(context.resume);
     } catch (reason) {
       throw new Error(
@@ -1006,7 +924,7 @@
   }
 
   async function restoreEpisodeAfterTrailer(resume: TrailerResumeState): Promise<void> {
-    const streamUrl = await callBackend<string>('stream_url', {
+    const streamUrl = await callBackend('stream_url', {
       id: resume.torrent.id,
       fileId: resume.torrent.fileId
     });
@@ -1318,18 +1236,23 @@
 
   async function performOpenTorrentStream(target: CurrentTorrent, attempt: number) {
     if (attempt !== streamAttemptGeneration || mpvMediaOwner !== 'episode') return;
-    const streamUrl = await callBackend<string>('stream_url', {
+    const streamUrl = await callBackend('stream_url', {
       id: target.id,
       fileId: target.fileId
     });
     const url = `${streamUrl}/${encodeURIComponent(target.video.name)}`;
+    const resumeAt = Math.floor(seekTarget ?? playback.time);
     if (attempt !== streamAttemptGeneration || mpvMediaOwner !== 'episode') return;
     await runWithMpv(async () => {
       if (attempt !== streamAttemptGeneration || mpvMediaOwner !== 'episode') return;
       const margins = currentVideoMargins();
       if (margins) await setVideoMarginRatio(margins, MPV_WINDOW_LABEL);
       if (attempt !== streamAttemptGeneration || mpvMediaOwner !== 'episode') return;
-      await mpvCommand('loadfile', [url, 'replace'], MPV_WINDOW_LABEL);
+      await mpvCommand(
+        'loadfile',
+        resumeAt > 0 ? [url, 'replace', -1, `start=${resumeAt}`] : [url, 'replace'],
+        MPV_WINDOW_LABEL
+      );
       await setProperty('pause', false, MPV_WINDOW_LABEL);
     });
     if (attempt !== streamAttemptGeneration || mpvMediaOwner !== 'episode') return;
@@ -1398,14 +1321,22 @@
     phase = 'buffering';
   }
 
+  async function forgetTorrent(id: number): Promise<void> {
+    await callBackend('forget_torrent', { id }).catch((reason) =>
+      console.warn(`Torrent ${id} could not be removed from the session.`, reason)
+    );
+  }
+
   async function clearCurrentForReplacement() {
     const previous = currentRef;
     if (!previous) return;
     if (isTauri()) {
       if (mpvReady) {
-        await runWithMpv(() => mpvCommand('stop', [], MPV_WINDOW_LABEL));
+        await runWithMpv(() => mpvCommand('stop', [], MPV_WINDOW_LABEL)).catch((reason) =>
+          console.warn('The previous episode could not be stopped.', reason)
+        );
       }
-      await callBackend<void>('forget_torrent', { id: previous.id });
+      await forgetTorrent(previous.id);
     }
     currentRef = null;
     statsRef = null;
@@ -1423,7 +1354,15 @@
     seekTarget = null;
   }
 
-  async function startTorrent(releaseMagnet: string): Promise<boolean> {
+  function startTorrent(releaseMagnet: string): Promise<boolean> {
+    const generation = ++torrentStartGeneration;
+    const start = torrentStartQueue.then(() => performStartTorrent(releaseMagnet, generation));
+    torrentStartQueue = start.catch(() => false);
+    return start;
+  }
+
+  async function performStartTorrent(releaseMagnet: string, generation: number): Promise<boolean> {
+    if (generation !== torrentStartGeneration) return false;
     error = '';
     const magnetToOpen = releaseMagnet.trim();
     if (!magnetToOpen.startsWith('magnet:?')) {
@@ -1440,16 +1379,18 @@
     phase = 'connecting';
     try {
       await clearCurrentForReplacement();
-      const response = await callBackend<AddTorrentResponse>('add_magnet', { magnet: magnetToOpen });
+      if (generation !== torrentStartGeneration) return false;
+      const response = await callBackend('add_magnet', { magnet: magnetToOpen });
       if (response.id === undefined) throw new Error('The torrent engine did not return a session ID.');
-      const videoCandidates = (response.details.files ?? [])
-        .map((file, fileId) => ({ file, fileId }))
-        .filter(({ file }) =>
-          VIDEO_EXTENSIONS.some((extension) => file.name.toLowerCase().endsWith(extension))
-        )
-        .sort((left, right) => right.file.length - left.file.length);
-      const chosen = videoCandidates[0];
-      if (!chosen) throw new Error('This torrent does not contain a supported video file.');
+      if (generation !== torrentStartGeneration) {
+        if (isTauri()) await forgetTorrent(response.id);
+        return false;
+      }
+      const chosen = chooseVideoFile(response.details.files);
+      if (!chosen) {
+        if (isTauri()) await forgetTorrent(response.id);
+        throw new Error('This torrent does not contain a supported video file.');
+      }
 
       const nextCurrent: CurrentTorrent = {
         id: response.id,
@@ -1486,6 +1427,7 @@
       }
       return true;
     } catch (reason) {
+      if (generation !== torrentStartGeneration) return false;
       phase = 'error';
       error = reason instanceof Error ? reason.message : String(reason);
       return false;
@@ -1493,72 +1435,20 @@
   }
 
   function commitLibrary(entries: LibraryEntry[]) {
-    saveLibrary(entries);
+    if (entries === libraryEntries) return;
+    if (!saveLibrary(entries)) console.error('The library could not be saved to local storage.');
     libraryEntries = entries;
   }
 
-  async function hydrateLibraryBackup(
-    backup: LibraryBackupEntry,
-    timezone: string,
-    scheduledShows: Map<string, { day: DayName; show: SubsPleaseScheduleShow }>
-  ): Promise<LibraryEntry> {
-    try {
-      const details = await loadSubsPleaseShow(backup.slug, timezone, backup.anilistId);
-      const scheduled = scheduledShows.get(backup.slug);
-      const show = scheduled?.show ?? {
-        title: details.title,
-        page: details.slug || backup.slug,
-        image_url: details.image_url,
-        time: '',
-        anilist_id: details.metadata_id ?? backup.anilistId,
-        subsplease_id: details.subsplease_id ?? backup.subspleaseId
-      };
-      return {
-        ...entryFromShow(details, show, scheduled?.day),
-        anilistId: details.metadata_id ?? backup.anilistId,
-        subspleaseId: details.subsplease_id ?? backup.subspleaseId,
-        following: backup.following,
-        libraryDismissed: backup.libraryDismissed,
-        discoveryVerdict: backup.discoveryVerdict,
-        checkedAt: backup.checkedAt,
-        watchedEpisodes: backup.watchedEpisodes,
-        addedAt: backup.addedAt,
-        updatedAt: backup.updatedAt
-      };
-    } catch (reason) {
-      const message = reason instanceof Error ? reason.message : String(reason);
-      throw new Error(`Could not refresh ${backup.slug}: ${message}`);
-    }
-  }
-
-  async function importLibrary(backups: LibraryBackupEntry[]) {
-    if (backups.length === 0) return;
-    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC';
-    const scheduledShows = new Map<
-      string,
-      { day: DayName; show: SubsPleaseScheduleShow }
-    >();
-    try {
-      const schedule = await loadSubsPleaseSchedule(timezone);
-      for (const day of DAY_ORDER) {
-        for (const show of schedule.schedule[day] ?? []) {
-          scheduledShows.set(show.page, { day, show });
-        }
-      }
-    } catch {
-      scheduledShows.clear();
-    }
-
-    const entries: LibraryEntry[] = [];
-    for (let index = 0; index < backups.length; index += 4) {
-      const batch = await Promise.all(
-        backups
-          .slice(index, index + 4)
-          .map((backup) => hydrateLibraryBackup(backup, timezone, scheduledShows))
-      );
-      entries.push(...batch);
-    }
-    commitLibrary(mergeLibraryEntries(libraryEntries, entries));
+  async function importLibrary(backups: LibraryBackupEntry[]): Promise<{ failed: string[] }> {
+    const { entries, failed } = await hydrateLibraryBackups(backups, {
+      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
+      existing: libraryEntries,
+      loadSchedule: loadSubsPleaseSchedule,
+      loadShow: (slug, timezone, anilistId) => loadSubsPleaseShow(slug, timezone, anilistId)
+    });
+    if (entries.length) commitLibrary(mergeLibraryEntries(libraryEntries, entries));
+    return { failed };
   }
 
   function updatePreferredQuality(quality: PlaybackQuality) {
@@ -1576,27 +1466,12 @@
     }
   }
 
-  function posterUrl(path: string): string {
-    if (!path) return '';
-    return path.startsWith('http')
-      ? path
-      : `https://subsplease.org${path.startsWith('/') ? '' : '/'}${path}`;
-  }
-
   function syncLibraryShow(
     details: SubsPleaseShowResponse,
     show: SubsPleaseScheduleShow,
     day?: DayName
   ) {
-    const anilistId = details.metadata_id ?? show.anilist_id;
-    const slug = details.slug || show.page;
-    const index = libraryEntries.findIndex((entry) =>
-      libraryEntryMatches(entry, anilistId, slug)
-    );
-    if (index < 0) return;
-    const next = [...libraryEntries];
-    next[index] = entryFromShow(details, show, day, next[index]);
-    commitLibrary(next);
+    commitLibrary(syncLibraryEntry(libraryEntries, details, show, day));
   }
 
   function toggleLibraryShow(
@@ -1604,47 +1479,7 @@
     show: SubsPleaseScheduleShow,
     day?: DayName
   ) {
-    const anilistId = details.metadata_id ?? show.anilist_id;
-    const slug = details.slug || show.page;
-    const existing = libraryEntries.find((entry) =>
-      libraryEntryMatches(entry, anilistId, slug)
-    );
-    if (existing) {
-      if (existing.following) {
-        if (existing.discoveryVerdict) {
-          commitLibrary(
-            libraryEntries.map((entry) =>
-              libraryEntryMatches(entry, anilistId, slug)
-                ? {
-                    ...entry,
-                    following: false,
-                    libraryDismissed: true,
-                    updatedAt: new Date().toISOString()
-                  }
-                : entry
-            )
-          );
-        } else {
-          commitLibrary(
-            libraryEntries.filter((entry) => !libraryEntryMatches(entry, anilistId, slug))
-          );
-        }
-      } else {
-        commitLibrary(
-          libraryEntries.map((entry) =>
-            libraryEntryMatches(entry, anilistId, slug)
-              ? {
-                  ...entryFromShow(details, show, day, entry),
-                  following: true,
-                  libraryDismissed: false
-                }
-              : entry
-          )
-        );
-      }
-      return;
-    }
-    commitLibrary([...libraryEntries, entryFromShow(details, show, day)]);
+    commitLibrary(toggleLibraryEntry(libraryEntries, details, show, day));
   }
 
   function setDiscoveryVerdict(
@@ -1653,38 +1488,7 @@
     day: DayName | undefined,
     verdict?: DiscoveryVerdict
   ) {
-    const anilistId = details.metadata_id ?? show.anilist_id;
-    const slug = details.slug || show.page;
-    const index = libraryEntries.findIndex((entry) =>
-      libraryEntryMatches(entry, anilistId, slug)
-    );
-    if (!verdict) {
-      if (index < 0) return;
-      const existing = libraryEntries[index];
-      if (!existing.following) {
-        commitLibrary(libraryEntries.filter((_, entryIndex) => entryIndex !== index));
-        return;
-      }
-      const next = [...libraryEntries];
-      next[index] = {
-        ...existing,
-        discoveryVerdict: undefined,
-        checkedAt: undefined,
-        updatedAt: new Date().toISOString()
-      };
-      commitLibrary(next);
-      return;
-    }
-    if (index < 0) {
-      commitLibrary([
-        ...libraryEntries,
-        entryFromDiscovery(details, show, verdict, day)
-      ]);
-      return;
-    }
-    const next = [...libraryEntries];
-    next[index] = entryFromDiscovery(details, show, verdict, day, next[index]);
-    commitLibrary(next);
+    commitLibrary(applyDiscoveryVerdict(libraryEntries, details, show, day, verdict));
   }
 
   function decideDiscoveryShow(
@@ -1696,36 +1500,16 @@
     setDiscoveryVerdict(details, show, day, verdict);
   }
 
-  function setEpisodeWatched(slug: string, episode: string, watched: boolean) {
-    const index = libraryEntries.findIndex((entry) => entry.slug === slug);
-    if (index < 0) return;
-    const entry = libraryEntries[index];
-    const watchedEpisodes = watched
-      ? [...new Set([...entry.watchedEpisodes, episode])]
-      : entry.watchedEpisodes.filter((value) => value !== episode);
-    const next = [...libraryEntries];
-    next[index] = { ...entry, watchedEpisodes, updatedAt: new Date().toISOString() };
-    commitLibrary(next);
+  function setEpisodeWatched(identity: LibraryIdentity, episode: string, watched: boolean) {
+    commitLibrary(setLibraryEpisodeWatched(libraryEntries, identity, episode, watched));
   }
 
   function toggleEpisodeWatched(slug: string, episode: string) {
-    const entry = libraryEntries.find((item) => item.slug === slug);
-    if (!entry) return;
-    setEpisodeWatched(slug, episode, !entry.watchedEpisodes.includes(episode));
+    commitLibrary(toggleLibraryEpisodeWatched(libraryEntries, { slug }, episode));
   }
 
   function setEpisodeProgress(slug: string, progressCount: number) {
-    const index = libraryEntries.findIndex((entry) => entry.slug === slug);
-    if (index < 0) return;
-    const entry = libraryEntries[index];
-    const count = Math.min(
-      Math.max(Math.round(progressCount), 0),
-      entry.availableEpisodes.length
-    );
-    const watchedEpisodes = sortEpisodeNumbers(entry.availableEpisodes).slice(0, count);
-    const next = [...libraryEntries];
-    next[index] = { ...entry, watchedEpisodes, updatedAt: new Date().toISOString() };
-    commitLibrary(next);
+    commitLibrary(setLibraryEpisodeProgress(libraryEntries, { slug }, progressCount));
   }
 
   function episodePlaybackKey(request: EpisodePlaybackRequest): string {
@@ -1951,7 +1735,11 @@
 
   function togglePlayingEpisodeWatched(watched: boolean) {
     if (!playingEpisode || !playingLibraryEntry || watched === playingEpisodeWatched) return;
-    setEpisodeWatched(playingEpisode.slug, playingEpisode.episode, watched);
+    setEpisodeWatched(
+      { anilistId: playingEpisode.anilistId, slug: playingEpisode.slug },
+      playingEpisode.episode,
+      watched
+    );
   }
 
   function scheduleSeek(time: number) {
@@ -2089,11 +1877,11 @@
         statsRef?.finished || selectedFileProgress >= MIN_STREAM_START_BYTES;
       if (enoughBuffered) {
         streamStarted = true;
+        const attempt = ++streamAttemptGeneration;
         try {
-          const attempt = ++streamAttemptGeneration;
           await openTorrentStream(current, attempt);
         } catch (reason) {
-          handleStreamFailure(reason instanceof Error ? reason.message : String(reason));
+          handleStreamFailure(reason instanceof Error ? reason.message : String(reason), attempt);
         }
       }
     }

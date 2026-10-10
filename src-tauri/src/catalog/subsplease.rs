@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::{collections::HashSet, sync::LazyLock};
 
 use regex::Regex;
 use serde_json::Value;
@@ -6,10 +6,30 @@ use tauri::State;
 
 use super::{
     anilist::{has_series_prequel, validate_anilist_id},
+    http::read_bounded_body,
     CatalogState,
 };
 
 const SUBSPLEASE_ORIGIN: &str = "https://subsplease.org/";
+const SUBSPLEASE_MAX_RESPONSE_BYTES: usize = 8 * 1024 * 1024;
+
+static SHOW_ID_PATTERN: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r#"(?s)id=[\"']show-release-table[\"'][^>]*sid=[\"'](\d+)[\"']"#).ok()
+});
+static TITLE_PATTERN: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r#"(?s)<h1[^>]*class=[\"']entry-title[\"'][^>]*>(.*?)</h1>"#).ok());
+static SYNOPSIS_PATTERN: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(r#"(?s)<div[^>]*class=[\"']series-syn[\"'][^>]*>.*?<p>(.*?)</p>"#).ok()
+});
+static IMAGE_PATTERN: LazyLock<Option<Regex>> = LazyLock::new(|| {
+    Regex::new(
+        r#"<img[^>]*class=[\"'][^\"']*img-responsive img-center[^\"']*[\"'][^>]*src=[\"']([^\"']+)[\"']"#,
+    )
+    .ok()
+});
+static LINK_PATTERN: LazyLock<Option<Regex>> =
+    LazyLock::new(|| Regex::new(r#"(?s)<a[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>"#).ok());
+static TAG_PATTERN: LazyLock<Option<Regex>> = LazyLock::new(|| Regex::new(r"<[^>]+>").ok());
 
 #[derive(Debug, PartialEq)]
 enum MetadataRequest<'a> {
@@ -80,32 +100,79 @@ fn subsplease_releases_url(timezone: &str, sid: &str) -> Result<reqwest::Url, St
 }
 
 async fn subsplease_text(request: reqwest::RequestBuilder) -> Result<String, String> {
-    request
+    let response = request
         .send()
         .await
         .map_err(|error| format!("SubsPlease is unreachable: {error}"))?
         .error_for_status()
-        .map_err(|error| format!("SubsPlease returned an error: {error}"))?
-        .text()
-        .await
-        .map_err(|error| format!("The SubsPlease response could not be read: {error}"))
+        .map_err(|error| format!("SubsPlease returned an error: {error}"))?;
+    let bytes = read_bounded_body(response, SUBSPLEASE_MAX_RESPONSE_BYTES, "SubsPlease").await?;
+    Ok(String::from_utf8_lossy(&bytes).into_owned())
 }
 
-fn first_capture(pattern: &str, html: &str) -> Option<String> {
-    Regex::new(pattern)
-        .ok()?
+fn first_capture(pattern: &LazyLock<Option<Regex>>, html: &str) -> Option<String> {
+    pattern
+        .as_ref()?
         .captures(html)?
         .get(1)
         .map(|value| value.as_str().trim().to_owned())
 }
 
 fn strip_html(value: &str) -> String {
-    Regex::new(r"<[^>]+>")
-        .map(|pattern| pattern.replace_all(value, " ").into_owned())
-        .unwrap_or_else(|_| value.to_owned())
+    let without_tags = match TAG_PATTERN.as_ref() {
+        Some(pattern) => pattern.replace_all(value, " ").into_owned(),
+        None => value.to_owned(),
+    };
+    decode_html_entities(&without_tags)
         .split_whitespace()
         .collect::<Vec<_>>()
         .join(" ")
+}
+
+fn decode_html_entities(value: &str) -> String {
+    let mut decoded = String::with_capacity(value.len());
+    let mut rest = value;
+    while let Some(start) = rest.find('&') {
+        decoded.push_str(&rest[..start]);
+        rest = &rest[start..];
+        let entity = rest
+            .bytes()
+            .skip(1)
+            .take(12)
+            .position(|byte| byte == b';')
+            .and_then(|end| Some((html_entity(&rest[1..=end])?, end + 2)));
+        match entity {
+            Some((character, length)) => {
+                decoded.push(character);
+                rest = &rest[length..];
+            }
+            None => {
+                decoded.push('&');
+                rest = &rest[1..];
+            }
+        }
+    }
+    decoded.push_str(rest);
+    decoded
+}
+
+fn html_entity(name: &str) -> Option<char> {
+    let character = match name {
+        "amp" => '&',
+        "lt" => '<',
+        "gt" => '>',
+        "quot" => '"',
+        "apos" => '\'',
+        "nbsp" => '\u{a0}',
+        _ => {
+            let code = match name.strip_prefix('#')? {
+                hex if hex.starts_with(['x', 'X']) => u32::from_str_radix(&hex[1..], 16).ok()?,
+                decimal => decimal.parse::<u32>().ok()?,
+            };
+            char::from_u32(code)?
+        }
+    };
+    (!character.is_control()).then_some(character)
 }
 
 fn subsplease_show_slug_from_link(href: &str) -> Option<String> {
@@ -133,7 +200,7 @@ fn subsplease_show_slug_from_link(href: &str) -> Option<String> {
 }
 
 fn parse_subsplease_index(html: &str) -> Vec<Value> {
-    let Ok(pattern) = Regex::new(r#"(?s)<a[^>]*href=["']([^"']+)["'][^>]*>(.*?)</a>"#) else {
+    let Some(pattern) = LINK_PATTERN.as_ref() else {
         return Vec::new();
     };
     let mut seen = HashSet::new();
@@ -276,28 +343,16 @@ pub async fn subsplease_show(
     }
 
     let page = subsplease_text(state.http.get(subsplease_show_url(&slug)?)).await?;
-    let sid = first_capture(
-        r#"(?s)id=[\"']show-release-table[\"'][^>]*sid=[\"'](\d+)[\"']"#,
-        &page,
-    )
-    .ok_or_else(|| "The show ID is missing from SubsPlease.".to_string())?;
-    let title = first_capture(
-        r#"(?s)<h1[^>]*class=[\"']entry-title[\"'][^>]*>(.*?)</h1>"#,
-        &page,
-    )
-    .map(|value| strip_html(&value))
-    .unwrap_or_else(|| slug.replace('-', " "));
-    let synopsis = first_capture(
-        r#"(?s)<div[^>]*class=[\"']series-syn[\"'][^>]*>.*?<p>(.*?)</p>"#,
-        &page,
-    )
-    .map(|value| strip_html(&value))
-    .unwrap_or_default();
-    let image_url = first_capture(
-        r#"<img[^>]*class=[\"'][^\"']*img-responsive img-center[^\"']*[\"'][^>]*src=[\"']([^\"']+)[\"']"#,
-        &page,
-    )
-    .unwrap_or_default();
+    let sid = first_capture(&SHOW_ID_PATTERN, &page)
+        .ok_or_else(|| "The show ID is missing from SubsPlease.".to_string())?;
+    let title = first_capture(&TITLE_PATTERN, &page)
+        .map(|value| strip_html(&value))
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| slug.replace('-', " "));
+    let synopsis = first_capture(&SYNOPSIS_PATTERN, &page)
+        .map(|value| strip_html(&value))
+        .unwrap_or_default();
+    let image_url = first_capture(&IMAGE_PATTERN, &page).unwrap_or_default();
     let releases_request =
         subsplease_text(state.http.get(subsplease_releases_url(&timezone, &sid)?));
     let metadata_request = show_metadata(
@@ -387,6 +442,7 @@ mod tests {
         first_capture, metadata_request, normalize_releases, parse_subsplease_index, strip_html,
         subsplease_index_url, subsplease_releases_url, subsplease_schedule_url,
         subsplease_show_url, validate_subsplease_slug, validate_timezone, MetadataRequest,
+        IMAGE_PATTERN, LINK_PATTERN, SHOW_ID_PATTERN, SYNOPSIS_PATTERN, TAG_PATTERN, TITLE_PATTERN,
     };
 
     #[test]
@@ -433,15 +489,44 @@ mod tests {
     }
 
     #[test]
-    fn finds_show_id_in_subsplease_table() {
-        let html = r#"<table id="show-release-table" cellpadding="0" sid="476"></table>"#;
+    fn decodes_html_entities_in_titles() {
         assert_eq!(
-            first_capture(
-                r#"(?s)id=[\"']show-release-table[\"'][^>]*sid=[\"'](\d+)[\"']"#,
-                html,
-            )
-            .as_deref(),
+            strip_html("Frieren &#8211; Beyond Journey&#8217;s End &amp; More"),
+            "Frieren \u{2013} Beyond Journey\u{2019}s End & More"
+        );
+        assert_eq!(
+            strip_html("&quot;Oshi&quot; no Ko&#039;s &#x4F;&nbsp;Show &lt;b&gt;"),
+            "\"Oshi\" no Ko's O Show <b>"
+        );
+        assert_eq!(
+            strip_html("Fish &chips &#0; &#xZZ; &unknown;"),
+            "Fish &chips &#0; &#xZZ; &unknown;"
+        );
+    }
+
+    #[test]
+    fn finds_show_id_in_subsplease_table() {
+        for pattern in [
+            &SHOW_ID_PATTERN,
+            &TITLE_PATTERN,
+            &SYNOPSIS_PATTERN,
+            &IMAGE_PATTERN,
+            &LINK_PATTERN,
+            &TAG_PATTERN,
+        ] {
+            assert!(pattern.is_some());
+        }
+        let html = r#"<table id="show-release-table" cellpadding="0" sid="476"></table>
+            <h1 class="entry-title">Mushoku Tensei &#8211; Jobless</h1>"#;
+        assert_eq!(
+            first_capture(&SHOW_ID_PATTERN, html).as_deref(),
             Some("476")
+        );
+        assert_eq!(
+            first_capture(&TITLE_PATTERN, html)
+                .map(|title| strip_html(&title))
+                .as_deref(),
+            Some("Mushoku Tensei \u{2013} Jobless")
         );
     }
 

@@ -1,4 +1,5 @@
 import { normalizeSeasonResponse, type CatalogCacheOptions, type CatalogStorage } from '$lib/catalog/cache';
+import { isRecord } from '$lib/catalog/guards';
 import {
   catalogRequestKey, normalizeCatalogResponse, validCatalogRequest,
   type CatalogProviderResponse, type CatalogRequest
@@ -6,7 +7,8 @@ import {
 
 const CACHE_KEY = 'streamsplease.catalog-results.v1';
 const MAX_ENTRIES = 48;
-const MAX_CACHE_BYTES = 4_000_000;
+const LEGACY_SEASON_KEY = 'streamsplease.season-cache.v1';
+const MAX_CACHE_BYTES = 1_500_000;
 
 export interface SavedCatalogResult {
   savedAt: number;
@@ -20,10 +22,6 @@ interface StoredResult extends SavedCatalogResult {
 function browserStorage(): CatalogStorage | undefined {
   try { return typeof window === 'undefined' ? undefined : window.localStorage; }
   catch { return undefined; }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 export function createCatalogResultCache(options: CatalogCacheOptions = {}) {
@@ -64,26 +62,48 @@ export function createCatalogResultCache(options: CatalogCacheOptions = {}) {
     }
   }
 
-  loadStored();
-
-  function legacySeason(provider: string, request: CatalogRequest): SavedCatalogResult | undefined {
-    if (provider !== 'anilist' || request.kind !== 'season') return undefined;
-    const stored = parse(`streamsplease.season-cache.v1${suffix}`);
-    if (!isRecord(stored) || !isRecord(stored.entries)) return undefined;
-    const value = stored.entries[`${request.season}:${request.year}`];
-    if (!isRecord(value) || !timestamp(value.savedAt)) return undefined;
-    const season = normalizeSeasonResponse(value.data);
-    if (!season || season.season !== request.season || season.year !== request.year) return undefined;
-    return {
-      savedAt: value.savedAt,
-      data: { provider, items: season.shows, season: season.season, year: season.year, warnings: [] }
-    };
+  function persist(): boolean {
+    const retained = [...memory.entries()].sort(([, a], [, b]) => b.savedAt - a.savedAt).slice(0, MAX_ENTRIES);
+    let serialized = JSON.stringify(retained.map(([, entry]) => entry));
+    while (serialized.length > MAX_CACHE_BYTES && retained.length) {
+      retained.pop();
+      serialized = JSON.stringify(retained.map(([, entry]) => entry));
+    }
+    memory = new Map(retained);
+    try { storage?.setItem(key, serialized); return true; } catch { return false; }
   }
+
+  function migrateLegacySeasons(): void {
+    const legacyKey = `${LEGACY_SEASON_KEY}${suffix}`;
+    const stored = parse(legacyKey);
+    if (isRecord(stored) && isRecord(stored.entries)) {
+      for (const [name, value] of Object.entries(stored.entries)) {
+        if (!isRecord(value) || !timestamp(value.savedAt)) continue;
+        const season = normalizeSeasonResponse(value.data);
+        if (!season || name !== `${season.season}:${season.year}`) continue;
+        const request: CatalogRequest = { kind: 'season', season: season.season, year: season.year };
+        const entry = entryKey('anilist', request);
+        if (memory.has(entry)) continue;
+        memory.set(entry, {
+          savedAt: value.savedAt,
+          data: { provider: 'anilist', items: season.shows, season: season.season, year: season.year, warnings: [] },
+          request
+        });
+      }
+    }
+    if (!storage?.removeItem || storage.getItem(legacyKey) === null) return;
+    if (persist()) {
+      try { storage.removeItem(legacyKey); } catch {}
+    }
+  }
+
+  loadStored();
+  migrateLegacySeasons();
 
   return {
     load(provider: string, request: CatalogRequest, maxAge: number): SavedCatalogResult | undefined {
       if (!validCatalogRequest(request) || !Number.isFinite(maxAge) || maxAge < 0) return undefined;
-      const value = memory.get(entryKey(provider, request)) ?? legacySeason(provider, request);
+      const value = memory.get(entryKey(provider, request));
       if (!value || now() < value.savedAt || now() - value.savedAt > maxAge) return undefined;
       return { savedAt: value.savedAt, data: structuredClone(value.data) };
     },
@@ -96,14 +116,7 @@ export function createCatalogResultCache(options: CatalogCacheOptions = {}) {
         data: structuredClone(data),
         request: request.kind === 'recommendations' ? { ...request, ids: [...request.ids] } : { ...request }
       });
-      const retained = [...memory.entries()].sort(([, a], [, b]) => b.savedAt - a.savedAt).slice(0, MAX_ENTRIES);
-      let serialized = JSON.stringify(retained.map(([, entry]) => entry));
-      while (serialized.length > MAX_CACHE_BYTES && retained.length) {
-        retained.pop();
-        serialized = JSON.stringify(retained.map(([, entry]) => entry));
-      }
-      memory = new Map(retained);
-      try { storage?.setItem(key, serialized); } catch {}
+      persist();
       return { savedAt, data };
     }
   };

@@ -29,11 +29,17 @@
   import { isTauri } from '$lib/backend';
   import {
     currentSeason,
+    decodeEntities,
+    errorMessage,
     loadProviderMappings,
-    preferredTitle,
+    metadataLabel,
+    posterUrl,
     saveProviderMapping,
+    seasonLabel,
+    seasonOrdinal,
     shiftSeason
   } from '$lib/catalog';
+  import { trailerLinks } from '$lib/catalog/media';
   import { createSeasonCatalog } from '$lib/catalog/season.svelte';
   import {
     catalogSourceLabel,
@@ -41,6 +47,14 @@
     type CatalogSearchResponse
   } from '$lib/catalog/providers';
   import CatalogStatusBadge from '$lib/components/catalog/CatalogStatusBadge.svelte';
+  import {
+    candidateKey,
+    candidateTiming,
+    toAiringCandidate,
+    toRecommendationCandidate,
+    type DiscoveryCandidate,
+    type DiscoveryMode
+  } from '$lib/discovery/airing';
   import { createRecommendationDiscovery } from '$lib/discovery/recommendations.svelte';
   import {
     filterReviewedRecommendations,
@@ -64,20 +78,7 @@
     type TrailerPlaybackRequest
   } from '$lib/types';
 
-  const SUBSPLEASE_ORIGIN = 'https://subsplease.org';
   const TEXT_REVEAL_DURATION_MS = 360;
-  const SEASON_ORDER: AnimeSeason[] = ['WINTER', 'SPRING', 'SUMMER', 'FALL'];
-
-  type DiscoveryMode = 'airing' | 'recommendations';
-
-  interface DiscoveryCandidate {
-    mode: DiscoveryMode;
-    anime: CatalogMedia;
-    show: SubsPleaseScheduleShow;
-    season?: AnimeSeason;
-    year?: number;
-    day?: DayName;
-  }
 
   let {
     loadSeason,
@@ -164,29 +165,9 @@
       seasonOrdinal(furthestSeason.season, furthestSeason.year)
   );
   let allAiringCandidates = $derived.by((): DiscoveryCandidate[] =>
-    seasonCatalog.seasonMatches.flatMap((match): DiscoveryCandidate[] => {
-      const anime = match.anime;
-      if (hasSeriesPrequel(anime) || isObviousSequelTitle(preferredTitle(anime))) return [];
-      return [{
-        mode: 'airing',
-        anime,
-        show: {
-          title: preferredTitle(anime),
-          page: match.provider.page,
-          image_url: posterUrl(
-            anime.coverImage?.extraLarge ??
-              anime.coverImage?.large ??
-              match.schedule?.image_url ??
-              ''
-          ),
-          time: match.schedule?.time ?? '',
-          anilist_id: anime.id,
-          subsplease_id: match.schedule?.subsplease_id
-        },
-        season: selectedSeason,
-        year: selectedYear,
-        day: match.day
-      }];
+    seasonCatalog.seasonMatches.flatMap((match) => {
+      const candidate = toAiringCandidate(match, selectedSeason, selectedYear);
+      return candidate ? [candidate] : [];
     })
   );
   let eligibleAiringCandidates = $derived(
@@ -209,36 +190,10 @@
   let recommendationMatches = $derived.by(() =>
     filterReviewedRecommendations(availableRecommendationMatches, libraryEntries)
   );
-  let eligibleRecommendationCandidates = $derived.by((): DiscoveryCandidate[] =>
-    availableRecommendationMatches.map(({ anime, provider }) => ({
-      mode: 'recommendations',
-      anime,
-      show: {
-        title: preferredTitle(anime),
-        page: provider.page,
-        image_url: anime.coverImage?.extraLarge ?? anime.coverImage?.large ?? '',
-        time: '',
-        anilist_id: anime.id
-      },
-      season: anime.season,
-      year: anime.seasonYear
-    }))
+  let eligibleRecommendationCandidates = $derived(
+    availableRecommendationMatches.map(toRecommendationCandidate)
   );
-  let recommendationCandidates = $derived.by((): DiscoveryCandidate[] =>
-    recommendationMatches.map(({ anime, provider }) => ({
-      mode: 'recommendations',
-      anime,
-      show: {
-        title: preferredTitle(anime),
-        page: provider.page,
-        image_url: anime.coverImage?.extraLarge ?? anime.coverImage?.large ?? '',
-        time: '',
-        anilist_id: anime.id
-      },
-      season: anime.season,
-      year: anime.seasonYear
-    }))
-  );
+  let recommendationCandidates = $derived(recommendationMatches.map(toRecommendationCandidate));
   let eligibleCandidates = $derived(
     discoveryMode === 'airing' ? eligibleAiringCandidates : eligibleRecommendationCandidates
   );
@@ -294,23 +249,10 @@
   let progressRevealReady = $derived(
     !discoveryLoading && !discoveryError && eligibleCandidates.length > 0
   );
-  let baseEmbedUrl = $derived.by(() => {
-    const trailer = details?.trailer;
-    if (!trailer?.id) return '';
-    const site = trailer.site.toLowerCase();
-    if (site === 'youtube') {
-      const parameters = new URLSearchParams({ rel: '0', playsinline: '1' });
-      if (typeof window !== 'undefined' && /^https?:\/\//.test(window.location.origin)) {
-        parameters.set('origin', window.location.origin);
-        parameters.set('widget_referrer', window.location.origin);
-      }
-      return `https://www.youtube.com/embed/${encodeURIComponent(trailer.id)}?${parameters}`;
-    }
-    if (site === 'dailymotion') {
-      return `https://www.dailymotion.com/embed/video/${encodeURIComponent(trailer.id)}`;
-    }
-    return '';
-  });
+  let trailerPlayback = $derived(
+    trailerLinks(details?.trailer, typeof window === 'undefined' ? '' : window.location.origin)
+  );
+  let baseEmbedUrl = $derived(trailerPlayback.embedUrl);
   let embedUrl = $derived(
     baseEmbedUrl && autoplayedCandidateKey === presentedCandidateKey
       ? `${baseEmbedUrl}${baseEmbedUrl.includes('?') ? '&' : '?'}autoplay=1&mute=1`
@@ -319,16 +261,7 @@
   let trailerUrl = $derived.by(() => {
     if (!details) return '';
     if (isTauri()) return youtubeTrailerSearchPlaybackUrl(details.title);
-    const trailer = details.trailer;
-    if (!trailer?.id) return '';
-    const site = trailer.site.toLowerCase();
-    if (site === 'youtube') {
-      return `https://www.youtube.com/watch?v=${encodeURIComponent(trailer.id)}`;
-    }
-    if (site === 'dailymotion') {
-      return `https://www.dailymotion.com/video/${encodeURIComponent(trailer.id)}`;
-    }
-    return '';
+    return trailerPlayback.watchUrl;
   });
   let trailerThumbnail = $derived.by(() => {
     if (details?.trailer?.thumbnail) return details.trailer.thumbnail;
@@ -412,7 +345,7 @@
       })
       .catch((reason) => {
         if (!cancelled && currentCandidateKey === key) {
-          detailsError = reason instanceof Error ? reason.message : String(reason);
+          detailsError = errorMessage(reason);
           failedCandidateKey = key;
         }
       })
@@ -484,12 +417,6 @@
       });
   });
 
-  function candidateKey(candidate: DiscoveryCandidate | null | undefined): string {
-    return candidate
-      ? `${candidate.mode}:${candidate.anime.id}:${candidate.show.page}`
-      : '';
-  }
-
   async function requestCandidateDetails(
     candidate: DiscoveryCandidate
   ): Promise<SubsPleaseShowResponse> {
@@ -551,62 +478,6 @@
     seasonCatalog.selectSeason(next.season, next.year);
   }
 
-  function seasonOrdinal(season: AnimeSeason, year: number): number {
-    return year * SEASON_ORDER.length + SEASON_ORDER.indexOf(season);
-  }
-
-  function seasonLabel(season: AnimeSeason): string {
-    return `${season[0]}${season.slice(1).toLowerCase()}`;
-  }
-
-  function hasSeriesPrequel(show: AniListSeasonShow): boolean {
-    return (show.relations?.edges ?? []).some(
-      (edge) =>
-        edge.relationType === 'PREQUEL' &&
-        edge.node?.type === 'ANIME' &&
-        ['TV', 'TV_SHORT', 'ONA'].includes(edge.node.format ?? '')
-    );
-  }
-
-  function candidateTiming(candidate: DiscoveryCandidate): string {
-    if (candidate.day && candidate.show.time) {
-      return `${candidate.day} · ${candidate.show.time}`;
-    }
-    const { year, month, day } = candidate.anime.startDate ?? {};
-    if (year && month && day) {
-      return new Intl.DateTimeFormat('en-US', {
-        day: 'numeric',
-        month: 'short',
-        year: 'numeric'
-      }).format(new Date(year, month - 1, day));
-    }
-    if (candidate.season && candidate.year) {
-      return `${seasonLabel(candidate.season)} ${candidate.year}`;
-    }
-    return 'Release date unavailable';
-  }
-
-  function isObviousSequelTitle(value: string): boolean {
-    const title = decodeEntities(value).toLowerCase();
-    const numberedMarkers = [
-      /\bs\s*(\d+)\b/g,
-      /\bseason\s*(\d+)\b/g,
-      /\bpart\s*(\d+)\b/g,
-      /\bcour\s*(\d+)\b/g,
-      /\b(\d+)(?:nd|rd|th)\s+(?:season|part|cour)\b/g
-    ];
-    if (
-      numberedMarkers.some((pattern) =>
-        [...title.matchAll(pattern)].some((match) => Number(match[1]) >= 2)
-      )
-    ) {
-      return true;
-    }
-    return /\b(?:second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth)\s+(?:season|part|cour)\b/.test(
-      title
-    );
-  }
-
   async function decide(verdict: DiscoveryVerdict) {
     const candidate = presentedCandidate;
     const selectedDetails = details;
@@ -624,26 +495,6 @@
     }
   }
 
-  function posterUrl(path: string): string {
-    if (!path) return '';
-    return path.startsWith('http')
-      ? path
-      : `${SUBSPLEASE_ORIGIN}${path.startsWith('/') ? '' : '/'}${path}`;
-  }
-
-  function decodeEntities(value: string): string {
-    if (!value || typeof document === 'undefined') return value;
-    const textarea = document.createElement('textarea');
-    textarea.innerHTML = value;
-    return textarea.value;
-  }
-
-  function metadataLabel(value: string): string {
-    return value
-      .toLowerCase()
-      .replaceAll('_', ' ')
-      .replace(/(^|\s)\S/g, (letter) => letter.toUpperCase());
-  }
 </script>
 
 <main

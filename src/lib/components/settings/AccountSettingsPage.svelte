@@ -4,6 +4,7 @@
   import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
+  import { errorMessage } from '$lib/catalog/presentation';
   import { createLibraryExport, parseLibraryExport } from '$lib/library';
   import { readLibraryFile, writeLibraryFile } from '$lib/library-transfer';
   import {
@@ -33,7 +34,7 @@
     libraryEntries: LibraryEntry[];
     onQualityChange: (quality: PlaybackQuality) => void;
     onSubtitleLanguageChange: (language: SubtitleLanguage) => void;
-    onLibraryImport: (entries: LibraryBackupEntry[]) => Promise<void>;
+    onLibraryImport: (entries: LibraryBackupEntry[]) => Promise<{ failed: string[] }>;
   } = $props();
 
   type TransferStatus = {
@@ -94,10 +95,6 @@
       : 'Official MyAnimeList requests are disabled on this device.';
   }
 
-  function errorMessage(reason: unknown): string {
-    return reason instanceof Error ? reason.message : String(reason);
-  }
-
   function showCount(count: number): string {
     return `${count} ${count === 1 ? 'show' : 'shows'}`;
   }
@@ -131,11 +128,13 @@
       const source = await readLibraryFile();
       if (source === null) return;
       const entries = parseLibraryExport(source);
-      await onLibraryImport(entries);
+      const { failed } = await onLibraryImport(entries);
       transferStatus = {
         kind: 'success',
         title: 'Library imported',
-        description: `Refreshed and merged ${showCount(entries.length)} into your library.`
+        description: failed.length
+          ? `Merged ${showCount(entries.length)} into your library. ${showCount(failed.length)} could not be refreshed and kept their saved details: ${failed.join(', ')}.`
+          : `Refreshed and merged ${showCount(entries.length)} into your library.`
       };
     } catch (reason) {
       transferStatus = {

@@ -2,11 +2,14 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     io::{Read, Write},
     path::{Path, PathBuf},
+    sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::Mutex;
+
+use super::http::read_bounded_body;
 
 const FRIBB_IDENTITY_URL: &str = "https://raw.githubusercontent.com/Fribb/anime-lists/master/anime-offline-database-reduced.json";
 const SOURCE_CACHE_FILE: &str = "identity-fribb-v1.json";
@@ -55,6 +58,8 @@ struct ResolverState {
     cache_dir: Option<PathBuf>,
     source: Option<StoredSource>,
     learned: BTreeSet<IdentityPair>,
+    learned_unsaved: bool,
+    index: Option<Arc<IdentityIndex>>,
     files_loaded: bool,
     source_retry_at: Option<Instant>,
     source_warnings: Vec<String>,
@@ -188,21 +193,28 @@ impl IdentityResolver {
         &self,
         cache_dir: &Path,
         required_providers: &HashSet<String>,
-    ) -> Result<(IdentityIndex, Vec<String>), String> {
+    ) -> Result<(Arc<IdentityIndex>, Vec<String>), String> {
         let mut state = self.state.lock().await;
         self.load_files(&mut state, cache_dir).await?;
         let mut warnings = state.load_warnings.clone();
         self.refresh_source_if_needed(&mut state, cache_dir, required_providers, &mut warnings)
             .await;
 
-        let mut pairs = state
-            .source
-            .as_ref()
-            .map(|source| pairs_from_entries(&source.entries))
-            .transpose()?
-            .unwrap_or_default();
-        pairs.extend(state.learned.iter().cloned());
-        let index = build_index(pairs)?;
+        let index = match &state.index {
+            Some(index) => index.clone(),
+            None => {
+                let mut pairs = state
+                    .source
+                    .as_ref()
+                    .map(|source| pairs_from_entries(&source.entries))
+                    .transpose()?
+                    .unwrap_or_default();
+                pairs.extend(state.learned.iter().cloned());
+                let index = Arc::new(build_index(pairs)?);
+                state.index = Some(index.clone());
+                index
+            }
+        };
         if index.conflicts > 0 {
             warnings.push(format!(
                 "The identity database contained {} conflicting mapping pair(s); those mappings were excluded.",
@@ -237,12 +249,18 @@ impl IdentityResolver {
                 provider_id: ProviderId::mal(*mal_id),
             })
             .collect::<BTreeSet<_>>();
-        if additions.difference(&state.learned).count()
-            > MAX_LEARNED_ENTRIES.saturating_sub(state.learned.len())
-        {
+        let new_count = additions.difference(&state.learned).count();
+        if new_count == 0 && !state.learned_unsaved {
+            return Ok(());
+        }
+        if new_count > MAX_LEARNED_ENTRIES.saturating_sub(state.learned.len()) {
             return Err("The learned identity cache reached its safety limit.".into());
         }
-        state.learned.extend(additions);
+        if new_count > 0 {
+            state.learned.extend(additions);
+            state.learned_unsaved = true;
+            state.index = None;
+        }
 
         let stored = StoredLearned {
             version: CACHE_VERSION,
@@ -254,7 +272,9 @@ impl IdentityResolver {
         if bytes.len() > MAX_LEARNED_CACHE_BYTES {
             return Err("The learned identity cache is too large.".into());
         }
-        write_cache_file(cache_dir.join(LEARNED_CACHE_FILE), bytes).await
+        write_cache_file(cache_dir.join(LEARNED_CACHE_FILE), bytes).await?;
+        state.learned_unsaved = false;
+        Ok(())
     }
 
     async fn load_files(&self, state: &mut ResolverState, cache_dir: &Path) -> Result<(), String> {
@@ -295,6 +315,7 @@ impl IdentityResolver {
         }
 
         state.files_loaded = true;
+        state.index = None;
         Ok(())
     }
 
@@ -336,6 +357,7 @@ impl IdentityResolver {
                             ));
                         }
                         state.source = Some(source);
+                        state.index = None;
                     }
                     Ok(_) => refresh_warnings.push(
                         "The refreshed identity database exceeded its cache size limit.".into(),
@@ -368,7 +390,8 @@ impl IdentityResolver {
         if !status.is_success() {
             return Err(format!("Fribb returned HTTP {status}"));
         }
-        let bytes = bounded_response_bytes(response, MAX_SOURCE_RESPONSE_BYTES).await?;
+        let bytes =
+            read_bounded_body(response, MAX_SOURCE_RESPONSE_BYTES, "identity database").await?;
         let pairs = parse_fribb_source(&bytes)?;
         entries_from_pairs(pairs)
     }
@@ -566,35 +589,6 @@ fn build_index(pairs: Vec<IdentityPair>) -> Result<IdentityIndex, String> {
     })
 }
 
-async fn bounded_response_bytes(
-    mut response: reqwest::Response,
-    max_bytes: usize,
-) -> Result<Vec<u8>, String> {
-    if response
-        .content_length()
-        .is_some_and(|length| length > max_bytes as u64)
-    {
-        return Err("The identity database response is too large.".into());
-    }
-    let mut bytes = Vec::new();
-    while let Some(chunk) = response
-        .chunk()
-        .await
-        .map_err(|error| format!("The identity database response could not be read: {error}"))?
-    {
-        append_bounded(&mut bytes, &chunk, max_bytes)?;
-    }
-    Ok(bytes)
-}
-
-fn append_bounded(target: &mut Vec<u8>, chunk: &[u8], max_bytes: usize) -> Result<(), String> {
-    if chunk.len() > max_bytes.saturating_sub(target.len()) {
-        return Err("The identity database response is too large.".into());
-    }
-    target.extend_from_slice(chunk);
-    Ok(())
-}
-
 async fn read_cache_file(path: PathBuf, max_bytes: usize) -> Result<Option<Vec<u8>>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let metadata = match std::fs::metadata(&path) {
@@ -655,9 +649,10 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        append_bounded, build_index, parse_fribb_source, source_covers_providers, IdentityPair,
-        ProviderId, StoredSource, CACHE_VERSION, MAX_SOURCE_RESPONSE_BYTES,
+        build_index, parse_fribb_source, source_covers_providers, IdentityPair, ProviderId,
+        StoredSource, CACHE_VERSION, MAX_SOURCE_RESPONSE_BYTES,
     };
+    use crate::catalog::http::append_bounded;
 
     fn pair(anilist_id: i64, mal_id: i64) -> IdentityPair {
         IdentityPair {
@@ -867,8 +862,62 @@ mod tests {
     #[test]
     fn bounds_identity_response_assembly() {
         let mut bytes = vec![0; 4];
-        append_bounded(&mut bytes, &[1, 2], 6).unwrap();
-        assert!(append_bounded(&mut bytes, &[3], 6).is_err());
+        append_bounded(&mut bytes, &[1, 2], 6, "identity database").unwrap();
+        assert_eq!(
+            append_bounded(&mut bytes, &[3], 6, "identity database").unwrap_err(),
+            "The identity database response is too large."
+        );
         assert_eq!(MAX_SOURCE_RESPONSE_BYTES, 20 * 1024 * 1024);
+    }
+
+    #[tokio::test]
+    async fn reuses_the_built_index_and_skips_redundant_learned_writes() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = super::StoredSource {
+            version: super::CACHE_VERSION,
+            fetched_at: super::unix_timestamp(),
+            entries: super::entries_from_pairs([pair(1, 10)]).unwrap(),
+        };
+        super::write_cache_file(
+            directory.path().join(super::SOURCE_CACHE_FILE),
+            serde_json::to_vec(&source).unwrap(),
+        )
+        .await
+        .unwrap();
+        let resolver = super::IdentityResolver::new(reqwest::Client::new());
+        let providers = ["mal".to_string()].into_iter().collect();
+        let (first, _) = resolver
+            .resolve_index(directory.path(), &providers)
+            .await
+            .unwrap();
+        let (again, _) = resolver
+            .resolve_index(directory.path(), &providers)
+            .await
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&first, &again));
+
+        resolver
+            .learn_anilist_mappings(&[(2, 20)], directory.path())
+            .await
+            .unwrap();
+        let learned_path = directory.path().join(super::LEARNED_CACHE_FILE);
+        let (learned, _) = resolver
+            .resolve_index(directory.path(), &providers)
+            .await
+            .unwrap();
+        assert!(!std::sync::Arc::ptr_eq(&first, &learned));
+        assert_eq!(learned.by_provider_id.get(&ProviderId::mal(20)), Some(&2));
+
+        std::fs::remove_file(&learned_path).unwrap();
+        resolver
+            .learn_anilist_mappings(&[(2, 20)], directory.path())
+            .await
+            .unwrap();
+        assert!(!learned_path.exists());
+        let (unchanged, _) = resolver
+            .resolve_index(directory.path(), &providers)
+            .await
+            .unwrap();
+        assert!(std::sync::Arc::ptr_eq(&learned, &unchanged));
     }
 }

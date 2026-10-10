@@ -9,6 +9,11 @@ import {
 } from '$lib/types';
 
 const STORAGE_KEY = 'streamsplease.library.v2';
+export const REGENERABLE_CACHE_KEYS = [
+  'streamsplease.catalog-results.v1',
+  'streamsplease.season-cache.v1',
+  'streamsplease.provider-index.v1'
+];
 const EXPORT_FORMAT = 'streamsplease-library';
 const EXPORT_VERSION = 1;
 const MAX_LIBRARY_ENTRIES = 10_000;
@@ -153,10 +158,40 @@ function normalizeLibraryEntry(value: unknown, now: string): LibraryEntry | unde
 function normalizeLibraryEntries(value: unknown): LibraryEntry[] {
   if (!Array.isArray(value)) return [];
   const now = new Date().toISOString();
-  return value.flatMap((entry) => {
+  const entries = value.flatMap((entry) => {
     const normalized = normalizeLibraryEntry(entry, now);
     return normalized ? [normalized] : [];
   });
+  return collapseLibraryDuplicates(entries);
+}
+
+function collapseLibraryDuplicates(entries: LibraryEntry[]): LibraryEntry[] {
+  const result: LibraryEntry[] = [];
+  for (const entry of entries) {
+    const matches = result.flatMap((existing, index) =>
+      existing.slug === entry.slug ||
+      (entry.anilistId !== undefined && existing.anilistId === entry.anilistId)
+        ? [index]
+        : []
+    );
+    if (matches.length === 0) {
+      result.push(entry);
+      continue;
+    }
+    const [first, ...rest] = matches;
+    const identity = result[first];
+    let merged = mergeLibraryEntry(identity, entry);
+    for (const index of rest) merged = mergeLibraryEntry(merged, result[index]);
+    result[first] = {
+      ...merged,
+      slug: identity.slug,
+      anilistId: identity.anilistId ?? merged.anilistId,
+      metadataId: identity.metadataId ?? merged.metadataId,
+      subspleaseId: identity.subspleaseId ?? merged.subspleaseId
+    };
+    for (const index of [...rest].reverse()) result.splice(index, 1);
+  }
+  return result;
 }
 
 function mergeLibraryEntry(current: LibraryEntry, imported: LibraryEntry): LibraryEntry {
@@ -201,9 +236,54 @@ export function loadLibrary(): LibraryEntry[] {
   }
 }
 
-export function saveLibrary(entries: LibraryEntry[]): void {
-  if (typeof window === 'undefined') return;
-  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(entries));
+function isQuotaError(reason: unknown): boolean {
+  if (!isRecord(reason) && !(reason instanceof Error)) return false;
+  const { name, code } = reason as { name?: unknown; code?: unknown };
+  return (
+    name === 'QuotaExceededError' ||
+    name === 'NS_ERROR_DOM_QUOTA_REACHED' ||
+    code === 22 ||
+    code === 1014
+  );
+}
+
+function clearRegenerableCaches(storage: Storage): void {
+  const prefixes = REGENERABLE_CACHE_KEYS;
+  const keys = new Set(prefixes);
+  try {
+    for (let index = 0; index < storage.length; index += 1) {
+      const key = storage.key(index);
+      if (key && prefixes.some((prefix) => key.startsWith(prefix))) keys.add(key);
+    }
+  } catch {
+    return;
+  }
+  for (const key of keys) {
+    try {
+      storage.removeItem(key);
+    } catch {
+      continue;
+    }
+  }
+}
+
+export function saveLibrary(entries: LibraryEntry[]): boolean {
+  if (typeof window === 'undefined') return false;
+  try {
+    const storage = window.localStorage;
+    const serialized = JSON.stringify(entries);
+    try {
+      storage.setItem(STORAGE_KEY, serialized);
+      return true;
+    } catch (reason) {
+      if (!isQuotaError(reason)) return false;
+      clearRegenerableCaches(storage);
+      storage.setItem(STORAGE_KEY, serialized);
+      return true;
+    }
+  } catch {
+    return false;
+  }
 }
 
 export function createLibraryExport(entries: LibraryEntry[]): string {
@@ -338,22 +418,33 @@ export function mergeLibraryEntries(
   return merged;
 }
 
+export function findLibraryEntryIndex(
+  entries: readonly LibraryEntry[],
+  anilistId?: number,
+  subspleaseSlug?: string
+): number {
+  if (anilistId) {
+    const index = entries.findIndex((entry) => entry.anilistId === anilistId);
+    if (index >= 0) return index;
+  }
+  return subspleaseSlug ? entries.findIndex((entry) => entry.slug === subspleaseSlug) : -1;
+}
+
 export function libraryEntryMatches(
   entry: LibraryEntry,
   anilistId?: number,
   subspleaseSlug?: string
 ): boolean {
-  if (anilistId && entry.anilistId) return entry.anilistId === anilistId;
-  return Boolean(subspleaseSlug && entry.slug === subspleaseSlug);
+  return findLibraryEntryIndex([entry], anilistId, subspleaseSlug) === 0;
 }
 
 export function entryFromShow(
   details: SubsPleaseShowResponse,
   scheduleShow: SubsPleaseScheduleShow,
   day?: DayName,
-  previous?: LibraryEntry
+  previous?: LibraryEntry,
+  now = new Date().toISOString()
 ): LibraryEntry {
-  const now = new Date().toISOString();
   return {
     anilistId: details.metadata_id ?? scheduleShow.anilist_id ?? previous?.anilistId,
     slug: details.slug || scheduleShow.page,
@@ -397,15 +488,16 @@ export function entryFromDiscovery(
   scheduleShow: SubsPleaseScheduleShow,
   verdict: DiscoveryVerdict,
   day?: DayName,
-  previous?: LibraryEntry
+  previous?: LibraryEntry,
+  now = new Date().toISOString()
 ): LibraryEntry {
-  const entry = entryFromShow(details, scheduleShow, day, previous);
+  const entry = entryFromShow(details, scheduleShow, day, previous, now);
   return {
     ...entry,
     following: verdict === 'love' || previous?.following === true,
     libraryDismissed: verdict === 'love' ? false : previous?.libraryDismissed,
     discoveryVerdict: verdict,
-    checkedAt: new Date().toISOString()
+    checkedAt: now
   };
 }
 
@@ -417,4 +509,191 @@ export function watchedCount(entry: LibraryEntry): number {
 export function nextUnwatchedEpisode(entry: LibraryEntry): string | undefined {
   const watched = new Set(entry.watchedEpisodes);
   return sortEpisodeNumbers(entry.availableEpisodes).find((episode) => !watched.has(episode));
+}
+
+function deepEqual(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return (
+      Array.isArray(left) &&
+      Array.isArray(right) &&
+      left.length === right.length &&
+      left.every((item, index) => deepEqual(item, right[index]))
+    );
+  }
+  if (isRecord(left) && isRecord(right)) {
+    const keys = new Set([...Object.keys(left), ...Object.keys(right)]);
+    return [...keys].every((key) => deepEqual(left[key], right[key]));
+  }
+  return false;
+}
+
+export interface LibraryIdentity {
+  anilistId?: number;
+  slug: string;
+}
+
+function showIdentity(
+  details: SubsPleaseShowResponse,
+  show: SubsPleaseScheduleShow
+): LibraryIdentity {
+  return {
+    anilistId: details.metadata_id ?? show.anilist_id,
+    slug: details.slug || show.page
+  };
+}
+
+function keepIdentity(
+  entries: LibraryEntry[],
+  index: number,
+  next: LibraryEntry
+): LibraryEntry {
+  const previous = entries[index];
+  const slugTaken = entries.some(
+    (entry, entryIndex) => entryIndex !== index && entry.slug === next.slug
+  );
+  const idTaken =
+    next.anilistId !== undefined &&
+    entries.some(
+      (entry, entryIndex) => entryIndex !== index && entry.anilistId === next.anilistId
+    );
+  return {
+    ...next,
+    slug: slugTaken ? previous.slug : next.slug,
+    anilistId: previous.anilistId ?? (idTaken ? undefined : next.anilistId),
+    metadataId: previous.metadataId ?? (idTaken ? undefined : next.metadataId)
+  };
+}
+
+function replaceAt(entries: LibraryEntry[], index: number, next: LibraryEntry): LibraryEntry[] {
+  const result = [...entries];
+  result[index] = next;
+  return result;
+}
+
+export function syncLibraryShow(
+  entries: LibraryEntry[],
+  details: SubsPleaseShowResponse,
+  show: SubsPleaseScheduleShow,
+  day?: DayName,
+  now = new Date().toISOString()
+): LibraryEntry[] {
+  const identity = showIdentity(details, show);
+  const index = findLibraryEntryIndex(entries, identity.anilistId, identity.slug);
+  if (index < 0) return entries;
+  const previous = entries[index];
+  const next = {
+    ...keepIdentity(entries, index, entryFromShow(details, show, day, previous, now)),
+    updatedAt: previous.updatedAt
+  };
+  return deepEqual(previous, next) ? entries : replaceAt(entries, index, next);
+}
+
+export function toggleLibraryShow(
+  entries: LibraryEntry[],
+  details: SubsPleaseShowResponse,
+  show: SubsPleaseScheduleShow,
+  day?: DayName,
+  now = new Date().toISOString()
+): LibraryEntry[] {
+  const identity = showIdentity(details, show);
+  const index = findLibraryEntryIndex(entries, identity.anilistId, identity.slug);
+  if (index < 0) return [...entries, entryFromShow(details, show, day, undefined, now)];
+  const existing = entries[index];
+  if (existing.following) {
+    if (!existing.discoveryVerdict) return entries.filter((_, entryIndex) => entryIndex !== index);
+    return replaceAt(entries, index, {
+      ...existing,
+      following: false,
+      libraryDismissed: true,
+      updatedAt: now
+    });
+  }
+  return replaceAt(entries, index, {
+    ...keepIdentity(entries, index, entryFromShow(details, show, day, existing, now)),
+    following: true,
+    libraryDismissed: false,
+    updatedAt: now
+  });
+}
+
+export function applyDiscoveryVerdict(
+  entries: LibraryEntry[],
+  details: SubsPleaseShowResponse,
+  show: SubsPleaseScheduleShow,
+  day: DayName | undefined,
+  verdict?: DiscoveryVerdict,
+  now = new Date().toISOString()
+): LibraryEntry[] {
+  const identity = showIdentity(details, show);
+  const index = findLibraryEntryIndex(entries, identity.anilistId, identity.slug);
+  if (!verdict) {
+    if (index < 0) return entries;
+    const existing = entries[index];
+    if (!existing.following) return entries.filter((_, entryIndex) => entryIndex !== index);
+    return replaceAt(entries, index, {
+      ...existing,
+      discoveryVerdict: undefined,
+      checkedAt: undefined,
+      updatedAt: now
+    });
+  }
+  if (index < 0) {
+    return [...entries, entryFromDiscovery(details, show, verdict, day, undefined, now)];
+  }
+  const next = keepIdentity(
+    entries,
+    index,
+    entryFromDiscovery(details, show, verdict, day, entries[index], now)
+  );
+  return replaceAt(entries, index, { ...next, updatedAt: now });
+}
+
+export function setEpisodeWatched(
+  entries: LibraryEntry[],
+  identity: LibraryIdentity,
+  episode: string,
+  watched: boolean,
+  now = new Date().toISOString()
+): LibraryEntry[] {
+  const index = findLibraryEntryIndex(entries, identity.anilistId, identity.slug);
+  if (index < 0) return entries;
+  const entry = entries[index];
+  if (entry.watchedEpisodes.includes(episode) === watched) return entries;
+  const watchedEpisodes = watched
+    ? [...entry.watchedEpisodes, episode]
+    : entry.watchedEpisodes.filter((value) => value !== episode);
+  return replaceAt(entries, index, { ...entry, watchedEpisodes, updatedAt: now });
+}
+
+export function toggleEpisodeWatched(
+  entries: LibraryEntry[],
+  identity: LibraryIdentity,
+  episode: string,
+  now = new Date().toISOString()
+): LibraryEntry[] {
+  const index = findLibraryEntryIndex(entries, identity.anilistId, identity.slug);
+  if (index < 0) return entries;
+  return setEpisodeWatched(
+    entries,
+    identity,
+    episode,
+    !entries[index].watchedEpisodes.includes(episode),
+    now
+  );
+}
+
+export function setEpisodeProgress(
+  entries: LibraryEntry[],
+  identity: LibraryIdentity,
+  progressCount: number,
+  now = new Date().toISOString()
+): LibraryEntry[] {
+  const index = findLibraryEntryIndex(entries, identity.anilistId, identity.slug);
+  if (index < 0) return entries;
+  const entry = entries[index];
+  const count = Math.min(Math.max(Math.round(progressCount), 0), entry.availableEpisodes.length);
+  const watchedEpisodes = sortEpisodeNumbers(entry.availableEpisodes).slice(0, count);
+  if (deepEqual(watchedEpisodes, entry.watchedEpisodes)) return entries;
+  return replaceAt(entries, index, { ...entry, watchedEpisodes, updatedAt: now });
 }

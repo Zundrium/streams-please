@@ -60,14 +60,14 @@ function downloadBrowserFile(contents: string): void {
 }
 
 export async function readLibraryFile(): Promise<string | null> {
-  if (isTauri()) return callBackend<string | null>('import_library_file');
+  if (isTauri()) return callBackend('import_library_file');
   return pickBrowserFile();
 }
 
 export async function writeLibraryFile(contents: string): Promise<boolean> {
   ensureFileSize(sourceSize(contents));
   if (isTauri()) {
-    return callBackend<boolean>('export_library_file', { contents });
+    return callBackend('export_library_file', { contents });
   }
   downloadBrowserFile(contents);
   return true;

@@ -38,13 +38,17 @@ Apply the same pattern to other commands below.
 - `src/lib/components/app/StreamsPleaseApp.svelte`: app orchestration, native-player lifecycle, torrent playback, and top-level state.
 - `src/lib/components/{catalog,library,settings}/*Page.svelte`: feature-level UI.
 - `src/lib/components/ui/`: locally installed Lily component source.
-- `src/lib/backend.ts`, `src/lib/backend/preview.ts`: Tauri invocation boundary and deterministic browser-preview fixtures.
+- `src/lib/backend/commands.ts`: typed Tauri command contract (names, arguments, results).
+- `src/lib/backend.ts`, `src/lib/backend/preview.ts`: Tauri invocation boundary and deterministic browser-preview fixtures; the preview handler map must cover every command.
 - `src/lib/types.ts`: shared frontend contracts for Rust responses and UI state.
 - `src/lib/catalog/`: shared request client, cancellable page state, AniList/SubsPlease matching, and validated browser caches.
-- `src/lib/library.ts`, `src/lib/settings.ts`: local persistence and domain helpers.
+- `src/lib/library.ts`, `src/lib/library-import.ts`, `src/lib/settings.ts`: local persistence, identity-safe library reducers, and domain helpers.
+- `src/lib/torrent/media.ts`: pure torrent/media helpers used by the player orchestration.
 - `src/app.css`: Tailwind v4 entry point, Lily tokens, and global media/motion behavior.
-- `src-tauri/src/lib.rs`: Tauri command registration, runtime setup, librqbit state, and the local stream server.
-- `src-tauri/src/catalog/`: independent AniList/SubsPlease clients, input validation, parsers, and provider tests.
+- `src-tauri/src/lib.rs`: plugin setup and Tauri command registration.
+- `src-tauri/src/torrent.rs`: librqbit state, torrent commands, and the local stream server.
+- `src-tauri/src/runtime.rs`, `src-tauri/src/library_file.rs`: bundled-runtime discovery and library file import/export.
+- `src-tauri/src/catalog/`: provider adapters, the shared provider HTTP layer (`http.rs`), identity resolution, input validation, parsers, and provider tests.
 - `tests/`: frontend catalog and library regression tests using Node 24's built-in test runner.
 - `src-tauri/tauri.conf.json`: window, CSP, bundle resources, and frontend build integration.
 - `src-tauri/capabilities/default.json`: Tauri permissions.
@@ -61,7 +65,7 @@ Apply the same pattern to other commands below.
 - Treat magnets, provider HTML/JSON, local paths, media metadata, and IPC arguments as untrusted input. Validate before use.
 - AniList IDs are the canonical identity for library entries. SubsPlease slugs and numeric IDs are provider metadata, not the primary identity.
 - The desktop backend is the production network and torrent boundary. `backend.ts` must keep browser preview usable with representative mocks.
-- If a Tauri command contract changes, update all affected parts together: Rust command/registration, `backend.ts`, browser mock behavior, and `types.ts`.
+- If a Tauri command contract changes, update all affected parts together: Rust command/registration, `backend/commands.ts`, browser mock behavior, and `types.ts`.
 - Preserve graceful provider failure and cached/fallback behavior. External catalog availability must not make the whole app unusable.
 - Keep persisted data backward-compatible. Parse and normalize `localStorage` data rather than assuming it matches the newest type.
 

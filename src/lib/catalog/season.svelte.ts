@@ -1,11 +1,13 @@
 import {
+  CONFIRMED_MATCH_CONFIDENCE,
   currentSeason,
+  errorMessage,
   loadProviderMappings,
   matchSubsPleaseSeason,
   shiftSeason
 } from '$lib/catalog';
+import { scheduledProvider } from '$lib/catalog/media';
 import {
-  DAY_ORDER,
   type AnimeSeason,
   type AniListSeasonResponse,
   type AniListSeasonShow,
@@ -15,8 +17,6 @@ import {
   type SubsPleaseScheduleResponse,
   type SubsPleaseScheduleShow
 } from '$lib/types';
-
-export const CONFIRMED_PROVIDER_MATCH_CONFIDENCE = 0.95;
 
 export type LoadSeasonCatalog = (
   season: AnimeSeason,
@@ -41,10 +41,6 @@ interface SeasonCatalogOptions {
   loadSchedule: LoadProviderSchedule;
   timezone: string;
   initialSeason?: { season: AnimeSeason; year: number };
-}
-
-function errorMessage(reason: unknown): string {
-  return reason instanceof Error ? reason.message : String(reason);
 }
 
 export function createSeasonCatalog({
@@ -74,7 +70,7 @@ export function createSeasonCatalog({
   let providerRequest: Promise<SubsPleaseIndexResponse | null> | null = null;
   let scheduleRequest: Promise<SubsPleaseScheduleResponse | null> | null = null;
 
-  let seasonMatches = $derived.by((): SeasonCatalogMatch[] => {
+  let confirmedMatches = $derived.by(() => {
     const catalogData = catalog;
     const providerData = providerIndex;
     if (!catalogData || !providerData) return [];
@@ -84,31 +80,24 @@ export function createSeasonCatalog({
       providerData.shows,
       loadProviderMappings()
     );
-    return catalogData.shows.flatMap((anime): SeasonCatalogMatch[] => {
+    return catalogData.shows.flatMap((anime) => {
       const match = matches.get(anime.id);
-      if (!match || match.confidence < CONFIRMED_PROVIDER_MATCH_CONFIDENCE) return [];
+      return match && match.confidence >= CONFIRMED_MATCH_CONFIDENCE ? [{ anime, match }] : [];
+    });
+  });
 
+  let seasonMatches = $derived.by((): SeasonCatalogMatch[] =>
+    confirmedMatches.map(({ anime, match }): SeasonCatalogMatch => {
       const scheduled = scheduledProvider(match.provider.page, schedule);
-      return [{
+      return {
         anime,
         provider: match.provider,
         confidence: match.confidence,
         schedule: scheduled?.show,
         day: scheduled?.day
-      }];
-    });
-  });
-
-  function scheduledProvider(
-    slug: string,
-    scheduleData: SubsPleaseScheduleResponse | null
-  ): { show: SubsPleaseScheduleShow; day: DayName } | undefined {
-    for (const day of DAY_ORDER) {
-      const show = scheduleData?.schedule[day]?.find((candidate) => candidate.page === slug);
-      if (show) return { show, day };
-    }
-    return undefined;
-  }
+      };
+    })
+  );
 
   async function runSeasonRequest(
     generation: number,

@@ -95,7 +95,7 @@ Set `STREAMSPLEASE_GITHUB_TOKEN` as a GitHub Actions secret containing a fine-gr
 2. Select **Open torrent**. StreamsPlease chooses the largest video file and prioritizes media and subtitles.
 3. Switch embedded audio and subtitles through the player or details panel.
 4. Use **External subtitle** to add a local subtitle file.
-5. Pause P2P or stop the session when you are done. Stopping forgets the torrent but preserves cache files that have already been written.
+5. Starting another episode forgets the previous torrent but preserves cache files that have already been written.
 
 The **Search** tab searches across seasons and checks each result against the SubsPlease
 archive. AniList is preferred by default; reorder AniList, official MyAnimeList, Jikan, and Kitsu in **Account settings**.
@@ -135,10 +135,17 @@ The **Legal Sintel demo** button enters a Creative Commons/open movie torrent so
 - `src/lib/components/catalog/`: Search, Discovery, SubsPlease, show details, and shared catalog components.
 - `src/lib/components/{library,player,settings,shared}/`: feature UI and reusable presentation.
 - `src/lib/components/ui/`: locally owned Lily primitives.
-- `src/lib/catalog/`: typed request client, validated storage, title matching, and cancellable page state.
-- `src/lib/backend.ts` and `src/lib/backend/preview.ts`: desktop invocation and deterministic preview fixtures.
+- `src/lib/catalog/`: typed request client, validated storage, title matching, presentation helpers, and cancellable page state.
+- `src/lib/discovery/`: recommendation and airing-candidate domain logic.
+- `src/lib/library.ts` and `src/lib/library-import.ts`: persisted library normalization, identity-safe reducers, and backup hydration.
+- `src/lib/torrent/`: pure torrent file selection, track normalization, and piece-range helpers.
+- `src/lib/backend/commands.ts`: the typed Tauri command contract shared by `src/lib/backend.ts` (desktop invocation) and `src/lib/backend/preview.ts` (deterministic preview fixtures).
 - `src-tauri/src/catalog/`: catalog adapter registry, AniList/MyAnimeList/Jikan/Kitsu adapters, persistent identity resolution, and independent SubsPlease releases.
-- `src-tauri/src/lib.rs`: torrent engine, loopback stream server, runtime setup, and command registration.
+- `src-tauri/src/catalog/http.rs`: shared provider HTTP layer with rate limiting, cooldowns, response caching, and bounded body reads.
+- `src-tauri/src/torrent.rs`: librqbit session, loopback stream server, and torrent commands.
+- `src-tauri/src/runtime.rs`: bundled libmpv/trailer runtime discovery.
+- `src-tauri/src/library_file.rs`: validated library backup import/export.
+- `src-tauri/src/lib.rs`: plugin setup and command registration.
 - `tests/`: Node regression tests for matching, caches, async state, preview identity, and library refresh.
 
 ## Catalog providers and outage behavior

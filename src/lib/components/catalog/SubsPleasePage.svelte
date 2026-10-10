@@ -14,24 +14,24 @@
   import ContextToolbar from '$lib/components/shared/ContextToolbar.svelte';
   import ShowDetailsPage from '$lib/components/catalog/ShowDetailsPage.svelte';
   import {
+    CONFIRMED_MATCH_CONFIDENCE,
     currentSeason,
     loadProviderMappings,
     matchSubsPleaseShow,
     normalizeCatalogTitle,
     preferredTitle,
-    providerImageUrl,
+    posterUrl,
     saveProviderMapping
   } from '$lib/catalog';
   import {
-    CONFIRMED_PROVIDER_MATCH_CONFIDENCE,
     createSeasonCatalog,
     type SeasonCatalogMatch
   } from '$lib/catalog/season.svelte';
+  import { scheduledProvider as scheduledProviderIn } from '$lib/catalog/media';
   import { libraryEntryMatches } from '$lib/library';
   import type { CatalogDetailsActions } from '$lib/catalog/contracts';
   import CatalogStatusBadge from '$lib/components/catalog/CatalogStatusBadge.svelte';
   import {
-    DAY_ORDER,
     type AnimeSeason,
     type AniListRelationNode,
     type AniListSeasonResponse,
@@ -168,17 +168,8 @@
     onOpenConsumed();
   });
 
-  function scheduledProvider(slug: string): {
-    show: SubsPleaseScheduleShow;
-    day: DayName;
-  } | undefined {
-    for (const day of DAY_ORDER) {
-      const show = seasonCatalog.schedule?.schedule[day]?.find(
-        (candidate) => candidate.page === slug
-      );
-      if (show) return { show, day };
-    }
-    return undefined;
+  function scheduledProvider(slug: string) {
+    return scheduledProviderIn(slug, seasonCatalog.schedule);
   }
 
   function selectMode(nextMode: CatalogMode): void {
@@ -196,22 +187,22 @@
     seasonCatalog.moveSeason(amount);
   }
 
-  function posterUrl(show: SeasonCatalogMatch): string {
+  function matchPosterUrl(show: SeasonCatalogMatch): string {
     const path =
       show.anime.coverImage?.extraLarge ??
       show.anime.coverImage?.large ??
       show.schedule?.image_url ??
       '';
-    return providerImageUrl(path);
+    return posterUrl(path);
   }
 
   function archivePosterUrl(show: SubsPleaseIndexShow): string {
-    return providerImageUrl(scheduledProvider(show.page)?.show.image_url ?? '');
+    return posterUrl(scheduledProvider(show.page)?.show.image_url ?? '');
   }
 
   function openAvailableShow(item: SeasonCatalogMatch): void {
     navigationGeneration += 1;
-    if (item.confidence >= CONFIRMED_PROVIDER_MATCH_CONFIDENCE) {
+    if (item.confidence >= CONFIRMED_MATCH_CONFIDENCE) {
       saveProviderMapping(item.anime.id, item.provider.page);
     }
     requestedShowError = '';
@@ -220,7 +211,7 @@
     selectedShow = {
       title: preferredTitle(item.anime),
       page: item.provider.page,
-      image_url: posterUrl(item),
+      image_url: matchPosterUrl(item),
       time: item.schedule?.time ?? '',
       anilist_id: item.anime.id,
       subsplease_id: item.schedule?.subsplease_id
@@ -236,7 +227,7 @@
     selectedShow = {
       title: provider.title,
       page: provider.page,
-      image_url: providerImageUrl(scheduled?.show.image_url ?? ''),
+      image_url: posterUrl(scheduled?.show.image_url ?? ''),
       time: scheduled?.show.time ?? '',
       subsplease_id: scheduled?.show.subsplease_id
     };
@@ -251,7 +242,7 @@
     }
 
     const match = matchSubsPleaseShow(media, providers.shows, loadProviderMappings());
-    if (!match || match.confidence < CONFIRMED_PROVIDER_MATCH_CONFIDENCE) {
+    if (!match || match.confidence < CONFIRMED_MATCH_CONFIDENCE) {
       throw new Error(
         `${preferredTitle(media)} could not be confidently matched in the SubsPlease archive.`
       );
@@ -534,7 +525,7 @@
                 )}
                 <AnimePosterCard
                   title={preferredTitle(item.anime)}
-                  imageUrl={posterUrl(item)}
+                  imageUrl={matchPosterUrl(item)}
                   verdict={entry?.discoveryVerdict}
                   bottomLeft={item.anime.episodes ? `${item.anime.episodes} eps` : 'Episodes TBA'}
                   airingDay={item.day}

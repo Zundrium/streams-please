@@ -212,7 +212,7 @@ export function createCatalogClient(
       if (fresh) return Promise.resolve(fresh);
       const stale = cache.loadStaleIndex(MAX_STALE_INDEX_AGE);
       return request(key, maxAge, async () => {
-        const response = normalizeProviderIndex(await call<unknown>('subsplease_index'));
+        const response = normalizeProviderIndex(await call('subsplease_index'));
         if (!response) throw new Error('SubsPlease returned an invalid archive. Try again later.');
         cache.saveIndex(response);
         return response;
@@ -221,7 +221,7 @@ export function createCatalogClient(
     loadSchedule(timezone: string): Promise<SubsPleaseScheduleResponse> {
       const normalized = normalizedKey(timezone);
       return request(`schedule:${normalized}`, 5 * 60 * 1000, () =>
-        call<SubsPleaseScheduleResponse>('subsplease_schedule', { timezone })
+        call('subsplease_schedule', { timezone })
       );
     },
     loadShow(
@@ -238,7 +238,7 @@ export function createCatalogClient(
         includeMetadata ? 'metadata' : 'provider'
       ].join(':');
       return request(key, 5 * 60 * 1000, () =>
-        call<SubsPleaseShowResponse>('subsplease_show', {
+        call('subsplease_show', {
           slug,
           timezone,
           anilistId,

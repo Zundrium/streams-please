@@ -3,7 +3,7 @@ import { callBackend } from '$lib/backend';
 import type { AppUpdateStatus, UpdateCheckResult, UpdateDownloadEvent } from '$lib/types';
 
 export function checkForUpdate(): Promise<UpdateCheckResult> {
-  return callBackend<UpdateCheckResult>('check_for_update');
+  return callBackend('check_for_update');
 }
 
 export async function installPendingUpdate(
@@ -11,7 +11,7 @@ export async function installPendingUpdate(
 ): Promise<void> {
   const channel = new Channel<UpdateDownloadEvent>();
   channel.onmessage = onEvent;
-  await callBackend<void>('install_update', { onEvent: channel });
+  await callBackend('install_update', { onEvent: channel });
 }
 
 type AvailableUpdate = Extract<UpdateCheckResult, { status: 'available' }>;

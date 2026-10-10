@@ -375,3 +375,15 @@ test('preview adapters expose the same contract and canonical fixture identities
   }), /does not support/);
   assert.equal(catalogSourceLabel({ provider: 'jikan', label: 'Jikan', fetchedAt: initialTime, cache: 'stale' }, initialTime + 2 * 24 * 60 * 60_000), 'Jikan · saved 2d ago');
 });
+
+test('result cache migrates the legacy season key once and removes it', () => {
+  const storage = new MemoryStorage() as MemoryStorage & { removeItem(key: string): void };
+  storage.removeItem = (key) => { storage.values.delete(key); };
+  storage.setItem('streamsplease.season-cache.v1', JSON.stringify({ entries: {
+    'SUMMER:2026': { savedAt: initialTime, data: { season: 'SUMMER', year: 2026, shows: items } }
+  } }));
+  const cache = createCatalogResultCache({ storage, now: () => initialTime + 1_000 });
+  assert.equal(storage.getItem('streamsplease.season-cache.v1'), null);
+  assert.equal(JSON.parse(storage.getItem('streamsplease.catalog-results.v1')!).length, 1);
+  assert.equal(cache.load('anilist', seasonRequest, 60_000)?.savedAt, initialTime);
+});

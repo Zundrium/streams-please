@@ -11,7 +11,7 @@
   import AnimePosterCard from '$lib/components/catalog/AnimePosterCard.svelte';
   import CatalogStatusBadge from '$lib/components/catalog/CatalogStatusBadge.svelte';
   import {
-    CONFIRMED_MATCH_CONFIDENCE, errorMessage, preferredTitle, providerImageUrl,
+    CONFIRMED_MATCH_CONFIDENCE, errorMessage, preferredTitle, posterUrl,
     matchSubsPleaseShow, saveProviderMapping, type ProviderMatch
   } from '$lib/catalog';
   import { createCatalogSearch } from '$lib/catalog/search.svelte';
@@ -69,7 +69,7 @@
     return {
       title: anime ? preferredTitle(anime) : provider.title,
       page: provider.page,
-      image_url: providerImageUrl(anime?.coverImage?.extraLarge ?? anime?.coverImage?.large ?? ''),
+      image_url: posterUrl(anime?.coverImage?.extraLarge ?? anime?.coverImage?.large ?? ''),
       time: '',
       anilist_id: anime?.id
     };

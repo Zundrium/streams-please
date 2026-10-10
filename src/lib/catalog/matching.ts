@@ -31,6 +31,11 @@ interface PreparedTitle {
   numbers: string;
 }
 
+interface PreparedProvider {
+  provider: SubsPleaseIndexShow;
+  title: PreparedTitle;
+}
+
 function prepareTitle(value: string): PreparedTitle | undefined {
   const normalized = normalizeCatalogTitle(value);
   if (!normalized) return undefined;
@@ -88,16 +93,27 @@ export function saveProviderMapping(anilistId: number, slug: string): void {
   }
 }
 
+const preparedProviderCache = new WeakMap<SubsPleaseIndexShow[], PreparedProvider[]>();
+
+function prepareProviders(providerShows: SubsPleaseIndexShow[]): PreparedProvider[] {
+  let prepared = preparedProviderCache.get(providerShows);
+  if (!prepared) {
+    prepared = providerShows.flatMap((provider) => {
+      const title = prepareTitle(provider.title);
+      return title ? [{ provider, title }] : [];
+    });
+    preparedProviderCache.set(providerShows, prepared);
+  }
+  return prepared;
+}
+
 export function matchSubsPleaseSeason(
   shows: AniListMatchableMedia[],
   providerShows: SubsPleaseIndexShow[],
   mappings: Record<string, string> = loadProviderMappings()
 ): Map<number, ProviderMatch> {
   const matches = new Map<number, ProviderMatch>();
-  const preparedProviders = providerShows.flatMap((provider) => {
-    const title = prepareTitle(provider.title);
-    return title ? [{ provider, title }] : [];
-  });
+  const preparedProviders = prepareProviders(providerShows);
 
   for (const show of shows) {
     const titles = animeTitles(show).flatMap((title) => {

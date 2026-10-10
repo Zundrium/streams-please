@@ -1,29 +1,37 @@
 use std::{
     collections::{HashMap, HashSet},
     path::PathBuf,
-    sync::{Arc, Mutex},
-    time::{Duration, Instant},
+    sync::Arc,
+    time::Duration,
 };
 
-use reqwest::StatusCode;
+use reqwest::{StatusCode, Url};
 use serde_json::Value;
-use tauri::State;
-use tokio::sync::Semaphore;
 
 use super::{
-    identity::IdentityResolver, validate_recommendation_ids, AdapterFuture, CatalogAdapter,
+    http::{
+        rate_limit_cooldown, retry_after_seconds, ProviderFailure, ProviderHttp, ProviderPolicy,
+        ProviderResponse,
+    },
+    identity::IdentityResolver,
+    push_skipped_items_warning, validate_recommendation_ids, AdapterFuture, CatalogAdapter,
     CatalogCapability, CatalogMedia, CatalogProvider, CatalogRequest, CatalogResponse,
-    CatalogState,
 };
 
 const ANILIST_ENDPOINT: &str = "https://graphql.anilist.co";
-const ANILIST_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
-const ANILIST_CACHE_LIMIT: usize = 128;
-const ANILIST_REQUEST_INTERVAL: Duration = Duration::from_millis(2_100);
-const ANILIST_MAX_CONCURRENT_REQUESTS: usize = 2;
-const ANILIST_DEFAULT_COOLDOWN_SECONDS: u64 = 30;
-const ANILIST_MAX_COOLDOWN_SECONDS: u64 = 5 * 60;
 const ANILIST_BLOCKED_COOLDOWN: Duration = Duration::from_secs(5 * 60);
+const ANILIST_MAX_RESPONSE_BYTES: usize = 4 * 1024 * 1024;
+static ANILIST_POLICY: ProviderPolicy = ProviderPolicy {
+    label: "AniList",
+    accept: "application/json",
+    max_concurrent_requests: 2,
+    request_interval: Duration::from_millis(2_100),
+    cache_ttl: Duration::from_secs(5 * 60),
+    cache_limit: 128,
+    max_response_bytes: ANILIST_MAX_RESPONSE_BYTES,
+    network_cooldown: None,
+    interpret: interpret_anilist_response,
+};
 const MAX_SEASON_PAGES: usize = 3;
 const ANILIST_RECOMMENDATIONS_PER_SEED: usize = 10;
 const ANILIST_RECOMMENDATION_LIMIT: usize = 50;
@@ -100,22 +108,8 @@ const RECOMMENDATION_FRAGMENT: &str = r#"
     }
 "#;
 
-struct CacheEntry {
-    expires_at: Instant,
-    value: Value,
-}
-
-struct RequestControl {
-    cache: HashMap<String, CacheEntry>,
-    blocked_until: Option<Instant>,
-    cooldown_until: Option<Instant>,
-    next_request_at: Instant,
-}
-
 pub(super) struct AniListClient {
-    http: reqwest::Client,
-    in_flight: Semaphore,
-    control: Mutex<RequestControl>,
+    http: ProviderHttp,
 }
 
 pub(super) struct AniListAdapter {
@@ -126,147 +120,15 @@ pub(super) struct AniListAdapter {
 impl AniListClient {
     pub(super) fn new(http: reqwest::Client) -> Self {
         Self {
-            http,
-            in_flight: Semaphore::new(ANILIST_MAX_CONCURRENT_REQUESTS),
-            control: Mutex::new(RequestControl {
-                cache: HashMap::new(),
-                blocked_until: None,
-                cooldown_until: None,
-                next_request_at: Instant::now(),
-            }),
+            http: ProviderHttp::new(http, &ANILIST_POLICY),
         }
     }
 
     async fn request(&self, query: &str, variables: Value) -> Result<Value, String> {
+        let endpoint = Url::parse(ANILIST_ENDPOINT)
+            .map_err(|error| format!("The AniList endpoint is invalid: {error}"))?;
         let body = serde_json::json!({ "query": query, "variables": variables });
-        let cache_key = serde_json::to_string(&body)
-            .map_err(|error| format!("The AniList request could not be prepared: {error}"))?;
-        if let Some(value) = self.cached(&cache_key)? {
-            return Ok(value);
-        }
-
-        let _permit = self
-            .in_flight
-            .acquire()
-            .await
-            .map_err(|_| "The AniList request queue is unavailable.".to_string())?;
-        if let Some(value) = self.cached(&cache_key)? {
-            return Ok(value);
-        }
-
-        let wait = self.reserve_request()?;
-        if !wait.is_zero() {
-            tokio::time::sleep(wait).await;
-        }
-        self.check_request_availability()?;
-
-        let response = self
-            .http
-            .post(ANILIST_ENDPOINT)
-            .header("Accept", "application/json")
-            .json(&body)
-            .send()
-            .await
-            .map_err(|error| format!("AniList is unreachable: {error}"))?;
-        let status = response.status();
-        let retry_after = response
-            .headers()
-            .get(reqwest::header::RETRY_AFTER)
-            .and_then(|value| value.to_str().ok())
-            .map(str::to_owned);
-        if status == StatusCode::TOO_MANY_REQUESTS {
-            self.begin_cooldown(retry_after.as_deref())?;
-            return Err(anilist_rate_limit_message(retry_after.as_deref()));
-        }
-        if status == StatusCode::FORBIDDEN {
-            let response_body = response.text().await.unwrap_or_default();
-            self.begin_blocked_cooldown()?;
-            return Err(anilist_blocked_message(&response_body));
-        }
-        let response_body = response
-            .text()
-            .await
-            .map_err(|error| format!("The AniList response could not be read: {error}"))?;
-        let value = parse_anilist_response(status, retry_after.as_deref(), &response_body)?;
-        self.cache(cache_key, value.clone())?;
-        Ok(value)
-    }
-
-    fn cached(&self, key: &str) -> Result<Option<Value>, String> {
-        let now = Instant::now();
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The AniList request state is unavailable.".to_string())?;
-        control.cache.retain(|_, entry| entry.expires_at > now);
-        Ok(control.cache.get(key).map(|entry| entry.value.clone()))
-    }
-
-    fn cache(&self, key: String, value: Value) -> Result<(), String> {
-        let now = Instant::now();
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The AniList request state is unavailable.".to_string())?;
-        control.cache.retain(|_, entry| entry.expires_at > now);
-        if !control.cache.contains_key(&key) && control.cache.len() >= ANILIST_CACHE_LIMIT {
-            if let Some(oldest_key) = control
-                .cache
-                .iter()
-                .min_by_key(|(_, entry)| entry.expires_at)
-                .map(|(key, _)| key.clone())
-            {
-                control.cache.remove(&oldest_key);
-            }
-        }
-        control.cache.insert(
-            key,
-            CacheEntry {
-                expires_at: now + ANILIST_CACHE_TTL,
-                value,
-            },
-        );
-        Ok(())
-    }
-
-    fn reserve_request(&self) -> Result<Duration, String> {
-        let now = Instant::now();
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The AniList request state is unavailable.".to_string())?;
-        ensure_request_available(&mut control, now)?;
-        let request_at = control.next_request_at.max(now);
-        control.next_request_at = request_at + ANILIST_REQUEST_INTERVAL;
-        Ok(request_at.saturating_duration_since(now))
-    }
-
-    fn check_request_availability(&self) -> Result<(), String> {
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The AniList request state is unavailable.".to_string())?;
-        ensure_request_available(&mut control, Instant::now())
-    }
-
-    fn begin_blocked_cooldown(&self) -> Result<(), String> {
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The AniList request state is unavailable.".to_string())?;
-        control.blocked_until = Some(Instant::now() + ANILIST_BLOCKED_COOLDOWN);
-        Ok(())
-    }
-
-    fn begin_cooldown(&self, retry_after: Option<&str>) -> Result<(), String> {
-        let seconds =
-            bounded_retry_after_seconds(retry_after).unwrap_or(ANILIST_DEFAULT_COOLDOWN_SECONDS);
-        let mut control = self
-            .control
-            .lock()
-            .map_err(|_| "The AniList request state is unavailable.".to_string())?;
-        control.cooldown_until = Some(Instant::now() + Duration::from_secs(seconds));
-        Ok(())
+        self.http.post_json(endpoint, &body).await
     }
 
     pub(super) async fn metadata_by_title(&self, title: &str) -> Result<Option<Value>, String> {
@@ -561,15 +423,17 @@ impl AniListAdapter {
         values: Vec<Value>,
         cache_dir: &std::path::Path,
     ) -> Result<(Vec<CatalogMedia>, Vec<String>), String> {
+        let value_count = values.len();
         let items = values
             .into_iter()
-            .map(CatalogMedia::from_anilist)
-            .collect::<Result<Vec<_>, _>>()?;
+            .filter_map(|value| CatalogMedia::from_anilist(value).ok())
+            .collect::<Vec<_>>();
         let mappings = items
             .iter()
             .filter_map(|item| item.id_mal.map(|mal_id| (item.id, mal_id)))
             .collect::<Vec<_>>();
         let mut warnings = Vec::new();
+        push_skipped_items_warning(&mut warnings, "AniList", value_count - items.len());
         if let Err(error) = self
             .identity
             .learn_anilist_mappings(&mappings, cache_dir)
@@ -624,34 +488,27 @@ impl CatalogAdapter for AniListAdapter {
     }
 }
 
-fn ensure_request_available(control: &mut RequestControl, now: Instant) -> Result<(), String> {
-    if control.blocked_until.is_some_and(|until| until > now) {
-        return Err(anilist_blocked_message(""));
+fn interpret_anilist_response(
+    _policy: &ProviderPolicy,
+    response: &ProviderResponse,
+) -> Result<Value, ProviderFailure> {
+    let retry_after = response.retry_after.as_deref();
+    let body = String::from_utf8_lossy(&response.body);
+    match response.status {
+        StatusCode::TOO_MANY_REQUESTS => Err(ProviderFailure::cooldown(
+            rate_limit_cooldown(retry_after),
+            anilist_rate_limit_message(retry_after),
+        )),
+        StatusCode::FORBIDDEN => Err(ProviderFailure::block(
+            ANILIST_BLOCKED_COOLDOWN,
+            anilist_blocked_message(&body),
+        )),
+        status => parse_anilist_response(status, retry_after, &body).map_err(ProviderFailure::new),
     }
-    control.blocked_until = None;
-
-    let Some(cooldown_until) = control.cooldown_until else {
-        return Ok(());
-    };
-    if cooldown_until <= now {
-        control.cooldown_until = None;
-        return Ok(());
-    }
-    let remaining = cooldown_until.saturating_duration_since(now);
-    let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
-    Err(format!(
-        "AniList is rate limiting requests. Try again in {seconds} seconds."
-    ))
-}
-
-fn bounded_retry_after_seconds(retry_after: Option<&str>) -> Option<u64> {
-    retry_after
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .map(|seconds| seconds.clamp(1, ANILIST_MAX_COOLDOWN_SECONDS))
 }
 
 fn anilist_rate_limit_message(retry_after: Option<&str>) -> String {
-    match bounded_retry_after_seconds(retry_after) {
+    match retry_after_seconds(retry_after) {
         Some(seconds) => {
             format!("AniList is rate limiting requests. Try again in {seconds} seconds.")
         }
@@ -732,19 +589,6 @@ fn validate_anilist_search(query: &str) -> Result<(), String> {
         return Err("Enter at least two characters to search AniList.".into());
     }
     Ok(())
-}
-
-fn validate_anilist_season(season: &str, year: i32) -> Result<&'static str, String> {
-    if !(1940..=2200).contains(&year) {
-        return Err("Invalid AniList season year.".into());
-    }
-    match season.trim().to_ascii_uppercase().as_str() {
-        "WINTER" => Ok("WINTER"),
-        "SPRING" => Ok("SPRING"),
-        "SUMMER" => Ok("SUMMER"),
-        "FALL" => Ok("FALL"),
-        _ => Err("Invalid AniList season.".into()),
-    }
 }
 
 fn normalize_anilist_title(value: &str) -> String {
@@ -939,28 +783,6 @@ fn season_shows(response: &Value) -> Result<Vec<Value>, String> {
     Ok(shows)
 }
 
-#[tauri::command]
-pub async fn anilist_season(
-    state: State<'_, CatalogState>,
-    season: String,
-    year: i32,
-) -> Result<Value, String> {
-    let season = validate_anilist_season(&season, year)?;
-    Ok(serde_json::json!({
-        "season": season,
-        "year": year,
-        "shows": state.anilist.season(season, year).await?
-    }))
-}
-
-#[tauri::command]
-pub async fn anilist_search(
-    state: State<'_, CatalogState>,
-    query: String,
-) -> Result<Value, String> {
-    Ok(Value::Array(state.anilist.search(&query).await?))
-}
-
 #[cfg(test)]
 mod tests {
     use super::{
@@ -968,9 +790,10 @@ mod tests {
         best_metadata_match, has_series_prequel, media_from_response, metadata_by_id_request,
         metadata_by_title_request, normalize_anilist_title, parse_anilist_response,
         recommendation_shows, recommendations_request, search_request, season_request,
-        season_shows, validate_anilist_id, validate_anilist_search, validate_anilist_season,
+        season_shows, validate_anilist_id, validate_anilist_search,
         ANILIST_RECOMMENDATIONS_PER_SEED,
     };
+    use crate::catalog::http::{Penalty, ProviderResponse};
     use reqwest::StatusCode;
 
     #[test]
@@ -1178,10 +1001,54 @@ mod tests {
     }
 
     #[test]
-    fn validates_anilist_season_input() {
-        assert_eq!(validate_anilist_season("summer", 2026), Ok("SUMMER"));
-        assert!(validate_anilist_season("monsoon", 2026).is_err());
-        assert!(validate_anilist_season("spring", 1200).is_err());
+    fn applies_anilist_specific_rate_limit_and_block_penalties() {
+        let response = |status, retry_after: Option<&str>, body: &str| ProviderResponse {
+            status,
+            retry_after: retry_after.map(str::to_owned),
+            body: body.as_bytes().to_vec(),
+        };
+        let policy = &super::ANILIST_POLICY;
+        let rate_limited = super::interpret_anilist_response(
+            policy,
+            &response(StatusCode::TOO_MANY_REQUESTS, None, ""),
+        )
+        .unwrap_err();
+        assert_eq!(
+            rate_limited.penalty,
+            Some(Penalty::Cooldown(std::time::Duration::from_secs(30)))
+        );
+        assert_eq!(
+            rate_limited.message,
+            "AniList is rate limiting requests. Try again shortly."
+        );
+
+        let blocked = super::interpret_anilist_response(
+            policy,
+            &response(
+                StatusCode::FORBIDDEN,
+                None,
+                r#"{"errors":[{"message":"API temporarily disabled"}]}"#,
+            ),
+        )
+        .unwrap_err();
+        assert_eq!(
+            blocked.penalty,
+            Some(Penalty::Block(super::ANILIST_BLOCKED_COOLDOWN))
+        );
+        assert!(blocked.message.contains("API temporarily disabled"));
+
+        let server =
+            super::interpret_anilist_response(policy, &response(StatusCode::BAD_GATEWAY, None, ""))
+                .unwrap_err();
+        assert_eq!(server.penalty, None);
+        assert_eq!(
+            super::interpret_anilist_response(
+                policy,
+                &response(StatusCode::OK, None, r#"{"data":{"Media":null}}"#),
+            )
+            .unwrap()["data"]["Media"],
+            serde_json::Value::Null
+        );
     }
 
     #[test]

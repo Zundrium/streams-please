@@ -3,18 +3,30 @@ import test from 'node:test';
 import { callPreviewBackend, SINTEL_MAGNET } from '../src/lib/backend/preview.ts';
 import { entryFromShow } from '../src/lib/library.ts';
 import { currentSeason } from '../src/lib/catalog/presentation.ts';
-import type { AniListSearchResult, AniListSeasonResponse, SubsPleaseShowResponse } from '../src/lib/types.ts';
+import type { CatalogProviderResponse } from '../src/lib/catalog/providers.ts';
+import type { SubsPleaseShowResponse } from '../src/lib/types.ts';
 
 test('preview identities are stable across search, seasons, and archive details', async () => {
   const current = currentSeason();
-  const season = await callPreviewBackend<AniListSeasonResponse>('anilist_season', current);
-  const search = await callPreviewBackend<AniListSearchResult[]>('anilist_search', { query: 'Black Torch' });
-  const details = await callPreviewBackend<SubsPleaseShowResponse>('subsplease_show', { slug: 'black-torch' });
-  const other = await callPreviewBackend<SubsPleaseShowResponse>('subsplease_show', { slug: 'liar-game' });
-  assert.equal(search[0].id, season.shows.find((show) => show.title.romaji === 'Black Torch')?.id);
-  assert.equal(details.metadata_id, search[0].id);
+  const season = await callPreviewBackend('catalog_request', {
+    provider: 'anilist', request: { kind: 'season', ...current }
+  }) as CatalogProviderResponse;
+  const search = await callPreviewBackend('catalog_request', {
+    provider: 'anilist', request: { kind: 'search', query: 'Black Torch' }
+  }) as CatalogProviderResponse;
+  const details = await callPreviewBackend('subsplease_show', { slug: 'black-torch', timezone: 'UTC' }) as SubsPleaseShowResponse;
+  const other = await callPreviewBackend('subsplease_show', { slug: 'liar-game', timezone: 'UTC' }) as SubsPleaseShowResponse;
+  assert.equal(search.items[0].id, season.items.find((show) => show.title.romaji === 'Black Torch')?.id);
+  assert.equal(details.metadata_id, search.items[0].id);
   assert.notEqual(details.metadata_id, other.metadata_id);
   assert.ok(Object.values(details.episode).every((episode) => episode.downloads.every((download) => download.magnet === SINTEL_MAGNET)));
+});
+
+test('browser preview rejects commands it does not implement', async () => {
+  await assert.rejects(
+    callPreviewBackend('anilist_search' as 'runtime_info'),
+    /does not implement anilist_search/
+  );
 });
 
 test('provider-only episode refresh preserves saved metadata and watched progress', () => {

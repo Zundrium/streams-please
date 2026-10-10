@@ -40,7 +40,8 @@
   import ContextToolbar from '$lib/components/shared/ContextToolbar.svelte';
   import TasteIndicator from '$lib/components/catalog/TasteIndicator.svelte';
   import { isTauri } from '$lib/backend';
-  import { preferredTitle } from '$lib/catalog';
+  import { decodeEntities, errorMessage, metadataLabel, posterUrl, preferredTitle } from '$lib/catalog';
+  import { preferredDownload, trailerLinks } from '$lib/catalog/media';
   import { buildEpisodeSupplements, episodeNumberKey } from '$lib/episodeMetadata';
   import {
     youtubeTrailerSearchPageUrl,
@@ -61,7 +62,6 @@
     TrailerPlaybackRequest
   } from '$lib/types';
 
-  const SUBSPLEASE_ORIGIN = 'https://subsplease.org';
   const TEXT_REVEAL_DURATION_MS = 360;
   const DAY_LABELS: Record<DayName, string> = {
     Monday: 'Monday',
@@ -180,17 +180,7 @@
       return new Date(right.release_date).getTime() - new Date(left.release_date).getTime();
     });
   });
-  let exactTrailerUrl = $derived.by(() => {
-    const trailer = details?.trailer;
-    if (!trailer?.id) return '';
-    if (trailer.site.toLowerCase() === 'youtube') {
-      return `https://www.youtube.com/watch?v=${encodeURIComponent(trailer.id)}`;
-    }
-    if (trailer.site.toLowerCase() === 'dailymotion') {
-      return `https://www.dailymotion.com/video/${encodeURIComponent(trailer.id)}`;
-    }
-    return '';
-  });
+  let exactTrailerUrl = $derived(trailerLinks(details?.trailer).watchUrl);
   let trailerTargetUrl = $derived(
     exactTrailerUrl || youtubeTrailerSearchPageUrl(details?.title || show.title)
   );
@@ -231,7 +221,7 @@
         onShowLoaded(nextDetails, activeShow, activeDay);
       })
       .catch((reason) => {
-        if (!cancelled) detailsError = reason instanceof Error ? reason.message : String(reason);
+        if (!cancelled) detailsError = errorMessage(reason);
       })
       .finally(() => {
         if (!cancelled) detailsLoading = false;
@@ -256,20 +246,6 @@
 
     return () => window.clearTimeout(timer);
   });
-
-  function posterUrl(path: string): string {
-    if (!path) return '';
-    return path.startsWith('http')
-      ? path
-      : `${SUBSPLEASE_ORIGIN}${path.startsWith('/') ? '' : '/'}${path}`;
-  }
-
-  function decodeEntities(value: string): string {
-    if (!value || typeof document === 'undefined') return value;
-    const textarea = document.createElement('textarea');
-    textarea.innerHTML = value;
-    return textarea.value;
-  }
 
   function releaseDate(value: string): string {
     const date = new Date(value);
@@ -350,30 +326,16 @@
     return !Number.isNaN(date.getTime()) && calendarDayFormatter.format(date) === todayCalendarDay;
   }
 
-  function metadataLabel(value: string): string {
-    return value
-      .toLowerCase()
-      .replaceAll('_', ' ')
-      .replace(/(^|\s)\S/g, (letter) => letter.toUpperCase());
-  }
-
   async function openRelatedShow(media: AniListRelationNode): Promise<void> {
     relationNavigationId = media.id;
     relationError = '';
     try {
       await onOpenRelation(media);
     } catch (reason) {
-      relationError = reason instanceof Error ? reason.message : String(reason);
+      relationError = errorMessage(reason);
     } finally {
       relationNavigationId = null;
     }
-  }
-
-  function preferredDownload(release: SubsPleaseRelease): SubsPleaseDownload | undefined {
-    return (
-      release.downloads.find((download) => download.res === preferredQuality) ??
-      [...release.downloads].sort((left, right) => Number(right.res) - Number(left.res))[0]
-    );
   }
 
   function isWatched(episode: string): boolean {
@@ -682,7 +644,7 @@
             </thead>
             <tbody>
               {#each episodes.slice(0, episodeLimit) as release (`${release.show}-${release.episode}`)}
-                {@const preferred = preferredDownload(release)}
+                {@const preferred = preferredDownload(release, preferredQuality)}
                 {@const releaseKey = `${release.show}-${release.episode}`}
                 {@const watched = isWatched(release.episode)}
                 {@const releasedToday = wasReleasedToday(release.release_date)}

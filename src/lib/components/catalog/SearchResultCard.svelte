@@ -1,6 +1,6 @@
 <script lang="ts">
   import AnimePosterCard from '$lib/components/catalog/AnimePosterCard.svelte';
-  import { CONFIRMED_MATCH_CONFIDENCE, preferredTitle, providerImageUrl, metadataLabel, type ProviderMatch } from '$lib/catalog';
+  import { CONFIRMED_MATCH_CONFIDENCE, preferredTitle, posterUrl, metadataLabel, type ProviderMatch } from '$lib/catalog';
   import type { AniListSearchResult } from '$lib/types';
 
   let { anime, match, verified, checking, onOpen }: {
@@ -23,7 +23,7 @@
 
 <AnimePosterCard
   title={preferredTitle(anime)}
-  imageUrl={providerImageUrl(anime.coverImage?.extraLarge ?? anime.coverImage?.large ?? '')}
+  imageUrl={posterUrl(anime.coverImage?.extraLarge ?? anime.coverImage?.large ?? '')}
   bottomLeft={availability}
   onOpen={match ? onOpen : undefined}
 >

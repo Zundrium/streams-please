@@ -22,9 +22,9 @@ export interface RuntimeInfo {
   streamPort: number;
   downloadDir: string;
   mpvAvailable: boolean;
-  mpvVersion?: string;
+  mpvVersion: string | null;
   trailerAvailable: boolean;
-  trailerRuntimeVersion?: string;
+  trailerRuntimeVersion: string | null;
 }
 
 export type UpdateCheckResult =
@@ -34,7 +34,7 @@ export type UpdateCheckResult =
       status: 'available';
       version: string;
       currentVersion: string;
-      notes?: string;
+      notes?: string | null;
     };
 
 export type UpdateDownloadEvent =
@@ -47,7 +47,7 @@ export type AppUpdateStatus =
       phase: 'available';
       version: string;
       currentVersion: string;
-      notes?: string;
+      notes?: string | null;
     }
   | {
       phase: 'downloading';

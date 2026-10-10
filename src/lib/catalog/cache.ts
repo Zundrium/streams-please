@@ -10,10 +10,9 @@ import type {
   SubsPleaseIndexResponse,
   SubsPleaseIndexShow
 } from '$lib/types';
+import { isRecord } from '$lib/catalog/guards';
 
 const PROVIDER_INDEX_CACHE_KEY = 'streamsplease.provider-index.v1';
-const SEASON_CACHE_KEY = 'streamsplease.season-cache.v1';
-const MAX_CACHED_SEASONS = 8;
 const MAX_INDEX_SHOWS = 3_000;
 const MAX_SEASON_SHOWS = 200;
 const MAX_RELATION_EDGES = 100;
@@ -29,6 +28,7 @@ export type CatalogCacheScope = 'native' | 'preview';
 export interface CatalogStorage {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
+  removeItem?(key: string): void;
 }
 
 export interface CatalogCacheOptions {
@@ -49,10 +49,6 @@ function storageForBrowser(): CatalogStorage | undefined {
   } catch {
     return undefined;
   }
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return Boolean(value) && typeof value === 'object' && !Array.isArray(value);
 }
 
 function validSeason(value: unknown): value is AnimeSeason {
@@ -408,7 +404,6 @@ export function createCatalogCache(options: CatalogCacheOptions = {}) {
   const scope = options.scope ?? 'native';
   const now = options.now ?? Date.now;
   const indexKey = scope === 'native' ? PROVIDER_INDEX_CACHE_KEY : `${PROVIDER_INDEX_CACHE_KEY}.preview`;
-  const seasonKey = scope === 'native' ? SEASON_CACHE_KEY : `${SEASON_CACHE_KEY}.preview`;
 
   function read(key: string): unknown {
     if (!storage) return undefined;
@@ -459,14 +454,6 @@ export function createCatalogCache(options: CatalogCacheOptions = {}) {
     return entry(read(indexKey), normalizeProviderIndex);
   }
 
-  function readSeason(season: AnimeSeason, year: number): CacheEntry<AniListSeasonResponse> | undefined {
-    if (!validSeason(season) || !validYear(year)) return undefined;
-    const cache = read(seasonKey);
-    if (!isRecord(cache) || !isRecord(cache.entries)) return undefined;
-    const cached = entry(cache.entries[`${season}:${year}`], normalizeSeasonResponse);
-    return cached?.data.season === season && cached.data.year === year ? cached : undefined;
-  }
-
   return {
     loadIndex(maxAgeMs: number): SubsPleaseIndexResponse | undefined {
       return fresh(readIndex(), maxAgeMs);
@@ -477,32 +464,6 @@ export function createCatalogCache(options: CatalogCacheOptions = {}) {
     saveIndex(value: SubsPleaseIndexResponse): void {
       const normalized = normalizeProviderIndex(value);
       if (normalized) write(indexKey, { savedAt: now(), data: normalized });
-    },
-    loadSeason(season: AnimeSeason, year: number, maxAgeMs: number): AniListSeasonResponse | undefined {
-      return fresh(readSeason(season, year), maxAgeMs);
-    },
-    loadStaleSeason(
-      season: AnimeSeason,
-      year: number,
-      maxAgeMs = Number.POSITIVE_INFINITY
-    ): AniListSeasonResponse | undefined {
-      return fresh(readSeason(season, year), maxAgeMs);
-    },
-    saveSeason(value: AniListSeasonResponse): void {
-      const normalized = normalizeSeasonResponse(value);
-      if (!normalized) return;
-      const cache = read(seasonKey);
-      const entries: Record<string, unknown> =
-        isRecord(cache) && isRecord(cache.entries) ? { ...cache.entries } : {};
-      entries[`${normalized.season}:${normalized.year}`] = { savedAt: now(), data: normalized };
-      const retained = Object.fromEntries(
-        Object.entries(entries)
-          .map(([key, value]) => [key, entry(value, normalizeSeasonResponse)] as const)
-          .filter(([, value]) => Boolean(value))
-          .sort(([, left], [, right]) => right!.savedAt - left!.savedAt)
-          .slice(0, MAX_CACHED_SEASONS)
-      );
-      write(seasonKey, { entries: retained });
     }
   };
 }
