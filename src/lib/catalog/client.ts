@@ -20,6 +20,7 @@ import type {
 
 import { createCatalogCoordinator } from '$lib/catalog/coordinator';
 import { seasonItems, type CatalogSearchResponse } from '$lib/catalog/providers';
+import { errorMessage } from '$lib/errors';
 const DEFAULT_MAX_CONCURRENT_REQUESTS = 4;
 const DEFAULT_MAX_ENTRIES = 100;
 const MAX_STALE_INDEX_AGE = 30 * 24 * 60 * 60 * 1000;
@@ -137,7 +138,7 @@ export function createCatalogClient(
 
   function fallback<T extends { cacheWarning?: string }>(value: T | undefined, reason: unknown): T {
     if (value === undefined) throw reason;
-    const message = reason instanceof Error ? reason.message : String(reason);
+    const message = errorMessage(reason);
     return {
       ...value,
       cacheWarning: `Catalog refresh failed: ${message}. Showing saved catalog data.`

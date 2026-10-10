@@ -41,6 +41,8 @@
     SubsPleaseShowResponse,
     TrailerPlaybackRequest
   } from '$lib/types';
+  import { errorMessage } from '$lib/errors';
+  import { localTimezone } from '$lib/time';
 
 
   let {
@@ -144,7 +146,7 @@
     const posterShows = [...libraryShows, ...checkedShows];
     if (!posterShows.length) return;
     let cancelled = false;
-    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Amsterdam';
+    const timezone = localTimezone();
     refreshing = true;
     void Promise.allSettled(
       posterShows.map(async (entry) => {
@@ -251,7 +253,7 @@
     quickPlaySlug = entry.slug;
     quickPlayError = null;
     try {
-      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Amsterdam';
+      const timezone = localTimezone();
       const show = scheduleShow(entry);
       const details = await loadShow(entry.slug, timezone, entry.anilistId);
       onShowLoaded(details, show, entry.day);
@@ -274,7 +276,7 @@
     } catch (reason) {
       quickPlayError = {
         slug: entry.slug,
-        message: reason instanceof Error ? reason.message : String(reason)
+        message: errorMessage(reason)
       };
     } finally {
       quickPlaySlug = '';

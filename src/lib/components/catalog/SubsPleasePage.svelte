@@ -41,6 +41,7 @@
     type SubsPleaseScheduleResponse,
     type SubsPleaseScheduleShow
   } from '$lib/types';
+  import { localTimezone } from '$lib/time';
 
   type CatalogMode = 'season' | 'archive';
 
@@ -65,7 +66,7 @@
     loadSchedule: (timezone: string) => Promise<SubsPleaseScheduleResponse>;
   } = $props();
 
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Amsterdam';
+  const timezone = localTimezone();
   const initialSeason = currentSeason();
   const seasonCatalog = createSeasonCatalog({
     loadSeason: (season, year) => loadSeason(season, year),

@@ -28,3 +28,23 @@ export function youtubeTrailerSearchPageUrl(title: string): string {
     ? `https://www.youtube.com/results?search_query=${encodeURIComponent(query)}`
     : '';
 }
+
+const TRAILER_DOMAINS = ['youtube.com', 'dailymotion.com'];
+const TRAILER_HOSTS = ['youtu.be'];
+
+function isTrailerHost(host: string): boolean {
+  return (
+    TRAILER_HOSTS.includes(host) ||
+    TRAILER_DOMAINS.some((domain) => host === domain || host.endsWith(`.${domain}`))
+  );
+}
+
+export function isSupportedTrailerUrl(value: string): boolean {
+  if (isYoutubeTrailerSearchPlaybackUrl(value)) return true;
+  try {
+    const url = new URL(value);
+    return url.protocol === 'https:' && isTrailerHost(url.hostname.toLowerCase());
+  } catch {
+    return false;
+  }
+}

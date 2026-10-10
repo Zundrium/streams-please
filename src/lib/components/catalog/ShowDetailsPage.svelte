@@ -61,6 +61,7 @@
     SubsPleaseShowResponse,
     TrailerPlaybackRequest
   } from '$lib/types';
+  import { localTimezone } from '$lib/time';
 
   const TEXT_REVEAL_DURATION_MS = 360;
   const DAY_LABELS: Record<DayName, string> = {
@@ -122,7 +123,7 @@
     preferredQuality: PlaybackQuality;
   } = $props();
 
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Amsterdam';
+  const timezone = localTimezone();
   const calendarDayFormatter = new Intl.DateTimeFormat('en-US', {
     day: '2-digit',
     month: '2-digit',
@@ -372,7 +373,7 @@
         if (!opened) throw new Error('The browser blocked the new window.');
       }
     } catch (reason) {
-      trailerError = reason instanceof Error ? reason.message : String(reason);
+      trailerError = errorMessage(reason);
     }
   }
 

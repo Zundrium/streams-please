@@ -43,7 +43,10 @@ Apply the same pattern to other commands below.
 - `src/lib/types.ts`: shared frontend contracts for Rust responses and UI state.
 - `src/lib/catalog/`: shared request client, cancellable page state, AniList/SubsPlease matching, and validated browser caches.
 - `src/lib/library.ts`, `src/lib/library-import.ts`, `src/lib/settings.ts`: local persistence, identity-safe library reducers, and domain helpers.
-- `src/lib/torrent/media.ts`: pure torrent/media helpers used by the player orchestration.
+- `src/lib/torrent/`: pure torrent/media helpers and the serialized `TorrentSession`.
+- `src/lib/player/`: `MpvClient` (all libmpv access; property formats are fixed per method), `StreamLifecycle`, episode stream opening, `SeekScheduler`, next-episode planning, shortcuts, and viewport helpers. Keep these free of Svelte and Tauri imports other than types so they stay unit-testable in Node.
+- `src/lib/async/`: shared `Generation`, `SerialQueue`, polling, and `OperationTracker` primitives for stale-work protection.
+- `src/lib/library-store.svelte.ts`: reactive library state with injectable persistence.
 - `src/app.css`: Tailwind v4 entry point, Lily tokens, and global media/motion behavior.
 - `src-tauri/src/lib.rs`: plugin setup and Tauri command registration.
 - `src-tauri/src/torrent.rs`: librqbit state, torrent commands, and the local stream server.
@@ -74,8 +77,9 @@ Apply the same pattern to other commands below.
 - Use Svelte 5 runes and TypeScript: `$props`, `$state`, `$derived`, and `$effect`.
 - Keep strict types at boundaries. Prefer `unknown` plus narrowing over introducing new `any` values.
 - Use `$lib` aliases instead of deep relative imports.
-- Keep native calls behind `callBackend` and player-specific calls in the player orchestration layer.
+- Keep native calls behind `callBackend`. Route every libmpv call through `MpvClient`/`MpvCommands`; add a typed method there instead of calling the plugin directly.
 - Preserve operation generations, cleanup functions, and timeout cancellation around asynchronous playback. Stale async work must not mutate a replacement torrent or trailer session.
+- Node's test runner strips types without transpiling, so new `.ts` modules must avoid TypeScript-only runtime syntax such as constructor parameter properties and enums.
 - Avoid expanding `StreamsPleaseApp.svelte` with unrelated presentation logic. Extract a component or pure domain helper when it gives a clear ownership boundary.
 - Use the local Lily design system in `src/lib/components/ui` and existing Tailwind tokens before creating custom primitives. Use `@lucide/svelte` for icons.
 - Match the established visual language and support keyboard use, focus states, labels, loading, empty, and error states.

@@ -1,5 +1,7 @@
 import type { AnimeSeason, AniListMatchableMedia } from '$lib/types';
 
+export { errorMessage } from '$lib/errors';
+
 export const SEASON_ORDER: AnimeSeason[] = ['WINTER', 'SPRING', 'SUMMER', 'FALL'];
 
 export function currentSeason(date = new Date()): { season: AnimeSeason; year: number } {
@@ -47,10 +49,6 @@ export function decodeEntities(value: string): string {
     const point = code[1].toLowerCase() === 'x' ? parseInt(code.slice(2), 16) : Number(code.slice(1));
     return point > 0 && point <= 0x10ffff ? String.fromCodePoint(point) : entity;
   });
-}
-
-export function errorMessage(reason: unknown): string {
-  return reason instanceof Error ? reason.message : String(reason);
 }
 
 export function metadataLabel(value: string): string {

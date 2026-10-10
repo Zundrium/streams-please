@@ -1,4 +1,5 @@
 import type { MpvEvent } from 'tauri-plugin-libmpv-api';
+import { errorMessage } from '$lib/errors';
 import type { TrailerPlaybackRequest } from '$lib/types';
 
 export type TrailerPlaybackStatus =
@@ -111,7 +112,7 @@ export class TrailerPlayerController<TContext> {
           try {
             await this.driver.setPaused(false);
           } catch (reason) {
-            const message = this.message(reason);
+            const message = errorMessage(reason);
             this.fail(message);
             await this.abort(activeSession, message);
           }
@@ -143,7 +144,7 @@ export class TrailerPlayerController<TContext> {
         try {
           await this.driver.teardown(activeSession.context, activeSession.mediaWasReplaced);
         } catch (reason) {
-          const message = this.message(reason);
+          const message = errorMessage(reason);
           this.onError(message);
           this.update({
             status: 'error',
@@ -165,7 +166,7 @@ export class TrailerPlayerController<TContext> {
           ...initial,
           status: 'error',
           paused: true,
-          error: this.message(reason)
+          error: errorMessage(reason)
         });
         return;
       }
@@ -196,7 +197,7 @@ export class TrailerPlayerController<TContext> {
         await this.loadMedia(session, request, initial, version);
       } catch (reason) {
         if (!this.isCurrent(session, version)) return;
-        const message = this.message(reason);
+        const message = errorMessage(reason);
         this.fail(message);
         await this.abort(session, message);
       }
@@ -219,7 +220,7 @@ export class TrailerPlayerController<TContext> {
       try {
         await this.driver.teardown(session.context, session.mediaWasReplaced);
       } catch (reason) {
-        const message = this.message(reason);
+        const message = errorMessage(reason);
         this.onError(message);
         this.update({
           status: 'error',
@@ -445,7 +446,7 @@ export class TrailerPlayerController<TContext> {
       );
     } catch (reason) {
       if (!this.isCurrent(session, version)) return;
-      const message = this.message(reason);
+      const message = errorMessage(reason);
       this.fail(message);
       await this.abort(session, message);
     }
@@ -504,7 +505,7 @@ export class TrailerPlayerController<TContext> {
       try {
         await task();
       } catch (reason) {
-        if (this.session === session) this.failAndAbort(session, this.message(reason));
+        if (this.session === session) this.failAndAbort(session, errorMessage(reason));
       }
     });
   }
@@ -551,7 +552,7 @@ export class TrailerPlayerController<TContext> {
       session.aborted = true;
     } catch (reason) {
       if (this.session === session) {
-        const abortMessage = this.message(reason);
+        const abortMessage = errorMessage(reason);
         this.onError(abortMessage);
         this.update({
           status: 'error',
@@ -626,7 +627,4 @@ export class TrailerPlayerController<TContext> {
     return Number.isFinite(number) ? Math.max(0, number) : 0;
   }
 
-  private message(reason: unknown): string {
-    return reason instanceof Error ? reason.message : String(reason);
-  }
 }

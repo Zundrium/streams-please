@@ -1,19 +1,8 @@
 <script lang="ts">
   import { onMount, tick } from 'svelte';
   import { getCurrentWindow } from '@tauri-apps/api/window';
-  import {
-    command as mpvCommand,
-    destroy as destroyMpv,
-    getProperty,
-    init as initMpv,
-    listenEvents,
-    observeProperties,
-    setProperty,
-    setVideoMarginRatio,
-    type MpvEvent,
-    type MpvEventFromProperties,
-    type MpvObservableProperty
-  } from 'tauri-plugin-libmpv-api';
+  import * as libmpv from 'tauri-plugin-libmpv-api';
+  import type { MpvEvent, MpvEventFromProperties, VideoMarginRatio } from 'tauri-plugin-libmpv-api';
   import {
     AlertCircle,
     AudioLines,
@@ -40,38 +29,51 @@
   import { Spinner } from '$lib/components/ui/spinner';
   import { Switch } from '$lib/components/ui/switch';
   import AppNavigation from '$lib/components/app/AppNavigation.svelte';
+  import { Generation } from '$lib/async/generation';
+  import { OperationTracker } from '$lib/async/operation-tracker';
+  import { startPolling } from '$lib/async/polling';
   import { callBackend, isTauri } from '$lib/backend';
   import { posterUrl } from '$lib/catalog';
   import { createCatalogClient } from '$lib/catalog/client';
+  import { errorMessage } from '$lib/errors';
+  import { libraryEntryMatches } from '$lib/library';
+  import { LibraryStore } from '$lib/library-store.svelte';
+  import { episodeMediaUrl, openEpisodeStream } from '$lib/player/episode-stream';
   import {
-    applyDiscoveryVerdict,
-    libraryEntryMatches,
-    loadLibrary,
-    mergeLibraryEntries,
-    nextUnwatchedEpisode,
-    saveLibrary,
-    setEpisodeProgress as setLibraryEpisodeProgress,
-    setEpisodeWatched as setLibraryEpisodeWatched,
-    sortEpisodeNumbers,
-    syncLibraryShow as syncLibraryEntry,
-    toggleEpisodeWatched as toggleLibraryEpisodeWatched,
-    toggleLibraryShow as toggleLibraryEntry,
-    type LibraryIdentity
-  } from '$lib/library';
-  import { hydrateLibraryBackups } from '$lib/library-import';
+    MPV_WINDOW_LABEL,
+    OBSERVED_PROPERTIES,
+    TRAILER_LOAD_OPTIONS,
+    mpvInitialOptions,
+    subtitleLanguagePreference,
+    type ObservedProperty
+  } from '$lib/player/mpv-config';
+  import { MpvClient, type MpvCommands } from '$lib/player/mpv-client';
+  import { episodePlaybackKey, planNextEpisode } from '$lib/player/next-episode';
   import {
-    chooseVideoFile,
-    formatBytes,
-    normalizeTracks,
-    readableTitle,
-    torrentPieceRanges
-  } from '$lib/torrent/media';
+    applyPlaybackProperty,
+    nextPlaybackSpeed,
+    percentToTime,
+    reconcileSeekTarget,
+    signalsPlaybackProgress
+  } from '$lib/player/playback-state';
+  import { SeekScheduler } from '$lib/player/seek-scheduler';
+  import { resolvePlayerShortcut, type PlayerShortcut } from '$lib/player/shortcuts';
+  import { StreamLifecycle } from '$lib/player/stream-lifecycle';
+  import {
+    HIDDEN_VIDEO_MARGINS,
+    relativePlacement,
+    viewportMargins,
+    type InlinePlacement
+  } from '$lib/player/viewport';
   import { loadSettings, saveSettings } from '$lib/settings';
+  import { localTimezone } from '$lib/time';
+  import { formatBytes, normalizeTracks, readableTitle, torrentPieceRanges } from '$lib/torrent/media';
+  import { TorrentSession } from '$lib/torrent/session';
   import {
     TrailerPlayerController,
     type TrailerPlaybackState
   } from '$lib/trailer-player';
-  import { isYoutubeTrailerSearchPlaybackUrl } from '$lib/trailers';
+  import { isSupportedTrailerUrl } from '$lib/trailers';
   import AccountSettingsPage from '$lib/components/settings/AccountSettingsPage.svelte';
   import DiscoveryPage from '$lib/components/catalog/DiscoveryPage.svelte';
   import LibraryPage from '$lib/components/library/LibraryPage.svelte';
@@ -87,22 +89,14 @@
     AppUpdateStatus,
     AppView,
     CurrentTorrent,
-    DayName,
-    DiscoveryVerdict,
     EpisodePlaybackRequest,
     LibraryBackupEntry,
-    LibraryEntry,
     MpvTrack,
     Phase,
     PlaybackQuality,
     PlaybackState,
     RuntimeInfo,
     SubtitleLanguage,
-    SubsPleaseDownload,
-    SubsPleaseRelease,
-    SubsPleaseScheduleResponse,
-    SubsPleaseScheduleShow,
-    SubsPleaseShowResponse,
     TrailerPlaybackRequest,
     TorrentStats
   } from '$lib/types';
@@ -111,13 +105,6 @@
     torrent: CurrentTorrent;
     playback: PlaybackState;
     tracks: MpvTrack[];
-  };
-
-  type TrailerPlacement = {
-    left: number;
-    top: number;
-    width: number;
-    height: number;
   };
 
   type TrailerSessionContext = {
@@ -132,13 +119,6 @@
 
   type MpvMediaOwner = 'episode' | 'trailer' | 'transition';
 
-  type MpvLoadWaiter = {
-    expectedPathPrefix: string;
-    resolve: () => void;
-    reject: (reason: Error) => void;
-    timer: number;
-  };
-
   const catalogClient = createCatalogClient();
   const {
     loadSearch: loadAniListSearch,
@@ -149,69 +129,55 @@
     loadShow: loadSubsPleaseShow
   } = catalogClient;
 
-  const OBSERVED_PROPERTIES = [
-    ['pause', 'flag'],
-    ['time-pos', 'double', 'none'],
-    ['duration', 'double', 'none'],
-    ['volume', 'double'],
-    ['mute', 'flag'],
-    ['speed', 'double'],
-    ['track-list', 'node'],
-    ['media-title', 'string', 'none'],
-    ['path', 'string', 'none'],
-    ['paused-for-cache', 'flag']
-  ] as const satisfies readonly MpvObservableProperty[];
   const MIN_STREAM_START_BYTES = 1024 * 1024;
   const STREAM_RETRY_DELAY_MS = 5_000;
   const MAX_STREAM_FAILURES = 3;
   const PLAYBACK_START_TIMEOUT_MS = 20_000;
   const PLAYBACK_PROBE_INTERVAL_MS = 250;
-  const SEEK_RECONCILE_TOLERANCE_SECONDS = 1;
   const MEDIA_LOAD_TIMEOUT_MS = 8_000;
   const NEXT_EPISODE_PROMPT_SECONDS = 80;
   const TORRENT_STATUS_INTERVAL_MS = 1_000;
-  const MPV_WINDOW_LABEL = 'main';
+  const PLAYER_UI_HIDE_DELAY_MS = 5_000;
+  const SEEK_STEP_SECONDS = 10;
+  const PREVIEW_TRACKS: MpvTrack[] = [
+    { id: 1, type: 'video', codec: 'h264', selected: true },
+    { id: 2, type: 'audio', lang: 'jpn', title: 'Japanese', codec: 'aac', selected: true },
+    { id: 3, type: 'audio', lang: 'eng', title: 'English', codec: 'aac' },
+    { id: 4, type: 'sub', lang: 'eng', title: 'English • ASS', codec: 'ass', selected: true },
+    { id: 5, type: 'sub', lang: 'nld', title: 'Dutch', codec: 'ass' }
+  ];
 
   let contentViewport = $state<HTMLElement | null>(null);
   let videoViewport = $state<HTMLElement | null>(null);
   let trailerViewport = $state<HTMLElement | null>(null);
   let trailerInlineAnchor: HTMLElement | null = null;
-  let trailerPlacement = $state<TrailerPlacement | null>(null);
-  let mpvReady = false;
-  let mpvInitPromise: Promise<void> | null = null;
-  let mpvUnlisten: (() => void) | null = null;
-  let mpvEventUnlisten: (() => void) | null = null;
-  let bufferingStartedAt = 0;
-  let currentRef: CurrentTorrent | null = null;
-  let statsRef: TorrentStats | null = null;
-  let streamStarted = false;
-  let streamFailures = 0;
-  let nextStreamRetryAt = 0;
-  let streamAttemptGeneration = 0;
-  let torrentStartGeneration = 0;
-  let torrentStartQueue: Promise<unknown> = Promise.resolve();
-  let bufferingWatchdogTimer: number | null = null;
-  let mpvPausedForCache = false;
-  let pendingSeekTime: number | null = null;
-  let seekOperation: Promise<void> | null = null;
-  let seekGeneration = 0;
-  let playerUiTimer: number | null = null;
+  let trailerPlacement = $state<InlinePlacement | null>(null);
+  let playerUiTimer: ReturnType<typeof setTimeout> | null = null;
   let trailerOriginView = $state<AppView | null>(null);
   let mpvMediaOwner: MpvMediaOwner = 'episode';
-  let mpvLoadWaiter: MpvLoadWaiter | null = null;
-  const pendingEpisodeMediaOperations = new Set<Promise<void>>();
+  const episodeOperations = new OperationTracker();
+  const viewRequests = new Generation();
+  const episodeRequests = new Generation();
 
   let runtime = $state<RuntimeInfo | null>(null);
   let activeView = $state<AppView>('library');
   let episodeOriginView = $state<AppView>('subsplease');
-  let activeViewRequestGeneration = 0;
-  let libraryEntries = $state<LibraryEntry[]>(loadLibrary());
+  const library = new LibraryStore();
+  const {
+    syncShow: syncLibraryShow,
+    toggleShow: toggleLibraryShow,
+    setVerdict: setDiscoveryVerdict,
+    setEpisodeWatched,
+    toggleEpisodeWatched,
+    setEpisodeProgress
+  } = library;
+  const decideDiscoveryShow = setDiscoveryVerdict;
+  let libraryEntries = $derived(library.entries);
   let playingEpisode = $state<EpisodePlaybackRequest | null>(null);
   let nextEpisode = $state<EpisodePlaybackRequest | null>(null);
   let nextEpisodeFromLibrary = $state(false);
   let nextEpisodeStarting = $state(false);
   let nextEpisodeDismissedFor = $state('');
-  let nextEpisodeGeneration = 0;
   let requestedShowSlug = $state('');
   let theaterMode = $state(false);
   let fullscreenMode = $state(false);
@@ -243,6 +209,57 @@
   let trailerPlayback = $state<TrailerPlaybackState | null>(null);
   let trailerLoadedPath = $state('');
   let trailerOutgoingPath = '';
+
+  const mpv = new MpvClient(libmpv, {
+    windowLabel: MPV_WINDOW_LABEL,
+    observedProperties: OBSERVED_PROPERTIES,
+    enabled: isTauri,
+    initialOptions: () => mpvInitialOptions(preferredSubtitleLanguage),
+    initialMargins: () => (mpvMediaOwner === 'transition' ? HIDDEN_VIDEO_MARGINS : currentVideoMargins()),
+    onProperty: onMpvProperty,
+    onEvent: onMpvEvent,
+    loadTimeoutMs: MEDIA_LOAD_TIMEOUT_MS
+  });
+
+  const stream = new StreamLifecycle({
+    minStartBytes: MIN_STREAM_START_BYTES,
+    retryDelayMs: STREAM_RETRY_DELAY_MS,
+    maxFailures: MAX_STREAM_FAILURES,
+    watchdogMs: PLAYBACK_START_TIMEOUT_MS,
+    phase: () => phase,
+    onPhase: (nextPhase, message) => {
+      phase = nextPhase;
+      if (message !== undefined) error = message;
+    }
+  });
+
+  const seeks = new SeekScheduler({
+    perform: (target) => mpv.run((player) => player.seek(target)),
+    canSeek: () => Boolean(current) && mpvMediaOwner === 'episode',
+    onError: (target, reason) => {
+      if (seekTarget !== target) return;
+      seekTarget = null;
+      error = `Seek could not be completed: ${errorMessage(reason)}`;
+    },
+    track: (operation) => episodeOperations.track(operation)
+  });
+
+  const torrents = new TorrentSession(
+    {
+      addMagnet: (magnet) => callBackend('add_magnet', { magnet }),
+      forget: async (id) => {
+        if (isTauri()) await callBackend('forget_torrent', { id });
+      }
+    },
+    {
+      stopPlayback: async () => {
+        if (isTauri() && mpv.ready) await mpv.run((player) => player.stop());
+      },
+      onCleared: resetEpisodeState,
+      onStarted: beginEpisode
+    }
+  );
+
   const trailerController = new TrailerPlayerController<TrailerSessionContext>(
     {
       open: openTrailerSession,
@@ -250,12 +267,10 @@
       load: loadTrailerMedia,
       abort: abortTrailerSession,
       teardown: teardownTrailerSession,
-      setPaused: (paused) => runWithMpv(() => setProperty('pause', paused, MPV_WINDOW_LABEL)),
-      seek: (time) =>
-        runWithMpv(() => mpvCommand('seek', [time, 'absolute+exact'], MPV_WINDOW_LABEL)),
-      setVolume: (volume) =>
-        runWithMpv(() => setProperty('volume', volume, MPV_WINDOW_LABEL)),
-      setMuted: (muted) => runWithMpv(() => setProperty('mute', muted, MPV_WINDOW_LABEL))
+      setPaused: (paused) => mpv.run((player) => player.setFlag('pause', paused)),
+      seek: (time) => mpv.run((player) => player.seek(time)),
+      setVolume: (volume) => mpv.run((player) => player.setNumber('volume', volume)),
+      setMuted: (muted) => mpv.run((player) => player.setFlag('mute', muted))
     },
     (state) => {
       const startedLoading =
@@ -328,7 +343,7 @@
   );
   let waitingForPeers = $derived(
     phase === 'buffering' &&
-      Date.now() - bufferingStartedAt > 12_000 &&
+      Date.now() - stream.bufferingStartedAt > 12_000 &&
       livePeers === 0 &&
       downloadSpeed === 0
   );
@@ -404,52 +419,24 @@
     document.addEventListener('visibilitychange', onVisibilityChange);
 
     const onKeyDown = (event: KeyboardEvent) => {
-      if (event.key === 'Escape' && queueOpen) {
-        queueOpen = false;
-        return;
-      }
-      if (event.key === 'Escape' && fullscreenMode) {
-        void toggleFullscreen(false);
-        return;
-      }
-      if (event.key === 'Escape' && trailerPlayback) {
-        void closeTrailer();
-        return;
-      }
-      if (event.key === 'Escape' && theaterMode) {
-        toggleTheater(false);
-        return;
-      }
-      const target = event.target as HTMLElement | null;
-      if (target?.matches('input, textarea, select, button')) return;
-      if (trailerPlayback) {
-        if (event.code === 'Space') {
-          event.preventDefault();
-          void toggleTrailerPlayback();
-        } else if (event.code === 'ArrowLeft') {
-          void seekTrailerRelative(-10);
-        } else if (event.code === 'ArrowRight') {
-          void seekTrailerRelative(10);
-        } else if (event.key.toLowerCase() === 'm') {
-          void toggleTrailerMute();
-        } else if (event.key.toLowerCase() === 'f') {
-          void toggleFullscreen();
+      const target = event.target;
+      const shortcut = resolvePlayerShortcut(
+        {
+          key: event.key,
+          code: event.code,
+          fromEditable: target instanceof Element && target.matches('input, textarea, select, button')
+        },
+        {
+          queueOpen,
+          fullscreen: fullscreenMode,
+          trailerOpen: Boolean(trailerPlayback),
+          theater: theaterMode,
+          episodeLoaded: Boolean(torrents.current)
         }
-        return;
-      }
-      if (!currentRef) return;
-      if (event.code === 'Space') {
-        event.preventDefault();
-        void togglePlayback();
-      } else if (event.code === 'ArrowLeft') {
-        seekRelative(-10);
-      } else if (event.code === 'ArrowRight') {
-        seekRelative(10);
-      } else if (event.key.toLowerCase() === 'm') {
-        void toggleMute();
-      } else if (event.key.toLowerCase() === 'f') {
-        void toggleFullscreen();
-      }
+      );
+      if (!shortcut) return;
+      if (shortcut === 'toggle-playback') event.preventDefault();
+      runShortcut(shortcut);
     };
     window.addEventListener('keydown', onKeyDown);
 
@@ -458,13 +445,11 @@
       window.removeEventListener('scroll', onScroll, true);
       window.removeEventListener('keydown', onKeyDown);
       document.removeEventListener('visibilitychange', onVisibilityChange);
-      if (playerUiTimer !== null) window.clearTimeout(playerUiTimer);
-      rejectMpvLoadWaiter(new Error('The player was closed.'));
+      if (playerUiTimer !== null) clearTimeout(playerUiTimer);
+      mpv.dispose();
       trailerController.dispose();
-      clearBufferingWatchdog();
-      seekGeneration += 1;
-      mpvUnlisten?.();
-      mpvEventUnlisten?.();
+      stream.dispose();
+      seeks.invalidate();
     };
   });
 
@@ -498,22 +483,14 @@
   $effect(() => {
     const id = current?.id;
     if (id === undefined) return;
-    let cancelled = false;
-    let timer: number | null = null;
-    const update = async () => {
+    return startPolling(async (isActive) => {
       const nextStats = await callBackend('torrent_status', { id }).catch(() => null);
-      if (cancelled || currentRef?.id !== id) return;
+      if (!isActive() || torrents.current?.id !== id) return false;
       if (nextStats) {
-        statsRef = nextStats;
+        stream.updateStats(nextStats);
         stats = nextStats;
       }
-      timer = window.setTimeout(() => void update(), TORRENT_STATUS_INTERVAL_MS);
-    };
-    void update();
-    return () => {
-      cancelled = true;
-      if (timer !== null) window.clearTimeout(timer);
-    };
+    }, TORRENT_STATUS_INTERVAL_MS);
   });
 
   $effect(() => {
@@ -534,15 +511,11 @@
     const view = activeView;
     const theater = theaterMode;
     const trailer = trailerPlayback;
-    if (!isTauri() || !mpvReady) return;
-    if (trailer) {
+    if (!isTauri() || !mpv.ready) return;
+    if (trailer || view === 'player') {
       window.requestAnimationFrame(() => void syncVideoViewport());
-    } else if (view !== 'player') {
-      void runWithMpv(() =>
-        setVideoMarginRatio({ left: 0, right: 0, top: 1, bottom: 0 }, MPV_WINDOW_LABEL)
-      ).catch(() => undefined);
     } else {
-      window.requestAnimationFrame(() => void syncVideoViewport());
+      void hideVideo().catch(() => undefined);
     }
   });
 
@@ -551,7 +524,7 @@
     if (hasActivePlayer) {
       revealPlayerUi();
     } else if (playerUiTimer !== null) {
-      window.clearTimeout(playerUiTimer);
+      clearTimeout(playerUiTimer);
       playerUiTimer = null;
       playerUiVisible = true;
     }
@@ -569,7 +542,7 @@
     const duration = playback.duration;
     const time = playback.time;
     if (!episode || duration <= 0 || time / duration < 0.8) return;
-    const key = `${episode.slug}:${episode.episode}`;
+    const key = episodePlaybackKey(episode);
     if (autoMarkedPlaybackKey === key) return;
     autoMarkedPlaybackKey = key;
     setEpisodeWatched({ anilistId: episode.anilistId, slug: episode.slug }, episode.episode, true);
@@ -583,23 +556,12 @@
       mpvMediaOwner !== 'episode' ||
       trailerPlayback !== null ||
       !target ||
-      !nextStats ||
-      nextStats.state === 'error' ||
-      streamStarted ||
-      streamFailures >= MAX_STREAM_FAILURES ||
-      Date.now() < nextStreamRetryAt
+      !nextStats
     ) {
       return;
     }
-    const selectedFileProgress = nextStats.file_progress?.[target.fileId] ?? nextStats.progress_bytes;
-    if (!nextStats.finished && selectedFileProgress < MIN_STREAM_START_BYTES) return;
-
-    const attempt = ++streamAttemptGeneration;
-    streamStarted = true;
-    void openTorrentStream(target, attempt).catch((reason) => {
-      if (attempt !== streamAttemptGeneration) return;
-      handleStreamFailure(reason instanceof Error ? reason.message : String(reason), attempt);
-    });
+    const attempt = stream.claimAttempt();
+    if (attempt !== null) void openTorrentStream(target, attempt);
   });
 
   $effect(() => {
@@ -613,71 +575,48 @@
     return () => window.clearInterval(interval);
   });
 
-  function preferredSubtitleLanguages(): string {
-    return preferredSubtitleLanguage === 'en'
-      ? 'en'
-      : `${preferredSubtitleLanguage},en`;
+  function runShortcut(shortcut: PlayerShortcut): void {
+    const trailer = Boolean(trailerPlayback);
+    const actions: Record<PlayerShortcut, () => unknown> = {
+      'close-queue': () => (queueOpen = false),
+      'exit-fullscreen': () => toggleFullscreen(false),
+      'close-trailer': closeTrailer,
+      'exit-theater': () => toggleTheater(false),
+      'toggle-playback': trailer ? toggleTrailerPlayback : togglePlayback,
+      'seek-backward': () =>
+        trailer ? seekTrailerRelative(-SEEK_STEP_SECONDS) : seekRelative(-SEEK_STEP_SECONDS),
+      'seek-forward': () =>
+        trailer ? seekTrailerRelative(SEEK_STEP_SECONDS) : seekRelative(SEEK_STEP_SECONDS),
+      'toggle-mute': trailer ? toggleTrailerMute : toggleMute,
+      'toggle-fullscreen': () => toggleFullscreen()
+    };
+    void Promise.resolve()
+      .then(actions[shortcut])
+      .catch((reason) => console.warn(`The ${shortcut} shortcut failed.`, reason));
   }
 
   function updateTrailerPlacement() {
     if (!trailerInlineAnchor || !contentViewport || !trailerInlineAnchor.isConnected) return;
-    const anchor = trailerInlineAnchor.getBoundingClientRect();
-    const host = contentViewport.getBoundingClientRect();
-    trailerPlacement = {
-      left: anchor.left - host.left,
-      top: anchor.top - host.top,
-      width: anchor.width,
-      height: anchor.height
-    };
+    trailerPlacement = relativePlacement(
+      trailerInlineAnchor.getBoundingClientRect(),
+      contentViewport.getBoundingClientRect()
+    );
   }
 
-  function currentVideoMargins() {
+  function currentVideoMargins(): VideoMarginRatio | null {
     const viewport = trailerPlayback ? trailerViewport : videoViewport;
     if (!viewport) return null;
-    const rect = viewport.getBoundingClientRect();
-    const width = window.innerWidth;
-    const height = window.innerHeight;
-    return {
-      left: Math.max(0, rect.left / width),
-      right: Math.max(0, (width - rect.right) / width),
-      top: Math.max(0, rect.top / height),
-      bottom: Math.max(0, (height - rect.bottom) / height)
-    };
+    return viewportMargins(viewport.getBoundingClientRect(), window.innerWidth, window.innerHeight);
   }
 
-  function resetMpvClient() {
-    mpvReady = false;
-    rejectMpvLoadWaiter(new Error('The mpv instance was reset during a media load.'));
-    mpvUnlisten?.();
-    mpvEventUnlisten?.();
-    mpvUnlisten = null;
-    mpvEventUnlisten = null;
-  }
-
-  function isMissingMpvInstance(reason: unknown): boolean {
-    const message = reason instanceof Error ? reason.message : String(reason);
-    return message.includes('is not initialized') || message.includes('mpv instance not found');
-  }
-
-  async function runWithMpv<T>(operation: () => Promise<T>): Promise<T> {
-    await ensureMpv();
-    try {
-      return await operation();
-    } catch (reason) {
-      if (!isMissingMpvInstance(reason)) throw reason;
-      resetMpvClient();
-      await ensureMpv();
-      return operation();
-    }
+  function hideVideo(): Promise<void> {
+    return mpv.run((player) => player.setMargins(HIDDEN_VIDEO_MARGINS));
   }
 
   async function syncVideoViewport() {
-    if (!isTauri() || !mpvReady || mpvInitPromise || mpvMediaOwner === 'transition') return;
+    if (mpvMediaOwner === 'transition') return;
     const margins = currentVideoMargins();
-    if (!margins) return;
-    await setVideoMarginRatio(margins, MPV_WINDOW_LABEL).catch((reason) => {
-      if (!isMissingMpvInstance(reason)) console.warn('The video viewport could not be synced.', reason);
-    });
+    if (margins) await mpv.syncMargins(margins);
   }
 
   function scheduleVideoViewportSync() {
@@ -692,51 +631,25 @@
     window.setTimeout(sync, 320);
   }
 
-  function isSupportedTrailerUrl(value: string): boolean {
-    if (isYoutubeTrailerSearchPlaybackUrl(value)) return true;
-    try {
-      const url = new URL(value);
-      const host = url.hostname.toLowerCase();
-      return (
-        url.protocol === 'https:' &&
-        (host === 'youtube.com' ||
-          host.endsWith('.youtube.com') ||
-          host === 'youtu.be' ||
-          host === 'dailymotion.com' ||
-          host.endsWith('.dailymotion.com'))
-      );
-    } catch {
-      return false;
-    }
-  }
-
   function suspendEpisodeOperations(): void {
-    streamAttemptGeneration += 1;
-    seekGeneration += 1;
-    clearBufferingWatchdog();
-    pendingSeekTime = null;
+    stream.suspend();
+    seeks.invalidate();
     seekTarget = null;
   }
 
-  function trackEpisodeMediaOperation(operation: Promise<void>): Promise<void> {
-    pendingEpisodeMediaOperations.add(operation);
-    operation.then(
-      () => pendingEpisodeMediaOperations.delete(operation),
-      () => pendingEpisodeMediaOperations.delete(operation)
-    );
-    return operation;
+  function captureResumeState(torrent: CurrentTorrent): TrailerResumeState {
+    return { torrent, playback: { ...playback, paused: true }, tracks: [...tracks] };
   }
 
   function openTrailerSession(request: TrailerPlaybackRequest): TrailerSessionContext {
     const inlineAnchor = request.viewport?.isConnected ? request.viewport : null;
+    const torrent = torrents.current;
     const context: TrailerSessionContext = {
       originView: activeView,
       inlineAnchor,
       inlineAnchorVisibility: inlineAnchor?.style.visibility ?? '',
-      resume: currentRef
-        ? { torrent: currentRef, playback: { ...playback, paused: true }, tracks: [...tracks] }
-        : null,
-      requiresEpisodeReload: Boolean(currentRef && phase !== 'ready'),
+      resume: torrent ? captureResumeState(torrent) : null,
+      requiresEpisodeReload: Boolean(torrent && phase !== 'ready'),
       returnTheaterMode: theaterMode,
       returnFullscreenMode: fullscreenMode
     };
@@ -760,20 +673,12 @@
       throw new Error('This trailer provider is not supported by the desktop player.');
     }
 
-    const pendingEpisodeOperations = [...pendingEpisodeMediaOperations];
-    if (pendingEpisodeOperations.length) {
-      await Promise.allSettled(pendingEpisodeOperations);
-    }
+    await episodeOperations.settled();
     if (cancelled()) return;
-    if (currentRef && !playback.paused) await pausePlayback();
+    if (torrents.current && !playback.paused) await pausePlayback();
     if (cancelled()) return;
-    if (context.resume && currentRef) {
-      context.resume = {
-        torrent: currentRef,
-        playback: { ...playback, paused: true },
-        tracks: [...tracks]
-      };
-    }
+    const torrent = torrents.current;
+    if (context.resume && torrent) context.resume = captureResumeState(torrent);
 
     const nextRuntime = runtime ?? (await callBackend('runtime_info'));
     if (cancelled()) return;
@@ -785,7 +690,7 @@
       throw new Error('The bundled YouTube trailer resolver is unavailable.');
     }
 
-    await ensureMpv();
+    await mpv.ensure();
     if (cancelled()) return;
     mpvMediaOwner = 'transition';
     await tick();
@@ -805,30 +710,19 @@
       mpvMediaOwner = 'transition';
       await tick();
       if (cancelled()) return;
-      await runWithMpv(() =>
-        setVideoMarginRatio({ top: 1 }, MPV_WINDOW_LABEL)
-      );
+      await mpv.run((player) => player.setMargins({ top: 1 }));
       if (cancelled()) return;
     }
 
     mpvMediaOwner = 'trailer';
-    await runWithMpv(async () => {
-      await setProperty('speed', 1, MPV_WINDOW_LABEL);
+    await mpv.run(async (player) => {
+      await player.setNumber('speed', 1);
       if (cancelled()) return;
-      await setProperty('volume', initial.volume, MPV_WINDOW_LABEL);
+      await player.setNumber('volume', initial.volume);
       if (cancelled()) return;
-      await setProperty('mute', initial.muted, MPV_WINDOW_LABEL);
+      await player.setFlag('mute', initial.muted);
       if (cancelled()) return;
-      await mpvCommand(
-        'loadfile',
-        [
-          request.url,
-          'replace',
-          -1,
-          'pause=no,start=0,speed=1,vid=auto,aid=auto,sid=no,secondary-sid=no'
-        ],
-        MPV_WINDOW_LABEL
-      );
+      await player.loadFile(request.url, TRAILER_LOAD_OPTIONS);
     });
   }
 
@@ -857,11 +751,12 @@
 
     try {
       const resume = context.resume;
+      const torrent = torrents.current;
       const sameTorrent =
         resume &&
-        currentRef &&
-        resume.torrent.id === currentRef.id &&
-        resume.torrent.fileId === currentRef.fileId;
+        torrent &&
+        resume.torrent.id === torrent.id &&
+        resume.torrent.fileId === torrent.fileId;
       const shouldReloadEpisode = mediaWasReplaced || context.requiresEpisodeReload;
       if (isTauri() && shouldReloadEpisode && sameTorrent && resume) {
         await restoreEpisodeAfterTrailer(resume);
@@ -871,7 +766,7 @@
       }
     } catch (reason) {
       phase = 'error';
-      error = `The episode could not be restored after the trailer: ${reason instanceof Error ? reason.message : String(reason)}`;
+      error = `The episode could not be restored after the trailer: ${errorMessage(reason)}`;
     } finally {
       mpvMediaOwner = 'episode';
       trailerOriginView = null;
@@ -881,12 +776,10 @@
       trailerInlineAnchor = null;
       trailerPlacement = null;
 
-      if (activeView === 'player' && currentRef) {
+      if (activeView === 'player' && torrents.current) {
         scheduleVideoViewportSync();
-      } else if (isTauri() && mpvReady) {
-        await runWithMpv(() =>
-          setVideoMarginRatio({ left: 0, right: 0, top: 1, bottom: 0 }, MPV_WINDOW_LABEL)
-        ).catch(() => undefined);
+      } else if (isTauri() && mpv.ready) {
+        await hideVideo().catch(() => undefined);
       }
     }
   }
@@ -895,30 +788,24 @@
     context: TrailerSessionContext,
     mediaWasReplaced: boolean
   ): Promise<void> {
-    if (!isTauri() || !mpvReady) return;
+    if (!isTauri() || !mpv.ready) return;
 
     const failures: string[] = [];
-    await runWithMpv(() =>
-      setVideoMarginRatio({ left: 0, right: 0, top: 1, bottom: 0 }, MPV_WINDOW_LABEL)
-    ).catch((reason) => failures.push(reason instanceof Error ? reason.message : String(reason)));
-    if (mediaWasReplaced) {
-      await runWithMpv(() => mpvCommand('stop', [], MPV_WINDOW_LABEL)).catch((reason) =>
-        failures.push(reason instanceof Error ? reason.message : String(reason))
-      );
-    } else if (context.resume) {
-      await runWithMpv(() => setProperty('pause', true, MPV_WINDOW_LABEL)).catch((reason) =>
-        failures.push(reason instanceof Error ? reason.message : String(reason))
-      );
-    }
+    const attempt = (operation: (player: MpvCommands) => Promise<void>) =>
+      mpv.run(operation).catch((reason) => {
+        failures.push(errorMessage(reason));
+      });
+    await attempt((player) => player.setMargins(HIDDEN_VIDEO_MARGINS));
+    if (mediaWasReplaced) await attempt((player) => player.stop());
+    else if (context.resume) await attempt((player) => player.setFlag('pause', true));
     if (!failures.length) return;
 
     try {
-      resetMpvClient();
-      await destroyMpv(MPV_WINDOW_LABEL);
+      await mpv.destroy();
       context.requiresEpisodeReload = Boolean(context.resume);
     } catch (reason) {
       throw new Error(
-        `${failures.join(' ')} The mpv instance also could not be reset: ${reason instanceof Error ? reason.message : String(reason)}`
+        `${failures.join(' ')} The mpv instance also could not be reset: ${errorMessage(reason)}`
       );
     }
   }
@@ -928,85 +815,28 @@
       id: resume.torrent.id,
       fileId: resume.torrent.fileId
     });
-    const episodeUrl = `${streamUrl}/${encodeURIComponent(resume.torrent.video.name)}`;
-    await loadMpvFileAndWait(episodeUrl, streamUrl);
+    await mpv.loadAndWait(episodeMediaUrl(streamUrl, resume.torrent), streamUrl);
     mpvMediaOwner = 'episode';
     const selectedAudio = resume.tracks.find((track) => track.type === 'audio' && track.selected);
     const selectedSubtitle = resume.tracks.find((track) => track.type === 'sub' && track.selected);
     playback = { ...resume.playback, paused: true };
     tracks = resume.tracks;
-    await runWithMpv(async () => {
-      if (resume.playback.time > 0) {
-        await mpvCommand(
-          'seek',
-          [resume.playback.time, 'absolute+exact'],
-          MPV_WINDOW_LABEL
-        );
-      }
-      await setProperty('speed', resume.playback.speed, MPV_WINDOW_LABEL);
-      await setProperty('volume', resume.playback.volume, MPV_WINDOW_LABEL);
-      await setProperty('mute', resume.playback.muted, MPV_WINDOW_LABEL);
-      await setProperty('aid', selectedAudio ? String(selectedAudio.id) : 'auto', MPV_WINDOW_LABEL);
-      await setProperty('sid', selectedSubtitle ? String(selectedSubtitle.id) : 'no', MPV_WINDOW_LABEL);
-      await setProperty('pause', true, MPV_WINDOW_LABEL);
+    await mpv.run(async (player) => {
+      if (resume.playback.time > 0) await player.seek(resume.playback.time);
+      await player.setNumber('speed', resume.playback.speed);
+      await player.setNumber('volume', resume.playback.volume);
+      await player.setFlag('mute', resume.playback.muted);
+      await player.selectTrack('aid', selectedAudio?.id ?? 'auto');
+      await player.selectTrack('sid', selectedSubtitle?.id ?? 'no');
+      await player.setFlag('pause', true);
     });
-  }
-
-  async function loadMpvFileAndWait(url: string, expectedPathPrefix: string): Promise<void> {
-    const loadResult = waitForMpvFileLoad(expectedPathPrefix).then(
-      () => ({ loaded: true as const }),
-      (reason: Error) => ({ loaded: false as const, reason })
-    );
-    try {
-      await runWithMpv(() =>
-        mpvCommand('loadfile', [url, 'replace', -1, 'pause=yes'], MPV_WINDOW_LABEL)
-      );
-      const result = await loadResult;
-      if (!result.loaded) throw result.reason;
-    } catch (reason) {
-      rejectMpvLoadWaiter(reason instanceof Error ? reason : new Error(String(reason)));
-      await loadResult;
-      throw reason;
-    }
-  }
-
-  function waitForMpvFileLoad(expectedPathPrefix: string): Promise<void> {
-    rejectMpvLoadWaiter(new Error('A newer media load replaced the previous request.'));
-    return new Promise<void>((resolve, reject) => {
-      const timer = window.setTimeout(() => {
-        if (mpvLoadWaiter?.timer !== timer) return;
-        mpvLoadWaiter = null;
-        reject(new Error('mpv did not finish restoring the episode in time.'));
-      }, MEDIA_LOAD_TIMEOUT_MS);
-      mpvLoadWaiter = { expectedPathPrefix, resolve, reject, timer };
-    });
-  }
-
-  async function confirmMpvLoadWaiter(): Promise<void> {
-    const waiter = mpvLoadWaiter;
-    if (!waiter) return;
-    const path = await getProperty<string | null>('path', 'string', MPV_WINDOW_LABEL).catch(
-      () => null
-    );
-    if (mpvLoadWaiter !== waiter || !path?.startsWith(waiter.expectedPathPrefix)) return;
-    window.clearTimeout(waiter.timer);
-    mpvLoadWaiter = null;
-    waiter.resolve();
-  }
-
-  function rejectMpvLoadWaiter(reason: Error): void {
-    const waiter = mpvLoadWaiter;
-    if (!waiter) return;
-    window.clearTimeout(waiter.timer);
-    mpvLoadWaiter = null;
-    waiter.reject(reason);
   }
 
   async function changeActiveView(nextView: AppView): Promise<void> {
     if (nextView === activeView) return;
-    const generation = ++activeViewRequestGeneration;
+    const generation = viewRequests.next();
     if (trailerPlayback) await closeTrailer();
-    if (generation !== activeViewRequestGeneration || trailerController.active) return;
+    if (!viewRequests.isCurrent(generation) || trailerController.active) return;
     activeView = nextView;
   }
 
@@ -1035,9 +865,7 @@
 
   async function seekTrailerAbsolute(percent: number): Promise<void> {
     if (!trailerPlayback?.duration) return;
-    await trailerController.seek(
-      (Math.max(0, Math.min(100, percent)) / 100) * trailerPlayback.duration
-    );
+    await trailerController.seek(percentToTime(percent, trailerPlayback.duration));
   }
 
   async function changeTrailerVolume(volume: number): Promise<void> {
@@ -1048,305 +876,75 @@
     await trailerController.toggleMute();
   }
 
-  function onMpvProperty(event: MpvEventFromProperties<(typeof OBSERVED_PROPERTIES)[number]>) {
-    if (mpvMediaOwner === 'transition') return;
-    if (mpvMediaOwner === 'trailer') {
-      if (event.name === 'path') {
-        if (
-          typeof event.data === 'string' &&
-          event.data !== trailerOutgoingPath &&
-          isSupportedTrailerUrl(event.data)
-        ) {
-          trailerLoadedPath = event.data;
-          scheduleVideoViewportSync();
-        }
-      } else if (event.name !== 'track-list' && event.name !== 'speed') {
-        trailerController.handleProperty(event.name, event.data);
+  function onTrailerProperty(event: MpvEventFromProperties<ObservedProperty>): void {
+    if (event.name === 'path') {
+      if (
+        typeof event.data === 'string' &&
+        event.data !== trailerOutgoingPath &&
+        isSupportedTrailerUrl(event.data)
+      ) {
+        trailerLoadedPath = event.data;
+        scheduleVideoViewportSync();
       }
-      return;
+    } else if (event.name !== 'track-list' && event.name !== 'speed') {
+      trailerController.handleProperty(event.name, event.data);
     }
+  }
+
+  function onEpisodeProperty(event: MpvEventFromProperties<ObservedProperty>): void {
     if (event.name === 'track-list') {
       tracks = normalizeTracks(event.data);
       return;
     }
-    if (event.name === 'pause') playback = { ...playback, paused: Boolean(event.data) };
-    else if (event.name === 'time-pos') {
-      const time = Number(event.data ?? 0);
-      playback = { ...playback, time };
-      if (
-        seekTarget !== null &&
-        Math.abs(time - seekTarget) <= SEEK_RECONCILE_TOLERANCE_SECONDS
-      ) {
-        seekTarget = null;
-      }
-    } else if (event.name === 'duration') playback = { ...playback, duration: Number(event.data ?? 0) };
-    else if (event.name === 'volume') playback = { ...playback, volume: Number(event.data ?? 0) };
-    else if (event.name === 'mute') playback = { ...playback, muted: Boolean(event.data) };
-    else if (event.name === 'speed') playback = { ...playback, speed: Number(event.data ?? 1) };
-    else if (event.name === 'media-title') {
-      playback = {
-        ...playback,
-        mediaTitle: typeof event.data === 'string' ? event.data : undefined
-      };
-    } else if (event.name === 'paused-for-cache') {
-      if (!currentRef || !streamStarted) return;
-      if (Boolean(event.data)) {
-        mpvPausedForCache = true;
-        if (phase !== 'buffering') bufferingStartedAt = Date.now();
-        phase = 'buffering';
-        armBufferingWatchdog();
-      } else if (playback.duration > 0 || playback.time > 0) {
-        mpvPausedForCache = false;
-        markStreamReady();
-      } else {
-        mpvPausedForCache = false;
-      }
+    if (event.name === 'paused-for-cache') {
+      stream.cacheStateChanged(Boolean(event.data), playback.duration > 0 || playback.time > 0);
+      return;
     }
-
-    if (event.name === 'duration' && Number(event.data) > 0 && !mpvPausedForCache) {
-      markStreamReady();
-    } else if (
-      event.name === 'time-pos' &&
-      typeof event.data === 'number' &&
-      Number.isFinite(event.data) &&
-      !mpvPausedForCache
-    ) {
-      markStreamReady();
-    }
+    playback = applyPlaybackProperty(playback, event.name, event.data);
+    if (event.name === 'time-pos') seekTarget = reconcileSeekTarget(seekTarget, playback.time);
+    if (signalsPlaybackProgress(event.name, event.data)) stream.progressObserved();
   }
 
-  function clearBufferingWatchdog() {
-    if (bufferingWatchdogTimer !== null) window.clearTimeout(bufferingWatchdogTimer);
-    bufferingWatchdogTimer = null;
-  }
-
-  function armBufferingWatchdog(attempt = streamAttemptGeneration) {
-    clearBufferingWatchdog();
-    bufferingWatchdogTimer = window.setTimeout(() => {
-      bufferingWatchdogTimer = null;
-      if (attempt !== streamAttemptGeneration || phase !== 'buffering' || !streamStarted) return;
-      handleStreamFailure('mpv kept waiting for video data from the local torrent stream.', attempt);
-    }, PLAYBACK_START_TIMEOUT_MS);
-  }
-
-  function markStreamReady() {
-    if (!currentRef || !streamStarted) return;
-    clearBufferingWatchdog();
-    mpvPausedForCache = false;
-    streamFailures = 0;
-    nextStreamRetryAt = 0;
-    error = '';
-    phase = 'ready';
+  function onMpvProperty(event: MpvEventFromProperties<ObservedProperty>): void {
+    if (mpvMediaOwner === 'trailer') onTrailerProperty(event);
+    else if (mpvMediaOwner === 'episode') onEpisodeProperty(event);
   }
 
   function onMpvEvent(event: MpvEvent): void {
-    if (event.event === 'file-loaded') {
-      void confirmMpvLoadWaiter();
-    } else if (event.event === 'end-file' && event.reason === 'error') {
-      rejectMpvLoadWaiter(new Error('mpv could not load the requested media.'));
-    }
-
-    if (mpvMediaOwner === 'transition') return;
     if (mpvMediaOwner === 'trailer') {
       if (event.event === 'video-reconfig') scheduleVideoViewportSync();
       trailerController.handleEvent(event);
       return;
     }
-    if (event.event === 'start-file') {
-      mpvPausedForCache = true;
-      bufferingStartedAt = Date.now();
-      phase = 'buffering';
-      armBufferingWatchdog();
-    }
-    if (event.event === 'playback-restart') {
-      markStreamReady();
-    }
+    if (mpvMediaOwner !== 'episode') return;
+    if (event.event === 'start-file') stream.fileStarted();
+    if (event.event === 'playback-restart') stream.markReady();
     if (event.event === 'end-file' && event.reason === 'error') {
-      handleStreamFailure('mpv could not open the local torrent stream yet.');
-    }
-  }
-
-  async function ensureMpv() {
-    if (!isTauri()) return;
-    if (mpvInitPromise) return mpvInitPromise;
-    if (mpvReady) return;
-
-    mpvInitPromise = (async () => {
-      await initMpv(
-        {
-          initialOptions: {
-            vo: 'gpu-next',
-            hwdec: 'auto-safe',
-            'keep-open': 'yes',
-            idle: 'yes',
-            'force-window': 'yes',
-            osc: 'no',
-            'input-default-bindings': 'no',
-            ytdl: 'yes',
-            'ytdl-format': 'bestvideo[height<=1080]+bestaudio/best[height<=1080]',
-            'ytdl-raw-options': 'sub-langs=none',
-            cache: 'yes',
-            'cache-pause': 'yes',
-            'cache-pause-initial': 'yes',
-            'cache-pause-wait': 3,
-            'cache-secs': 180,
-            'demuxer-max-bytes': '512MiB',
-            'demuxer-max-back-bytes': '192MiB',
-            'demuxer-readahead-secs': 180,
-            'demuxer-seekable-cache': 'yes',
-            'demuxer-cache-wait': 'yes',
-            'sub-auto': 'all',
-            slang: preferredSubtitleLanguages(),
-            alang: 'jpn,eng,nld'
-          },
-          observedProperties: OBSERVED_PROPERTIES
-        },
-        MPV_WINDOW_LABEL
-      );
-      mpvUnlisten?.();
-      mpvEventUnlisten?.();
-      mpvUnlisten = await observeProperties(
-        OBSERVED_PROPERTIES,
-        onMpvProperty,
-        MPV_WINDOW_LABEL
-      );
-      mpvEventUnlisten = await listenEvents(onMpvEvent, MPV_WINDOW_LABEL);
-
-      const margins =
-        mpvMediaOwner === 'transition'
-          ? { left: 0, right: 0, top: 1, bottom: 0 }
-          : currentVideoMargins();
-      if (margins) await setVideoMarginRatio(margins, MPV_WINDOW_LABEL);
-      mpvReady = true;
-    })();
-
-    try {
-      await mpvInitPromise;
-    } catch (reason) {
-      resetMpvClient();
-      throw reason;
-    } finally {
-      mpvInitPromise = null;
+      stream.fail('mpv could not open the local torrent stream yet.');
     }
   }
 
   function openTorrentStream(target: CurrentTorrent, attempt: number): Promise<void> {
-    return trackEpisodeMediaOperation(performOpenTorrentStream(target, attempt));
-  }
-
-  async function performOpenTorrentStream(target: CurrentTorrent, attempt: number) {
-    if (attempt !== streamAttemptGeneration || mpvMediaOwner !== 'episode') return;
-    const streamUrl = await callBackend('stream_url', {
-      id: target.id,
-      fileId: target.fileId
+    const opening = openEpisodeStream(target, {
+      mpv,
+      streamUrl: (torrent) => callBackend('stream_url', { id: torrent.id, fileId: torrent.fileId }),
+      isActive: () => stream.isCurrent(attempt) && mpvMediaOwner === 'episode',
+      isReady: () => phase === 'ready',
+      markReady: () => stream.markReady(),
+      margins: currentVideoMargins,
+      resumeAt: () => seekTarget ?? playback.time,
+      livePeers: () => stream.livePeers,
+      startTimeoutMs: PLAYBACK_START_TIMEOUT_MS,
+      probeIntervalMs: PLAYBACK_PROBE_INTERVAL_MS
     });
-    const url = `${streamUrl}/${encodeURIComponent(target.video.name)}`;
-    const resumeAt = Math.floor(seekTarget ?? playback.time);
-    if (attempt !== streamAttemptGeneration || mpvMediaOwner !== 'episode') return;
-    await runWithMpv(async () => {
-      if (attempt !== streamAttemptGeneration || mpvMediaOwner !== 'episode') return;
-      const margins = currentVideoMargins();
-      if (margins) await setVideoMarginRatio(margins, MPV_WINDOW_LABEL);
-      if (attempt !== streamAttemptGeneration || mpvMediaOwner !== 'episode') return;
-      await mpvCommand(
-        'loadfile',
-        resumeAt > 0 ? [url, 'replace', -1, `start=${resumeAt}`] : [url, 'replace'],
-        MPV_WINDOW_LABEL
-      );
-      await setProperty('pause', false, MPV_WINDOW_LABEL);
-    });
-    if (attempt !== streamAttemptGeneration || mpvMediaOwner !== 'episode') return;
-    await waitForPlaybackStart(streamUrl, attempt);
+    return episodeOperations
+      .track(opening)
+      .catch((reason) => stream.fail(errorMessage(reason), attempt));
   }
 
-  async function waitForPlaybackStart(streamUrl: string, attempt: number) {
-    const deadline = Date.now() + PLAYBACK_START_TIMEOUT_MS;
-    let verifiedPath = false;
-    while (
-      attempt === streamAttemptGeneration &&
-      mpvMediaOwner === 'episode' &&
-      Date.now() < deadline
-    ) {
-      if (phase === 'ready') return;
-      if (!verifiedPath) {
-        const pathResult = await getProperty<string | null>('path', 'string', MPV_WINDOW_LABEL).catch(
-          () => null
-        );
-        verifiedPath = typeof pathResult === 'string' && pathResult.startsWith(streamUrl);
-      }
-      const pausedForCache = await getProperty<boolean>('paused-for-cache', 'flag', MPV_WINDOW_LABEL).catch(
-        () => true
-      );
-      const time = await getProperty<number | null>('time-pos', 'double', MPV_WINDOW_LABEL).catch(
-        () => null
-      );
-      if (attempt !== streamAttemptGeneration || mpvMediaOwner !== 'episode') return;
-      if (
-        verifiedPath &&
-        pausedForCache === false &&
-        typeof time === 'number' &&
-        Number.isFinite(time)
-      ) {
-        markStreamReady();
-        return;
-      }
-      await new Promise((resolve) => window.setTimeout(resolve, PLAYBACK_PROBE_INTERVAL_MS));
-    }
-    if (attempt !== streamAttemptGeneration || mpvMediaOwner !== 'episode') return;
-    const peers = statsRef?.live?.snapshot.peer_stats.live ?? 0;
-    throw new Error(
-      peers === 0
-        ? 'There are no reachable peers for this torrent yet.'
-        : 'mpv did not receive a playable video segment in time.'
-    );
-  }
-
-  function handleStreamFailure(message: string, attempt = streamAttemptGeneration) {
-    if (!currentRef) return;
-    if (attempt !== streamAttemptGeneration) return;
-    clearBufferingWatchdog();
-    mpvPausedForCache = false;
-    streamAttemptGeneration += 1;
-    streamStarted = false;
-    streamFailures += 1;
-    if (streamFailures >= MAX_STREAM_FAILURES) {
-      nextStreamRetryAt = Number.POSITIVE_INFINITY;
-      phase = 'error';
-      error = `${message} The local stream was attempted ${MAX_STREAM_FAILURES} times.`;
-      return;
-    }
-    nextStreamRetryAt = Date.now() + STREAM_RETRY_DELAY_MS;
-    bufferingStartedAt = Date.now();
-    error = '';
-    phase = 'buffering';
-  }
-
-  async function forgetTorrent(id: number): Promise<void> {
-    await callBackend('forget_torrent', { id }).catch((reason) =>
-      console.warn(`Torrent ${id} could not be removed from the session.`, reason)
-    );
-  }
-
-  async function clearCurrentForReplacement() {
-    const previous = currentRef;
-    if (!previous) return;
-    if (isTauri()) {
-      if (mpvReady) {
-        await runWithMpv(() => mpvCommand('stop', [], MPV_WINDOW_LABEL)).catch((reason) =>
-          console.warn('The previous episode could not be stopped.', reason)
-        );
-      }
-      await forgetTorrent(previous.id);
-    }
-    currentRef = null;
-    statsRef = null;
-    clearBufferingWatchdog();
-    mpvPausedForCache = false;
-    streamAttemptGeneration += 1;
-    streamStarted = false;
-    streamFailures = 0;
-    pendingSeekTime = null;
-    seekGeneration += 1;
+  function resetEpisodeState(): void {
+    stream.begin(null);
+    seeks.invalidate();
     current = null;
     playingEpisode = null;
     stats = null;
@@ -1354,101 +952,53 @@
     seekTarget = null;
   }
 
-  function startTorrent(releaseMagnet: string): Promise<boolean> {
-    const generation = ++torrentStartGeneration;
-    const start = torrentStartQueue.then(() => performStartTorrent(releaseMagnet, generation));
-    torrentStartQueue = start.catch(() => false);
-    return start;
+  async function beginEpisode(torrent: CurrentTorrent): Promise<void> {
+    stream.begin(torrent);
+    stats = null;
+    current = torrent;
+    phase = 'buffering';
+    playback = { ...playback, paused: false, time: 0, duration: 0 };
+
+    if (isTauri()) {
+      await mpv.ensure();
+      return;
+    }
+    tracks = PREVIEW_TRACKS.map((track) => ({ ...track }));
+    playback = { ...playback, duration: 888, paused: false };
+    phase = 'ready';
   }
 
-  async function performStartTorrent(releaseMagnet: string, generation: number): Promise<boolean> {
-    if (generation !== torrentStartGeneration) return false;
+  function failPlayback(message: string): false {
+    error = message;
+    phase = 'error';
+    return false;
+  }
+
+  async function startTorrent(releaseMagnet: string): Promise<boolean> {
     error = '';
-    const magnetToOpen = releaseMagnet.trim();
-    if (!magnetToOpen.startsWith('magnet:?')) {
-      error = 'Enter a valid magnet link.';
-      phase = 'error';
-      return false;
-    }
+    const magnet = releaseMagnet.trim();
+    if (!magnet.startsWith('magnet:?')) return failPlayback('Enter a valid magnet link.');
     if (isTauri() && runtime && !runtime.mpvAvailable) {
-      error = 'The bundled libmpv runtime is missing. Reinstall StreamsPlease or run the libmpv setup step.';
-      phase = 'error';
-      return false;
+      return failPlayback(
+        'The bundled libmpv runtime is missing. Reinstall StreamsPlease or run the libmpv setup step.'
+      );
     }
 
     phase = 'connecting';
     try {
-      await clearCurrentForReplacement();
-      if (generation !== torrentStartGeneration) return false;
-      const response = await callBackend('add_magnet', { magnet: magnetToOpen });
-      if (response.id === undefined) throw new Error('The torrent engine did not return a session ID.');
-      if (generation !== torrentStartGeneration) {
-        if (isTauri()) await forgetTorrent(response.id);
-        return false;
-      }
-      const chosen = chooseVideoFile(response.details.files);
-      if (!chosen) {
-        if (isTauri()) await forgetTorrent(response.id);
-        throw new Error('This torrent does not contain a supported video file.');
-      }
-
-      const nextCurrent: CurrentTorrent = {
-        id: response.id,
-        details: response.details,
-        video: chosen.file,
-        fileId: chosen.fileId
-      };
-      currentRef = nextCurrent;
-      statsRef = null;
-      streamStarted = false;
-      streamFailures = 0;
-      clearBufferingWatchdog();
-      mpvPausedForCache = false;
-      streamAttemptGeneration += 1;
-      nextStreamRetryAt = 0;
-      stats = null;
-      current = nextCurrent;
-      bufferingStartedAt = Date.now();
-      phase = 'buffering';
-      playback = { ...playback, paused: false, time: 0, duration: 0 };
-
-      if (isTauri()) {
-        await ensureMpv();
-      } else {
-        tracks = [
-          { id: 1, type: 'video', codec: 'h264', selected: true },
-          { id: 2, type: 'audio', lang: 'jpn', title: 'Japanese', codec: 'aac', selected: true },
-          { id: 3, type: 'audio', lang: 'eng', title: 'English', codec: 'aac' },
-          { id: 4, type: 'sub', lang: 'eng', title: 'English • ASS', codec: 'ass', selected: true },
-          { id: 5, type: 'sub', lang: 'nld', title: 'Dutch', codec: 'ass' }
-        ];
-        playback = { ...playback, duration: 888, paused: false };
-        phase = 'ready';
-      }
-      return true;
+      const result = await torrents.start(magnet);
+      return result.status === 'started';
     } catch (reason) {
-      if (generation !== torrentStartGeneration) return false;
-      phase = 'error';
-      error = reason instanceof Error ? reason.message : String(reason);
-      return false;
+      return failPlayback(errorMessage(reason));
     }
   }
 
-  function commitLibrary(entries: LibraryEntry[]) {
-    if (entries === libraryEntries) return;
-    if (!saveLibrary(entries)) console.error('The library could not be saved to local storage.');
-    libraryEntries = entries;
-  }
-
-  async function importLibrary(backups: LibraryBackupEntry[]): Promise<{ failed: string[] }> {
-    const { entries, failed } = await hydrateLibraryBackups(backups, {
-      timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC',
-      existing: libraryEntries,
+  function importLibrary(backups: LibraryBackupEntry[]): Promise<{ failed: string[] }> {
+    return library.importBackups(backups, {
+      timezone: localTimezone(),
       loadSchedule: loadSubsPleaseSchedule,
       loadShow: (slug, timezone, anilistId) => loadSubsPleaseShow(slug, timezone, anilistId)
     });
-    if (entries.length) commitLibrary(mergeLibraryEntries(libraryEntries, entries));
-    return { failed };
   }
 
   function updatePreferredQuality(quality: PlaybackQuality) {
@@ -1459,205 +1009,44 @@
   function updatePreferredSubtitleLanguage(language: SubtitleLanguage) {
     preferredSubtitleLanguage = language;
     saveSettings({ preferredQuality, preferredSubtitleLanguage: language });
-    if (isTauri() && mpvReady) {
-      void runWithMpv(() =>
-        setProperty('slang', preferredSubtitleLanguages(), MPV_WINDOW_LABEL)
-      ).catch(() => undefined);
+    if (isTauri() && mpv.ready) {
+      void mpv
+        .run((player) => player.setSubtitleLanguages(subtitleLanguagePreference(language)))
+        .catch(() => undefined);
     }
   }
 
-  function syncLibraryShow(
-    details: SubsPleaseShowResponse,
-    show: SubsPleaseScheduleShow,
-    day?: DayName
-  ) {
-    commitLibrary(syncLibraryEntry(libraryEntries, details, show, day));
-  }
-
-  function toggleLibraryShow(
-    details: SubsPleaseShowResponse,
-    show: SubsPleaseScheduleShow,
-    day?: DayName
-  ) {
-    commitLibrary(toggleLibraryEntry(libraryEntries, details, show, day));
-  }
-
-  function setDiscoveryVerdict(
-    details: SubsPleaseShowResponse,
-    show: SubsPleaseScheduleShow,
-    day: DayName | undefined,
-    verdict?: DiscoveryVerdict
-  ) {
-    commitLibrary(applyDiscoveryVerdict(libraryEntries, details, show, day, verdict));
-  }
-
-  function decideDiscoveryShow(
-    details: SubsPleaseShowResponse,
-    show: SubsPleaseScheduleShow,
-    day: DayName | undefined,
-    verdict: DiscoveryVerdict
-  ) {
-    setDiscoveryVerdict(details, show, day, verdict);
-  }
-
-  function setEpisodeWatched(identity: LibraryIdentity, episode: string, watched: boolean) {
-    commitLibrary(setLibraryEpisodeWatched(libraryEntries, identity, episode, watched));
-  }
-
-  function toggleEpisodeWatched(slug: string, episode: string) {
-    commitLibrary(toggleLibraryEpisodeWatched(libraryEntries, { slug }, episode));
-  }
-
-  function setEpisodeProgress(slug: string, progressCount: number) {
-    commitLibrary(setLibraryEpisodeProgress(libraryEntries, { slug }, progressCount));
-  }
-
-  function episodePlaybackKey(request: EpisodePlaybackRequest): string {
-    return `${request.slug}:${request.episode}`;
-  }
-
-  function sameEpisode(left: string, right: string): boolean {
-    if (left === right) return true;
-    const leftNumber = Number.parseFloat(left);
-    const rightNumber = Number.parseFloat(right);
-    return Number.isFinite(leftNumber) && Number.isFinite(rightNumber) && leftNumber === rightNumber;
-  }
-
-  function nextRelease(
-    details: SubsPleaseShowResponse,
-    currentEpisode: string
-  ): SubsPleaseRelease | undefined {
-    const releases = Object.values(details.episode ?? {});
-    const episodeOrder = sortEpisodeNumbers(releases.map((release) => release.episode));
-    const currentIndex = episodeOrder.findIndex((episode) => sameEpisode(episode, currentEpisode));
-    if (currentIndex < 0) return undefined;
-    const nextEpisodeNumber = episodeOrder[currentIndex + 1];
-    return nextEpisodeNumber
-      ? releases.find((release) => release.episode === nextEpisodeNumber)
-      : undefined;
-  }
-
-  function nextEpisodeDownload(
-    release: SubsPleaseRelease,
-    currentQuality: string
-  ): SubsPleaseDownload | undefined {
-    return (
-      release.downloads.find((download) => download.res === currentQuality) ??
-      release.downloads.find((download) => download.res === preferredQuality) ??
-      [...release.downloads].sort((left, right) => Number(right.res) - Number(left.res))[0]
-    );
-  }
-
-  function recommendationPreparationMatches(sourceKey: string, generation: number): boolean {
-    return Boolean(
-      generation === nextEpisodeGeneration &&
-        playingEpisode &&
+  async function prepareNextEpisode(request: EpisodePlaybackRequest, generation: number): Promise<void> {
+    const sourceKey = episodePlaybackKey(request);
+    const plan = await planNextEpisode(request, {
+      timezone: localTimezone(),
+      preferredQuality,
+      libraryEntries: () => library.entries,
+      loadShow: loadSubsPleaseShow,
+      isCurrent: () =>
+        episodeRequests.isCurrent(generation) &&
+        playingEpisode !== null &&
         episodePlaybackKey(playingEpisode) === sourceKey
-    );
-  }
-
-  function libraryRecommendationCandidates(request: EpisodePlaybackRequest): LibraryEntry[] {
-    const candidates = libraryEntries.filter(
-      (entry) =>
-        entry.following &&
-        !libraryEntryMatches(entry, request.anilistId, request.slug) &&
-        Boolean(nextUnwatchedEpisode(entry))
-    );
-    return [
-      ...candidates.filter((entry) => entry.watchedEpisodes.length > 0),
-      ...candidates.filter((entry) => entry.watchedEpisodes.length === 0)
-    ];
-  }
-
-  async function prepareLibraryRecommendation(
-    request: EpisodePlaybackRequest,
-    generation: number,
-    timezone: string
-  ): Promise<EpisodePlaybackRequest | null> {
-    const sourceKey = episodePlaybackKey(request);
-    for (const entry of libraryRecommendationCandidates(request)) {
-      const episode = nextUnwatchedEpisode(entry);
-      if (!episode) continue;
-      try {
-        const details = await loadSubsPleaseShow(entry.slug, timezone, entry.anilistId);
-        if (!recommendationPreparationMatches(sourceKey, generation)) return null;
-        const release = Object.values(details.episode ?? {}).find((item) =>
-          sameEpisode(item.episode, episode)
-        );
-        const download = release ? nextEpisodeDownload(release, request.quality) : undefined;
-        if (!release || !download?.magnet) continue;
-        return {
-          anilistId: details.metadata_id ?? entry.anilistId,
-          slug: details.slug || entry.slug,
-          title: details.title || entry.title,
-          imageUrl: details.image_url || entry.imageUrl,
-          episode: release.episode,
-          magnet: download.magnet,
-          quality: download.res,
-          day: entry.day,
-          airingTime: entry.airingTime
-        };
-      } catch {
-        if (!recommendationPreparationMatches(sourceKey, generation)) return null;
-      }
-    }
-    return null;
-  }
-
-  async function prepareNextEpisode(
-    request: EpisodePlaybackRequest,
-    generation: number
-  ): Promise<void> {
-    const sourceKey = episodePlaybackKey(request);
-    try {
-      const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Amsterdam';
-      const details = await loadSubsPleaseShow(request.slug, timezone, request.anilistId);
-      if (!recommendationPreparationMatches(sourceKey, generation)) return;
-
-      const release = nextRelease(details, request.episode);
-      const download = release ? nextEpisodeDownload(release, request.quality) : undefined;
-      if (release && download?.magnet) {
-        nextEpisodeFromLibrary = false;
-        nextEpisode = {
-          anilistId: details.metadata_id ?? request.anilistId,
-          slug: details.slug || request.slug,
-          title: details.title || request.title,
-          imageUrl: details.image_url || request.imageUrl,
-          episode: release.episode,
-          magnet: download.magnet,
-          quality: download.res,
-          day: request.day,
-          airingTime: request.airingTime
-        };
-        return;
-      }
-
-      const recommendation = await prepareLibraryRecommendation(request, generation, timezone);
-      if (!recommendationPreparationMatches(sourceKey, generation)) return;
-      nextEpisodeFromLibrary = Boolean(recommendation);
-      nextEpisode = recommendation;
-    } catch {
-      if (recommendationPreparationMatches(sourceKey, generation)) {
-        nextEpisode = null;
-        nextEpisodeFromLibrary = false;
-      }
-    }
+    });
+    if (!plan) return;
+    nextEpisodeFromLibrary = plan.fromLibrary;
+    nextEpisode = plan.episode;
   }
 
   async function playSubsPleaseRelease(request: EpisodePlaybackRequest) {
-    const generation = ++nextEpisodeGeneration;
+    const generation = episodeRequests.next();
     const originView = activeView === 'player' ? episodeOriginView : activeView;
     nextEpisode = null;
     nextEpisodeFromLibrary = false;
     nextEpisodeDismissedFor = '';
     await changeActiveView('player');
-    if (activeView !== 'player' || generation !== nextEpisodeGeneration) return;
+    if (activeView !== 'player' || !episodeRequests.isCurrent(generation)) return;
     episodeOriginView = originView;
     queueOpen = false;
     playingEpisode = null;
     autoMarkedPlaybackKey = '';
     const started = await startTorrent(request.magnet);
-    if (!started || generation !== nextEpisodeGeneration) return;
+    if (!started || !episodeRequests.isCurrent(generation)) return;
     playingEpisode = request;
     void prepareNextEpisode(request, generation);
   }
@@ -1686,12 +1075,7 @@
   }
 
   function episodeDetailsView(): AppView {
-    const inLibrary = libraryEntries.some(
-      (entry) =>
-        entry.following &&
-        libraryEntryMatches(entry, playingEpisode?.anilistId, playingEpisode?.slug)
-    );
-    if (inLibrary) return 'library';
+    if (playingLibraryEntry) return 'library';
     return episodeOriginView === 'search' ? 'search' : 'subsplease';
   }
 
@@ -1702,29 +1086,25 @@
   async function togglePlayback() {
     if (!current) return;
     const paused = !playback.paused;
-    if (isTauri()) {
-      await runWithMpv(() => setProperty('pause', paused, MPV_WINDOW_LABEL));
-    }
+    if (isTauri()) await mpv.run((player) => player.setFlag('pause', paused));
     playback = { ...playback, paused };
   }
 
   async function pausePlayback() {
     if (!current || playback.paused) return;
     playback = { ...playback, paused: true };
-    if (isTauri()) {
-      await runWithMpv(() => setProperty('pause', true, MPV_WINDOW_LABEL)).catch(() => undefined);
-    }
+    if (isTauri()) await mpv.run((player) => player.setFlag('pause', true)).catch(() => undefined);
   }
 
   function revealPlayerUi() {
     playerUiVisible = true;
-    if (playerUiTimer !== null) window.clearTimeout(playerUiTimer);
-    playerUiTimer = window.setTimeout(() => {
+    if (playerUiTimer !== null) clearTimeout(playerUiTimer);
+    playerUiTimer = setTimeout(() => {
       playerUiTimer = null;
       if (trailerPlayback || (activeView === 'player' && current && !queueOpen)) {
         playerUiVisible = false;
       }
-    }, 5_000);
+    }, PLAYER_UI_HIDE_DELAY_MS);
   }
 
   function toggleTheater(force?: boolean) {
@@ -1745,92 +1125,43 @@
   function scheduleSeek(time: number) {
     if (!current || playback.duration <= 0) return;
     const target = Math.max(0, Math.min(playback.duration, time));
-    pendingSeekTime = target;
-    seekTarget = target;
-
     if (!isTauri()) {
-      pendingSeekTime = null;
       playback = { ...playback, time: target };
       seekTarget = null;
       return;
     }
-
-    flushScheduledSeek();
+    seekTarget = target;
+    seeks.schedule(target);
   }
 
   function seekRelative(seconds: number) {
     if (!current) return;
-    scheduleSeek((pendingSeekTime ?? seekTarget ?? playback.time) + seconds);
+    scheduleSeek((seeks.pendingTarget ?? seekTarget ?? playback.time) + seconds);
   }
 
   function seekAbsolute(percent: number) {
     if (!current) return;
-    scheduleSeek((Math.max(0, Math.min(100, percent)) / 100) * playback.duration);
-  }
-
-  function flushScheduledSeek() {
-    if (seekOperation || pendingSeekTime === null) return;
-    const generation = seekGeneration;
-    const operation = trackEpisodeMediaOperation(performScheduledSeek(generation));
-    seekOperation = operation;
-    operation.then(
-      () => finishScheduledSeek(operation, generation),
-      () => finishScheduledSeek(operation, generation)
-    );
-  }
-
-  function finishScheduledSeek(operation: Promise<void>, generation: number) {
-    if (seekOperation !== operation) return;
-    seekOperation = null;
-    if (generation === seekGeneration && pendingSeekTime !== null) flushScheduledSeek();
-  }
-
-  async function performScheduledSeek(generation: number) {
-    while (
-      generation === seekGeneration &&
-      current &&
-      mpvMediaOwner === 'episode' &&
-      pendingSeekTime !== null
-    ) {
-      const target = pendingSeekTime;
-      pendingSeekTime = null;
-      try {
-        await runWithMpv(() =>
-          mpvCommand('seek', [target, 'absolute+exact'], MPV_WINDOW_LABEL).then(() => undefined)
-        );
-      } catch (reason) {
-        if (generation === seekGeneration && seekTarget === target) {
-          seekTarget = null;
-          error = `Seek could not be completed: ${reason instanceof Error ? reason.message : String(reason)}`;
-        }
-        return;
-      }
-    }
+    scheduleSeek(percentToTime(percent, playback.duration));
   }
 
   async function changeVolume(volume: number) {
     playback = { ...playback, volume, muted: false };
     if (isTauri()) {
-      await runWithMpv(() => setProperty('mute', false, MPV_WINDOW_LABEL));
-      await runWithMpv(() => setProperty('volume', volume, MPV_WINDOW_LABEL));
+      await mpv.run((player) => player.setFlag('mute', false));
+      await mpv.run((player) => player.setNumber('volume', volume));
     }
   }
 
   async function toggleMute() {
     const muted = !playback.muted;
     playback = { ...playback, muted };
-    if (isTauri()) {
-      await runWithMpv(() => setProperty('mute', muted, MPV_WINDOW_LABEL));
-    }
+    if (isTauri()) await mpv.run((player) => player.setFlag('mute', muted));
   }
 
   async function cycleSpeed() {
-    const speeds = [1, 1.25, 1.5, 2, 0.75];
-    const next = speeds[(speeds.indexOf(playback.speed) + 1) % speeds.length];
-    playback = { ...playback, speed: next };
-    if (isTauri()) {
-      await runWithMpv(() => setProperty('speed', next, MPV_WINDOW_LABEL));
-    }
+    const speed = nextPlaybackSpeed(playback.speed);
+    playback = { ...playback, speed };
+    if (isTauri()) await mpv.run((player) => player.setNumber('speed', speed));
   }
 
   async function toggleFullscreen(force?: boolean) {
@@ -1844,47 +1175,32 @@
   }
 
   async function selectTrack(type: 'sid' | 'aid', value: string) {
+    const choice = value === 'no' ? 'no' : Number(value);
+    if (choice !== 'no' && !Number.isSafeInteger(choice)) return;
     const previousTracks = tracks;
-    const numericId = value === 'no' ? undefined : Number(value);
     tracks = tracks.map((track) => {
       const matchesType = type === 'sid' ? track.type === 'sub' : track.type === 'audio';
-      return matchesType ? { ...track, selected: track.id === numericId } : track;
+      return matchesType ? { ...track, selected: track.id === choice } : track;
     });
     if (!isTauri()) return;
 
     try {
-      await runWithMpv(() => setProperty(type, value, MPV_WINDOW_LABEL));
+      await mpv.run((player) => player.selectTrack(type, choice));
     } catch (reason) {
       tracks = previousTracks;
-      error = `The track could not be changed: ${reason instanceof Error ? reason.message : String(reason)}`;
+      error = `The track could not be changed: ${errorMessage(reason)}`;
     }
   }
 
   async function retryPlayback() {
-    if (!current || trailerPlayback || mpvMediaOwner !== 'episode') return;
+    const torrent = current;
+    if (!torrent || trailerPlayback || mpvMediaOwner !== 'episode') return;
     error = '';
-    bufferingStartedAt = Date.now();
-    clearBufferingWatchdog();
-    mpvPausedForCache = false;
-    streamAttemptGeneration += 1;
-    streamStarted = false;
-    streamFailures = 0;
-    nextStreamRetryAt = 0;
+    stream.restart();
     phase = 'buffering';
-    if (isTauri()) {
-      const selectedFileProgress = statsRef?.file_progress?.[current.fileId] ?? statsRef?.progress_bytes ?? 0;
-      const enoughBuffered =
-        statsRef?.finished || selectedFileProgress >= MIN_STREAM_START_BYTES;
-      if (enoughBuffered) {
-        streamStarted = true;
-        const attempt = ++streamAttemptGeneration;
-        try {
-          await openTorrentStream(current, attempt);
-        } catch (reason) {
-          handleStreamFailure(reason instanceof Error ? reason.message : String(reason), attempt);
-        }
-      }
-    }
+    if (!isTauri()) return;
+    const attempt = stream.claimRetry();
+    if (attempt !== null) await openTorrentStream(torrent, attempt);
   }
 
   function startAppUpdate() {

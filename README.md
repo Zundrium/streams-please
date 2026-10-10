@@ -131,7 +131,7 @@ The **Legal Sintel demo** button enters a Creative Commons/open movie torrent so
 
 ## Source organization
 
-- `src/lib/components/app/`: app orchestration, navigation, window controls, and updates.
+- `src/lib/components/app/`: app orchestration (wiring the player, torrent, and library modules to the UI), navigation, window controls, and updates.
 - `src/lib/components/catalog/`: Search, Discovery, SubsPlease, show details, and shared catalog components.
 - `src/lib/components/{library,player,settings,shared}/`: feature UI and reusable presentation.
 - `src/lib/components/ui/`: locally owned Lily primitives.
@@ -139,6 +139,10 @@ The **Legal Sintel demo** button enters a Creative Commons/open movie torrent so
 - `src/lib/discovery/`: recommendation and airing-candidate domain logic.
 - `src/lib/library.ts` and `src/lib/library-import.ts`: persisted library normalization, identity-safe reducers, and backup hydration.
 - `src/lib/torrent/`: pure torrent file selection, track normalization, and piece-range helpers.
+- `src/lib/torrent/session.ts`: serialized torrent start/replace/forget lifecycle.
+- `src/lib/player/`: framework-free playback building blocks: `MpvClient` (the only place that talks to libmpv, with format-fixed property methods), `StreamLifecycle` (stream attempts, retries, and buffering watchdog), episode stream opening, seek coalescing, next-episode planning, keyboard shortcuts, and viewport math.
+- `src/lib/async/`: reusable generation tokens, serial queue, polling, and operation tracking primitives.
+- `src/lib/library-store.svelte.ts`: reactive library state with injectable persistence.
 - `src/lib/backend/commands.ts`: the typed Tauri command contract shared by `src/lib/backend.ts` (desktop invocation) and `src/lib/backend/preview.ts` (deterministic preview fixtures).
 - `src-tauri/src/catalog/`: catalog adapter registry, AniList/MyAnimeList/Jikan/Kitsu adapters, persistent identity resolution, and independent SubsPlease releases.
 - `src-tauri/src/catalog/http.rs`: shared provider HTTP layer with rate limiting, cooldowns, response caching, and bounded body reads.

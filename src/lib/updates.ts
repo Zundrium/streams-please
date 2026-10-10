@@ -1,6 +1,7 @@
 import { Channel } from '@tauri-apps/api/core';
 import { callBackend } from '$lib/backend';
 import type { AppUpdateStatus, UpdateCheckResult, UpdateDownloadEvent } from '$lib/types';
+import { errorMessage } from '$lib/errors';
 
 export function checkForUpdate(): Promise<UpdateCheckResult> {
   return callBackend('check_for_update');
@@ -39,7 +40,7 @@ export function createUpdateController({
   function reportFailure(reason: unknown) {
     setStatus({
       phase: 'error',
-      message: reason instanceof Error ? reason.message : String(reason)
+      message: errorMessage(reason)
     });
   }
 

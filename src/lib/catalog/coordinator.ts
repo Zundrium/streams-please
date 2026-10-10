@@ -7,6 +7,7 @@ import {
   type CatalogProvider, type CatalogProvenance, type CatalogRequest
 } from '$lib/catalog/providers';
 import { currentSeason, seasonOrdinal } from '$lib/catalog/presentation';
+import { errorMessage } from '$lib/errors';
 
 const MINUTE = 60_000;
 const DAY = 24 * 60 * MINUTE;
@@ -119,7 +120,7 @@ export function createCatalogCoordinator(call: BackendCall, options: CatalogCach
           }
           return result(cache.save(request, value), provider, 'none', errors, secondary);
         } catch (reason: unknown) {
-          const message = `${provider.label}: ${reason instanceof Error ? reason.message : String(reason)}`;
+          const message = `${provider.label}: ${errorMessage(reason)}`;
           const failed = { until: now() + FAILURE_COOLDOWN, label: provider.label, message };
           if (provider.id !== 'myanimelist' || configuration === myAnimeListConfiguration) {
             failures.set(provider.id, failed);

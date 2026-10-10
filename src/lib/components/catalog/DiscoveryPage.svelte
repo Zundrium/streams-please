@@ -77,6 +77,7 @@
     type SubsPleaseShowResponse,
     type TrailerPlaybackRequest
   } from '$lib/types';
+  import { localTimezone } from '$lib/time';
 
   const TEXT_REVEAL_DURATION_MS = 360;
 
@@ -121,7 +122,7 @@
         : 280
   });
 
-  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone || 'Europe/Amsterdam';
+  const timezone = localTimezone();
   const initialSeason = currentSeason();
   const furthestSeason = shiftSeason(initialSeason.season, initialSeason.year, 1);
 
