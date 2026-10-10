@@ -9,6 +9,7 @@ use librqbit::{
     http_api::{HttpApi, HttpApiOptions},
     AddTorrent, AddTorrentOptions, Magnet, Session, SessionOptions, SessionPersistenceConfig,
 };
+use serde::Serialize;
 use tauri::{Manager, State};
 use tokio::net::TcpListener;
 
@@ -258,6 +259,22 @@ pub async fn stream_url(
 #[tauri::command]
 pub async fn release_torrent(state: State<'_, TorrentState>, id: usize) -> Result<(), String> {
     state.seeding.release(id).await
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferSpeeds {
+    download_mbps: f64,
+    upload_mbps: f64,
+}
+
+#[tauri::command]
+pub fn transfer_speeds(state: State<'_, TorrentState>) -> TransferSpeeds {
+    let stats = state.api.session().stats_snapshot();
+    TransferSpeeds {
+        download_mbps: stats.download_speed.mbps,
+        upload_mbps: stats.upload_speed.mbps,
+    }
 }
 
 #[cfg(test)]

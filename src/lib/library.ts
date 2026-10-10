@@ -506,9 +506,16 @@ export function watchedCount(entry: LibraryEntry): number {
   return entry.watchedEpisodes.filter((episode) => available.has(episode)).length;
 }
 
+export function firstUnwatchedEpisode(
+  availableEpisodes: string[],
+  watchedEpisodes: readonly string[] = []
+): string | undefined {
+  const watched = new Set(watchedEpisodes);
+  return sortEpisodeNumbers(availableEpisodes).find((episode) => !watched.has(episode));
+}
+
 export function nextUnwatchedEpisode(entry: LibraryEntry): string | undefined {
-  const watched = new Set(entry.watchedEpisodes);
-  return sortEpisodeNumbers(entry.availableEpisodes).find((episode) => !watched.has(episode));
+  return firstUnwatchedEpisode(entry.availableEpisodes, entry.watchedEpisodes);
 }
 
 function deepEqual(left: unknown, right: unknown): boolean {

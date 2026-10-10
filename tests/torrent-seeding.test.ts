@@ -2,10 +2,13 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   formatRatio,
+  formatUploadLimit,
   formatUploadSpeed,
   normalizeSeedingOverview,
+  normalizeTransferSpeeds,
   percentOf,
-  seedingDetail
+  seedingDetail,
+  uploadLimitFromKib
 } from '../src/lib/torrent/seeding.ts';
 
 const HASH = '08ada5a7a6183aae1e09d831df6748d566095a10';
@@ -70,4 +73,27 @@ test('streaming episodes explain when the ratio target is already met', () => {
   }).episodes[0];
   assert.match(seedingDetail(episode, 1.5), /Removed after you stop watching/);
   assert.match(seedingDetail({ ...episode, status: 'seeding' }, 1.5), /1\.50 ratio/);
+});
+
+test('upload limits are validated, normalized, and labelled', () => {
+  assert.equal(normalizeSeedingOverview({ uploadLimitBps: 524_288 }).uploadLimitBps, 524_288);
+  assert.equal(normalizeSeedingOverview({ uploadLimitBps: 1024 }).uploadLimitBps, null);
+  assert.equal(normalizeSeedingOverview({ uploadLimitBps: 'fast' }).uploadLimitBps, null);
+  assert.equal(normalizeSeedingOverview({}).uploadLimitBps, null);
+  assert.equal(uploadLimitFromKib(512), 524_288);
+  assert.equal(uploadLimitFromKib(63), null);
+  assert.equal(uploadLimitFromKib(Number.NaN), null);
+  assert.equal(uploadLimitFromKib(2 * 1024 * 1024), null);
+  assert.equal(formatUploadLimit(null), 'Unlimited');
+  assert.equal(formatUploadLimit(256 * 1024), '256 KiB/s');
+  assert.equal(formatUploadLimit(5 * 1024 * 1024), '5 MiB/s');
+  assert.equal(formatUploadLimit(1536 * 1024), '1.5 MiB/s');
+});
+
+test('transfer speeds are normalized at the IPC boundary', () => {
+  assert.deepEqual(normalizeTransferSpeeds({ downloadMbps: 2.5, uploadMbps: -1 }), {
+    downloadMbps: 2.5,
+    uploadMbps: 0
+  });
+  assert.deepEqual(normalizeTransferSpeeds(null), { downloadMbps: 0, uploadMbps: 0 });
 });

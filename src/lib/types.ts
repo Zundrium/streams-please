@@ -125,7 +125,13 @@ export interface SeedingOverview {
   cacheUsedBytes: number;
   totalUploadedBytes: number;
   uploadSpeedMbps: number;
+  uploadLimitBps: number | null;
   episodes: SeedingEpisode[];
+}
+
+export interface TransferSpeeds {
+  downloadMbps: number;
+  uploadMbps: number;
 }
 
 export interface CurrentTorrent {

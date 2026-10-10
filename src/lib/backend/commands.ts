@@ -7,6 +7,7 @@ import type {
   SubsPleaseScheduleResponse,
   SubsPleaseShowResponse,
   TorrentStats,
+  TransferSpeeds,
   UpdateCheckResult,
   UpdateDownloadEvent
 } from '$lib/types';
@@ -22,9 +23,11 @@ export type BackendCommands = {
   torrent_status: Command<{ id: number }, TorrentStats>;
   stream_url: Command<{ id: number; fileId: number }, string>;
   release_torrent: Command<{ id: number }, void>;
+  transfer_speeds: Command<NoArgs, TransferSpeeds>;
   remove_torrent: Command<{ infoHash: string }, void>;
   seeding_overview: Command<NoArgs, SeedingOverview>;
   set_seeding_target_ratio: Command<{ ratio: number }, SeedingOverview>;
+  set_seeding_upload_limit: Command<{ bytesPerSecond: number | null }, SeedingOverview>;
   export_library_file: Command<{ contents: string }, boolean>;
   import_library_file: Command<NoArgs, string | null>;
   catalog_providers: Command<NoArgs, unknown>;

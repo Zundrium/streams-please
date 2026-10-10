@@ -43,6 +43,7 @@
   import { decodeEntities, errorMessage, metadataLabel, posterUrl, preferredTitle } from '$lib/catalog';
   import { preferredDownload, trailerLinks } from '$lib/catalog/media';
   import { buildEpisodeSupplements, episodeNumberKey } from '$lib/episodeMetadata';
+  import { firstUnwatchedEpisode } from '$lib/library';
   import {
     youtubeTrailerSearchPageUrl,
     youtubeTrailerSearchPlaybackUrl
@@ -181,6 +182,28 @@
       return new Date(right.release_date).getTime() - new Date(left.release_date).getTime();
     });
   });
+  let nextEpisodeRelease = $derived.by(() => {
+    const releases = Object.values(details?.episode ?? {});
+    const episode = firstUnwatchedEpisode(
+      releases.map((release) => release.episode),
+      libraryEntry?.watchedEpisodes
+    );
+    return releases.find((release) => release.episode === episode);
+  });
+  let nextEpisodeDownload = $derived(
+    nextEpisodeRelease ? preferredDownload(nextEpisodeRelease, preferredQuality) : undefined
+  );
+  let nextEpisodeKey = $derived(
+    nextEpisodeRelease ? `${nextEpisodeRelease.show}-${nextEpisodeRelease.episode}` : ''
+  );
+  let continuingSeries = $derived(
+    Boolean(
+      nextEpisodeRelease &&
+        libraryEntry?.watchedEpisodes.some((episode) =>
+          Object.values(details?.episode ?? {}).some((release) => release.episode === episode)
+        )
+    )
+  );
   let exactTrailerUrl = $derived(trailerLinks(details?.trailer).watchUrl);
   let trailerTargetUrl = $derived(
     exactTrailerUrl || youtubeTrailerSearchPageUrl(details?.title || show.title)
@@ -524,8 +547,26 @@
             {#if details?.average_score}<Badge class="bg-(--bg-elevated)/75 text-(--text)/70 backdrop-blur"><Star class="size-3" fill="currentColor" /> {details.average_score}%</Badge>{/if}
           </div>
           <div class="mt-7 flex flex-wrap gap-2">
-            <Button size="lg" class="gap-2" disabled={detailsLoading} onclick={() => void openTrailer()}>
-              {#if detailsLoading}<Spinner class="size-4 border-(--bg)/20 border-t-(--bg)" />{:else}<Play class="size-4" fill="currentColor" />{/if}
+            {#if nextEpisodeRelease && nextEpisodeDownload}
+              <Button
+                size="lg"
+                class="gap-2"
+                disabled={Boolean(playingKey)}
+                aria-label={`${continuingSeries ? 'Continue with' : 'Play'} episode ${nextEpisodeRelease.episode} of ${decodeEntities(details?.title || show.title)}`}
+                onclick={() => nextEpisodeRelease && void playRelease(nextEpisodeKey, nextEpisodeRelease, nextEpisodeDownload)}
+              >
+                {#if playingKey === nextEpisodeKey}<Spinner class="size-4 border-(--bg)/20 border-t-(--bg)" />{:else}<Play class="size-4" fill="currentColor" />{/if}
+                {continuingSeries ? 'Continue' : 'Play'} episode {nextEpisodeRelease.episode}
+              </Button>
+            {/if}
+            <Button
+              variant={nextEpisodeRelease && nextEpisodeDownload ? 'ghost' : 'default'}
+              size="lg"
+              class="gap-2 {nextEpisodeRelease && nextEpisodeDownload ? 'bg-(--bg-elevated)/72 backdrop-blur' : ''}"
+              disabled={detailsLoading}
+              onclick={() => void openTrailer()}
+            >
+              {#if detailsLoading}<Spinner class="size-4 border-(--bg)/20 border-t-(--bg)" />{:else}<Film class="size-4" />{/if}
               Watch trailer <ExternalLink class="size-3.5 opacity-55" />
             </Button>
             <Select

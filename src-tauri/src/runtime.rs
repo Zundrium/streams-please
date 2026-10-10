@@ -103,7 +103,7 @@ pub async fn runtime_info(
         mpv_version: mpv_available.then(|| "libmpv (in-process)".to_string()),
         trailer_available,
         trailer_runtime_version: trailer_available
-            .then(|| "yt-dlp 2026.07.04 + Deno 2.9.3".to_string()),
+            .then(|| "yt-dlp 2026.08.19 + Deno 2.9.3".to_string()),
     })
 }
 

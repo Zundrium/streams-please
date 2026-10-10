@@ -269,6 +269,7 @@ let mockStartedAt = Date.now();
 const GIB = 1024 ** 3;
 const previewSeedingStartedAt = Date.now();
 let previewTargetRatio = 1.5;
+let previewUploadLimitBps: number | null = null;
 const previewSeedingEpisodes: SeedingEpisode[] = [
   {
     infoHash: '08ada5a7a6183aae1e09d831df6748d566095a10',
@@ -324,6 +325,7 @@ function previewSeedingOverview(): SeedingOverview {
     cacheUsedBytes: episodes.reduce((total, episode) => total + episode.sizeBytes, 0),
     totalUploadedBytes: episodes.reduce((total, episode) => total + episode.uploadedBytes, 0),
     uploadSpeedMbps: episodes.reduce((total, episode) => total + episode.uploadSpeedMbps, 0),
+    uploadLimitBps: previewUploadLimitBps,
     episodes
   };
 }
@@ -366,6 +368,15 @@ const previewHandlers: PreviewHandlers = {
     };
   },
   release_torrent: () => undefined,
+  transfer_speeds: () => {
+    const wobble = (Math.sin(Date.now() / 2_400) + 1) / 2;
+    const uploadMbps = previewSeedingEpisodes.reduce((total, episode) => total + episode.uploadSpeedMbps, 0);
+    const uploadLimitMbps = previewUploadLimitBps === null ? Infinity : previewUploadLimitBps / 1024 ** 2;
+    return {
+      downloadMbps: 2.6 + wobble * 2.4,
+      uploadMbps: Math.min(uploadLimitMbps, uploadMbps * (0.8 + wobble * 0.4))
+    };
+  },
   remove_torrent: ({ infoHash }) => {
     const index = previewSeedingEpisodes.findIndex((episode) => episode.infoHash === infoHash);
     if (index < 0) throw new Error('This episode is no longer cached.');
@@ -377,6 +388,19 @@ const previewHandlers: PreviewHandlers = {
       throw new Error('Choose a seeding ratio between 0.5 and 10.');
     }
     previewTargetRatio = Math.round(ratio * 100) / 100;
+    return previewSeedingOverview();
+  },
+  set_seeding_upload_limit: ({ bytesPerSecond }) => {
+    if (
+      bytesPerSecond !== null &&
+      (typeof bytesPerSecond !== 'number' ||
+        !Number.isInteger(bytesPerSecond) ||
+        bytesPerSecond < 64 * 1024 ||
+        bytesPerSecond > 1024 ** 3)
+    ) {
+      throw new Error('Choose an upload limit between 64 KiB/s and 1024 MiB/s, or remove the limit.');
+    }
+    previewUploadLimitBps = bytesPerSecond;
     return previewSeedingOverview();
   },
   subsplease_schedule: ({ timezone }) => ({ tz: String(timezone ?? 'Europe/Amsterdam'), schedule }),

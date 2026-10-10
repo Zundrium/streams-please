@@ -1,6 +1,10 @@
 import type { SeedingEpisode, SeedingOverview, SeedingStatus } from '$lib/types';
 
 export const SEEDING_RATIO_OPTIONS = [1, 1.5, 2, 3] as const;
+export const KIB = 1024;
+export const MIN_UPLOAD_LIMIT_BPS = 64 * KIB;
+export const MAX_UPLOAD_LIMIT_BPS = 1024 * KIB * KIB;
+export const UPLOAD_LIMIT_PRESETS_BPS = [256 * KIB, 512 * KIB, 1024 * KIB, 2048 * KIB, 5120 * KIB] as const;
 
 const STATUSES: readonly SeedingStatus[] = ['streaming', 'seeding', 'partial', 'downloading', 'checking', 'error'];
 
@@ -19,6 +23,15 @@ function record(value: unknown): Record<string, unknown> {
 
 function count(value: unknown): number {
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function uploadLimit(value: unknown): number | null {
+  return typeof value === 'number' &&
+    Number.isInteger(value) &&
+    value >= MIN_UPLOAD_LIMIT_BPS &&
+    value <= MAX_UPLOAD_LIMIT_BPS
+    ? value
+    : null;
 }
 
 function normalizeEpisode(value: unknown): SeedingEpisode | null {
@@ -53,6 +66,7 @@ export function normalizeSeedingOverview(value: unknown): SeedingOverview {
     cacheUsedBytes: count(overview.cacheUsedBytes),
     totalUploadedBytes: count(overview.totalUploadedBytes),
     uploadSpeedMbps: count(overview.uploadSpeedMbps),
+    uploadLimitBps: uploadLimit(overview.uploadLimitBps),
     episodes: Array.isArray(overview.episodes)
       ? overview.episodes.flatMap((episode) => normalizeEpisode(episode) ?? [])
       : []
@@ -70,6 +84,25 @@ export function formatRatio(ratio: number): string {
 export function formatUploadSpeed(mbps: number): string {
   if (!Number.isFinite(mbps) || mbps <= 0) return '0 KiB/s';
   return mbps >= 1 ? `${mbps.toFixed(2)} MiB/s` : `${Math.round(mbps * 1024)} KiB/s`;
+}
+
+export function formatUploadLimit(bytesPerSecond: number | null): string {
+  if (bytesPerSecond === null) return 'Unlimited';
+  const kib = bytesPerSecond / KIB;
+  if (kib < 1024) return `${Math.round(kib)} KiB/s`;
+  const mib = kib / 1024;
+  return `${Number.isInteger(mib) ? mib : mib.toFixed(1)} MiB/s`;
+}
+
+export function uploadLimitFromKib(kib: number): number | null {
+  if (!Number.isFinite(kib)) return null;
+  const bytes = Math.round(kib) * KIB;
+  return bytes >= MIN_UPLOAD_LIMIT_BPS && bytes <= MAX_UPLOAD_LIMIT_BPS ? bytes : null;
+}
+
+export function normalizeTransferSpeeds(value: unknown): { downloadMbps: number; uploadMbps: number } {
+  const speeds = record(value);
+  return { downloadMbps: count(speeds.downloadMbps), uploadMbps: count(speeds.uploadMbps) };
 }
 
 export function percentOf(value: number, total: number): number {

@@ -44,6 +44,7 @@ export interface TrailerPlayerDriver<TContext> {
 
 type TrailerSession<TContext> = {
   context: TContext;
+  request: TrailerPlaybackRequest;
   mediaVersion: number;
   fileStarted: boolean;
   fileLoaded: boolean;
@@ -53,6 +54,10 @@ type TrailerSession<TContext> = {
   mediaWasReplaced: boolean;
   aborted: boolean;
   autoplay: boolean;
+  readyAt: number;
+  observedTime: number;
+  userSeeked: boolean;
+  streamRetries: number;
 };
 
 type PendingTrailerStart = {
@@ -72,6 +77,21 @@ type TrailerPropertyName =
   | 'paused-for-cache';
 
 const START_TIMEOUT_MS = 30_000;
+export const MAX_TRAILER_STREAM_RETRIES = 2;
+const STREAM_END_SLACK_SECONDS = 1;
+const STREAM_FAILURE_LEAD_SECONDS = 5;
+
+export function trailerStreamEndedEarly(
+  time: number,
+  duration: number,
+  secondsSinceReady: number
+): boolean {
+  return (
+    duration > STREAM_FAILURE_LEAD_SECONDS &&
+    time >= duration - STREAM_END_SLACK_SECONDS &&
+    time > secondsSinceReady + STREAM_FAILURE_LEAD_SECONDS
+  );
+}
 
 export class TrailerPlayerController<TContext> {
   private state: TrailerPlaybackState | null = null;
@@ -80,12 +100,22 @@ export class TrailerPlayerController<TContext> {
   private cancellationVersion = 0;
   private pendingStart: PendingTrailerStart | null = null;
   private startTimer: ReturnType<typeof setTimeout> | null = null;
+  private readonly driver: TrailerPlayerDriver<TContext>;
+  private readonly onStateChange: (state: TrailerPlaybackState | null) => void;
+  private readonly onError: (message: string) => void;
+  private readonly now: () => number;
 
   constructor(
-    private readonly driver: TrailerPlayerDriver<TContext>,
-    private readonly onStateChange: (state: TrailerPlaybackState | null) => void,
-    private readonly onError: (message: string) => void
-  ) {}
+    driver: TrailerPlayerDriver<TContext>,
+    onStateChange: (state: TrailerPlaybackState | null) => void,
+    onError: (message: string) => void,
+    now: () => number = Date.now
+  ) {
+    this.driver = driver;
+    this.onStateChange = onStateChange;
+    this.onError = onError;
+    this.now = now;
+  }
 
   get active(): boolean {
     return this.state !== null;
@@ -173,6 +203,7 @@ export class TrailerPlayerController<TContext> {
 
       const session: TrailerSession<TContext> = {
         context,
+        request,
         mediaVersion: 0,
         fileStarted: false,
         fileLoaded: false,
@@ -181,7 +212,11 @@ export class TrailerPlayerController<TContext> {
         outgoingPlaylistEntryId: null,
         mediaWasReplaced: false,
         aborted: false,
-        autoplay: true
+        autoplay: true,
+        readyAt: 0,
+        observedTime: 0,
+        userSeeked: false,
+        streamRetries: 0
       };
       this.session = session;
       this.setState(initial);
@@ -267,6 +302,7 @@ export class TrailerPlayerController<TContext> {
     }
 
     const target = Math.max(0, Math.min(state.duration, time));
+    session.userSeeked = true;
     this.update({ time: target });
     return this.runControl(session, () => this.driver.seek(target));
   }
@@ -295,13 +331,17 @@ export class TrailerPlayerController<TContext> {
   }
 
   handleProperty(name: TrailerPropertyName, data: unknown): void {
+    const session = this.session;
     const state = this.state;
-    if (!this.session || !state || state.status === 'closing' || state.status === 'error') return;
+    if (!session || !state || state.status === 'closing' || state.status === 'error') return;
 
     if (name === 'pause') {
       this.update({ paused: Boolean(data) });
     } else if (name === 'time-pos') {
-      this.update({ time: this.nonNegativeNumber(data) });
+      const time = this.nonNegativeNumber(data);
+      session.observedTime = time;
+      this.update({ time });
+      this.detectFailedStream(session, time);
     } else if (name === 'duration') {
       this.update({ duration: this.nonNegativeNumber(data) });
     } else if (name === 'volume') {
@@ -423,9 +463,14 @@ export class TrailerPlayerController<TContext> {
     session: TrailerSession<TContext>,
     request: TrailerPlaybackRequest,
     initial: TrailerPlaybackState,
-    version: number
+    version: number,
+    retry = false
   ): Promise<void> {
     const replacing = session.mediaWasReplaced;
+    session.request = request;
+    session.observedTime = 0;
+    session.userSeeked = false;
+    if (!retry) session.streamRetries = 0;
     session.mediaVersion += 1;
     session.outgoingPlaylistEntryId = session.fileStarted
       ? session.playlistEntryId
@@ -450,6 +495,42 @@ export class TrailerPlayerController<TContext> {
       this.fail(message);
       await this.abort(session, message);
     }
+  }
+
+  private detectFailedStream(session: TrailerSession<TContext>, time: number): void {
+    const state = this.state;
+    if (
+      !state ||
+      !this.isControllable(state) ||
+      session.userSeeked ||
+      !trailerStreamEndedEarly(time, state.duration, (this.now() - session.readyAt) / 1000)
+    ) {
+      return;
+    }
+    session.userSeeked = true;
+    if (session.streamRetries >= MAX_TRAILER_STREAM_RETRIES) {
+      this.failAndAbort(
+        session,
+        'YouTube refused the trailer stream. Try again in a moment.'
+      );
+      return;
+    }
+    const mediaVersion = session.mediaVersion;
+    const version = this.cancellationVersion;
+    void this.enqueue(async () => {
+      const current = this.state;
+      if (
+        !current ||
+        !this.isCurrent(session, version) ||
+        session.mediaVersion !== mediaVersion ||
+        !this.isControllable(current)
+      ) {
+        return;
+      }
+      session.streamRetries += 1;
+      const replacement = this.initialState(session.request, current.volume, current.muted);
+      await this.loadMedia(session, session.request, replacement, version, true);
+    });
   }
 
   private resetMediaEvents(session: TrailerSession<TContext>): void {
@@ -582,13 +663,16 @@ export class TrailerPlayerController<TContext> {
     }
 
     this.clearStartTimeout();
+    session.readyAt = this.now();
     this.update({
       status: 'ready',
       paused: !session.autoplay,
       time: 0,
       error: ''
     });
-    if (this.queuePendingStart(session) || session.autoplay) return;
+    if (this.queuePendingStart(session)) return;
+    this.detectFailedStream(session, session.observedTime);
+    if (session.autoplay) return;
     void this.runControl(session, () => this.driver.setPaused(true));
   }
 

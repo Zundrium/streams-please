@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
+    num::NonZeroU32,
     path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
@@ -20,6 +21,8 @@ pub const DEFAULT_TARGET_RATIO: f64 = 1.5;
 pub const CACHE_LIMIT_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 const MIN_TARGET_RATIO: f64 = 0.5;
 const MAX_TARGET_RATIO: f64 = 10.0;
+pub const MIN_UPLOAD_LIMIT_BPS: u32 = 64 * 1024;
+pub const MAX_UPLOAD_LIMIT_BPS: u32 = 1024 * 1024 * 1024;
 const LEDGER_FILE_NAME: &str = "seeding.json";
 const SESSION_FILE_NAME: &str = "session.json";
 const RECONCILE_INTERVAL: Duration = Duration::from_secs(5);
@@ -39,6 +42,8 @@ struct LedgerEntry {
 #[serde(rename_all = "camelCase")]
 struct Ledger {
     target_ratio: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    upload_limit_bps: Option<u32>,
     episodes: HashMap<String, LedgerEntry>,
 }
 
@@ -46,6 +51,7 @@ impl Default for Ledger {
     fn default() -> Self {
         Self {
             target_ratio: DEFAULT_TARGET_RATIO,
+            upload_limit_bps: None,
             episodes: HashMap::new(),
         }
     }
@@ -118,6 +124,7 @@ pub struct SeedingOverview {
     cache_used_bytes: u64,
     total_uploaded_bytes: u64,
     upload_speed_mbps: f64,
+    upload_limit_bps: Option<u32>,
     episodes: Vec<SeedingEpisode>,
 }
 
@@ -156,6 +163,23 @@ fn validate_target_ratio(ratio: f64) -> Result<f64, String> {
         ));
     }
     Ok((ratio * 100.0).round() / 100.0)
+}
+
+fn validate_upload_limit(bytes_per_second: Option<u64>) -> Result<Option<u32>, String> {
+    let Some(bytes_per_second) = bytes_per_second else {
+        return Ok(None);
+    };
+    u32::try_from(bytes_per_second)
+        .ok()
+        .filter(|limit| (MIN_UPLOAD_LIMIT_BPS..=MAX_UPLOAD_LIMIT_BPS).contains(limit))
+        .map(Some)
+        .ok_or_else(|| {
+            format!(
+                "Choose an upload limit between {} KiB/s and {} MiB/s, or remove the limit.",
+                MIN_UPLOAD_LIMIT_BPS / 1024,
+                MAX_UPLOAD_LIMIT_BPS / 1024 / 1024
+            )
+        })
 }
 
 fn share_ratio(uploaded_bytes: u64, size_bytes: u64) -> f64 {
@@ -235,6 +259,11 @@ fn parse_ledger(source: &str) -> Ledger {
         .and_then(Value::as_f64)
         .and_then(|ratio| validate_target_ratio(ratio).ok())
         .unwrap_or(DEFAULT_TARGET_RATIO);
+    let upload_limit_bps = root
+        .get("uploadLimitBps")
+        .and_then(Value::as_u64)
+        .and_then(|limit| validate_upload_limit(Some(limit)).ok())
+        .flatten();
     let episodes = root
         .get("episodes")
         .and_then(Value::as_object)
@@ -265,6 +294,7 @@ fn parse_ledger(source: &str) -> Ledger {
         .unwrap_or_default();
     Ledger {
         target_ratio,
+        upload_limit_bps,
         episodes,
     }
 }
@@ -337,6 +367,12 @@ pub fn purge_orphaned_media(download_dir: &Path, keep: &HashSet<String>) {
     }
 }
 
+fn apply_upload_limit(api: &Api, limit: Option<u32>) {
+    api.session()
+        .ratelimits
+        .set_upload_bps(limit.and_then(NonZeroU32::new));
+}
+
 fn snapshot(id: usize, handle: &ManagedTorrent) -> TorrentSnapshot {
     let stats = handle.stats();
     let live = stats.live.as_ref();
@@ -362,6 +398,7 @@ impl SeedingManager {
         let ledger = std::fs::read_to_string(&ledger_path)
             .map(|source| parse_ledger(&source))
             .unwrap_or_default();
+        apply_upload_limit(&api, ledger.upload_limit_bps);
         Arc::new(Self {
             api,
             download_dir,
@@ -475,6 +512,21 @@ impl SeedingManager {
         Ok(self.overview().await)
     }
 
+    pub async fn set_upload_limit(
+        &self,
+        bytes_per_second: Option<u64>,
+    ) -> Result<SeedingOverview, String> {
+        let limit = validate_upload_limit(bytes_per_second)?;
+        {
+            let mut inner = self.inner.lock().await;
+            inner.ledger.upload_limit_bps = limit;
+            apply_upload_limit(&self.api, limit);
+            inner.dirty = true;
+            self.save_locked(&mut inner, true).await;
+        }
+        Ok(self.overview().await)
+    }
+
     pub async fn overview(&self) -> SeedingOverview {
         let mut inner = self.inner.lock().await;
         let snapshots = self.snapshots();
@@ -527,6 +579,7 @@ impl SeedingManager {
                 .iter()
                 .map(|episode| episode.upload_speed_mbps)
                 .sum(),
+            upload_limit_bps: inner.ledger.upload_limit_bps,
             episodes,
         }
     }
@@ -711,6 +764,14 @@ pub async fn set_seeding_target_ratio(
 }
 
 #[tauri::command]
+pub async fn set_seeding_upload_limit(
+    state: State<'_, TorrentState>,
+    bytes_per_second: Option<u64>,
+) -> Result<SeedingOverview, String> {
+    state.seeding().set_upload_limit(bytes_per_second).await
+}
+
+#[tauri::command]
 pub async fn remove_torrent(
     state: State<'_, TorrentState>,
     info_hash: String,
@@ -726,8 +787,9 @@ mod tests {
 
     use super::{
         accumulate_upload, decide, normalize_info_hash, parse_ledger, plan_evictions,
-        sanitize_session_database, share_ratio, validate_target_ratio, CacheItem, PolicyInput,
-        SeedAction, DEFAULT_TARGET_RATIO,
+        sanitize_session_database, share_ratio, validate_target_ratio, validate_upload_limit,
+        CacheItem, PolicyInput, SeedAction, DEFAULT_TARGET_RATIO, MAX_UPLOAD_LIMIT_BPS,
+        MIN_UPLOAD_LIMIT_BPS,
     };
 
     const HASH: &str = "08ada5a7a6183aae1e09d831df6748d566095a10";
@@ -767,6 +829,19 @@ mod tests {
         assert!(validate_target_ratio(0.1).is_err());
         assert!(validate_target_ratio(f64::NAN).is_err());
         assert!(validate_target_ratio(11.0).is_err());
+    }
+
+    #[test]
+    fn validates_upload_limits() {
+        assert_eq!(validate_upload_limit(None), Ok(None));
+        assert_eq!(validate_upload_limit(Some(1_048_576)), Ok(Some(1_048_576)));
+        assert_eq!(
+            validate_upload_limit(Some(MIN_UPLOAD_LIMIT_BPS.into())),
+            Ok(Some(MIN_UPLOAD_LIMIT_BPS))
+        );
+        assert!(validate_upload_limit(Some(16 * 1024)).is_err());
+        assert!(validate_upload_limit(Some(u64::from(MAX_UPLOAD_LIMIT_BPS) + 1)).is_err());
+        assert!(validate_upload_limit(Some(u64::MAX)).is_err());
     }
 
     #[test]
@@ -830,11 +905,20 @@ mod tests {
             HASH.to_uppercase()
         ));
         assert_eq!(ledger.target_ratio, DEFAULT_TARGET_RATIO);
+        assert_eq!(ledger.upload_limit_bps, None);
         assert_eq!(ledger.episodes.len(), 1);
         let entry = &ledger.episodes[HASH];
         assert_eq!(entry.name.as_deref(), Some("Ep"));
         assert_eq!(entry.uploaded_bytes, 3);
         assert_eq!(parse_ledger("not json").episodes.len(), 0);
+        assert_eq!(
+            parse_ledger(r#"{"uploadLimitBps":524288,"episodes":{}}"#).upload_limit_bps,
+            Some(524_288)
+        );
+        assert_eq!(
+            parse_ledger(r#"{"uploadLimitBps":10,"episodes":{}}"#).upload_limit_bps,
+            None
+        );
     }
 
     #[test]

@@ -24,7 +24,7 @@ Sources and license information:
 
 Discovery trailers use libmpv as well, keeping both video and audio inside the StreamsPlease process. The Windows bundle includes:
 
-- `yt-dlp.exe`: official x86-64 standalone release `2026.07.04` (Unlicense; the bundled executable also contains third-party components covered by its compiled `THIRD_PARTY_LICENSES.txt`).
+- `yt-dlp.exe`: official x86-64 standalone release `2026.08.19` (Unlicense; the bundled executable also contains third-party components covered by its compiled `THIRD_PARTY_LICENSES.txt`).
 - `deno.exe`: official x86-64 Deno release `v2.9.3` (MIT), used by yt-dlp for YouTube's JavaScript challenges.
 
 StreamsPlease prepends this resource directory to its own process `PATH` before libmpv starts. No system-wide installation is required.
@@ -32,13 +32,13 @@ StreamsPlease prepends this resource directory to its own process `PATH` before 
 SHA-256:
 
 ```text
-52FE3C26DCF71FBDC85B528589020BB0B8E383155CFA81B64DD447BBE35E24B8  yt-dlp.exe
+66674953FE251B89F4D08C5F0E35E0728679BD67AB3D7D05C0562AF101DD3E7A  yt-dlp.exe
 BC925C8729F8764F750597F3A5A365F2A2DEDC0C64D21A2997BC5F2255658FC9  deno.exe
 ```
 
 Sources and license information:
 
-- https://github.com/yt-dlp/yt-dlp/releases/tag/2026.07.04
-- https://github.com/yt-dlp/yt-dlp/blob/2026.07.04/LICENSE
+- https://github.com/yt-dlp/yt-dlp/releases/tag/2026.08.19
+- https://github.com/yt-dlp/yt-dlp/blob/2026.08.19/LICENSE
 - https://github.com/denoland/deno/releases/tag/v2.9.3
 - https://github.com/denoland/deno/blob/v2.9.3/LICENSE.md

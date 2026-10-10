@@ -61,6 +61,7 @@
   import { StreamLifecycle } from '$lib/player/stream-lifecycle';
   import {
     HIDDEN_VIDEO_MARGINS,
+    isPointerAtEdge,
     relativePlacement,
     viewportMargins,
     type InlinePlacement
@@ -1096,15 +1097,45 @@
     if (isTauri()) await mpv.run((player) => player.setFlag('pause', true)).catch(() => undefined);
   }
 
+  function canConcealPlayerUi(): boolean {
+    return Boolean(trailerPlayback || (activeView === 'player' && current && !queueOpen));
+  }
+
   function revealPlayerUi() {
     playerUiVisible = true;
     if (playerUiTimer !== null) clearTimeout(playerUiTimer);
     playerUiTimer = setTimeout(() => {
       playerUiTimer = null;
-      if (trailerPlayback || (activeView === 'player' && current && !queueOpen)) {
-        playerUiVisible = false;
-      }
+      if (canConcealPlayerUi()) playerUiVisible = false;
     }, PLAYER_UI_HIDE_DELAY_MS);
+  }
+
+  function concealPlayerUi(event: PointerEvent) {
+    const surface = event.currentTarget;
+    if (
+      event.buttons !== 0 ||
+      !canConcealPlayerUi() ||
+      (surface instanceof Element &&
+        surface.querySelector('[data-slot="select-trigger"][data-state="open"]'))
+    ) {
+      return;
+    }
+    if (playerUiTimer !== null) clearTimeout(playerUiTimer);
+    playerUiTimer = null;
+    playerUiVisible = false;
+  }
+
+  function trackPlayerPointer(event: PointerEvent) {
+    const surface = event.currentTarget;
+    if (
+      event.pointerType === 'mouse' &&
+      surface instanceof Element &&
+      isPointerAtEdge(surface.getBoundingClientRect(), event.clientX, event.clientY)
+    ) {
+      concealPlayerUi(event);
+    } else {
+      revealPlayerUi();
+    }
   }
 
   function toggleTheater(force?: boolean) {
@@ -1311,8 +1342,9 @@
           class="video-surface relative h-full min-h-0 overflow-hidden {current && phase !== 'error' ? 'live' : ''}"
           class:cursor-none={current && !playerUiVisible}
           aria-label="Video player"
-          onpointermove={revealPlayerUi}
+          onpointermove={trackPlayerPointer}
           onpointerdown={revealPlayerUi}
+          onpointerleave={concealPlayerUi}
         >
           {#if !current && phase === 'idle'}
             <div class="grid size-full place-items-center px-6 text-center text-white/42">
@@ -1534,8 +1566,9 @@
         class:live={trailerReady}
         class:cursor-none={trailerReady && !playerUiVisible}
         aria-label="Trailer player"
-        onpointermove={revealPlayerUi}
+        onpointermove={trackPlayerPointer}
         onpointerdown={revealPlayerUi}
+        onpointerleave={concealPlayerUi}
       >
         {#if trailerReady}
           <Button

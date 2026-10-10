@@ -10,7 +10,7 @@ import {
   signalsPlaybackProgress
 } from '../src/lib/player/playback-state.ts';
 import { resolvePlayerShortcut, type ShortcutContext } from '../src/lib/player/shortcuts.ts';
-import { relativePlacement, viewportMargins } from '../src/lib/player/viewport.ts';
+import { isPointerAtEdge, relativePlacement, viewportMargins } from '../src/lib/player/viewport.ts';
 import { isSupportedTrailerUrl, youtubeTrailerSearchPlaybackUrl } from '../src/lib/trailers.ts';
 import type { PlaybackState } from '../src/lib/types.ts';
 
@@ -75,6 +75,17 @@ test('speed cycling, percent seeking, and subtitle preferences', () => {
   assert.equal(subtitleLanguagePreference('en'), 'en');
   assert.equal(subtitleLanguagePreference('nl'), 'nl,en');
   assert.equal(mpvInitialOptions('ja').slang, 'ja,en');
+});
+
+test('pointer edge detection hides player controls only at the surface border', () => {
+  const rect = { left: 0, top: 40, right: 1000, bottom: 600 };
+  assert.ok(isPointerAtEdge(rect, 0, 300));
+  assert.ok(isPointerAtEdge(rect, 997, 300));
+  assert.ok(isPointerAtEdge(rect, 500, 44));
+  assert.ok(isPointerAtEdge(rect, 500, 599));
+  assert.ok(!isPointerAtEdge(rect, 500, 300));
+  assert.ok(!isPointerAtEdge(rect, 10, 60));
+  assert.ok(isPointerAtEdge(rect, 10, 60, 12));
 });
 
 test('only https trailers from supported hosts or bundled searches are playable', () => {

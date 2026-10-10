@@ -3,6 +3,7 @@
   import { Button } from '$lib/components/ui/button';
   import { Tabs, TabsList, TabsTrigger } from '$lib/components/ui/tabs';
   import StreamsPleaseLogo from '$lib/components/app/StreamsPleaseLogo.svelte';
+  import TransferSpeeds from '$lib/components/app/TransferSpeeds.svelte';
   import WindowControls from '$lib/components/app/WindowControls.svelte';
   import { isTauri } from '$lib/backend';
   import type { AppView } from '$lib/types';
@@ -22,7 +23,12 @@
 </script>
 
 <header class="flex min-w-0 items-stretch gap-1 border-b border-(--text)/8 bg-(--bg) px-2 sm:gap-4 sm:px-4" data-tauri-drag-region>
-  <div class="hidden shrink-0 items-center px-2 md:flex" data-tauri-drag-region><StreamsPleaseLogo /></div>
+  <div class="hidden shrink-0 flex-col justify-center gap-1.5 px-2 md:flex" data-tauri-drag-region>
+    <span class="pointer-events-none flex select-none flex-col gap-1.5">
+      <StreamsPleaseLogo />
+      <TransferSpeeds />
+    </span>
+  </div>
   <Tabs value={activeView} onValueChange={(value) => onNavigate(value as AppView)} class="h-full min-w-0">
     <TabsList class="h-full gap-0 rounded-none bg-transparent p-0" aria-label="Main navigation">
       {#each views as view (view.id)}

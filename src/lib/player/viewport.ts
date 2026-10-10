@@ -31,3 +31,19 @@ export function relativePlacement(
     height: anchor.height
   };
 }
+
+export const PLAYER_EDGE_PX = 6;
+
+export function isPointerAtEdge(
+  rect: ViewportRect,
+  x: number,
+  y: number,
+  edge = PLAYER_EDGE_PX
+): boolean {
+  return (
+    x - rect.left <= edge ||
+    rect.right - x <= edge ||
+    y - rect.top <= edge ||
+    rect.bottom - y <= edge
+  );
+}

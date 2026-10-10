@@ -49,4 +49,3 @@ jobs:
         with:
           releaseId: ${{ github.event.release.id }}
           tagName: ${{ github.event.release.tag_name }}
-          updaterJsonPreferNsis: true

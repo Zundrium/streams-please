@@ -5,6 +5,7 @@ import {
   findLibraryEntryIndex,
   loadLibrary,
   mergeLibraryEntries,
+  firstUnwatchedEpisode,
   nextUnwatchedEpisode,
   parseLibraryExport,
   saveLibrary,
@@ -250,4 +251,12 @@ test('saveLibrary reports success, failure, and retries after clearing caches on
   const stuck = new MemoryStorage();
   stuck.failWith = Object.assign(new Error('full'), { name: 'QuotaExceededError' });
   assert.equal(withStorage(stuck, () => saveLibrary([entry()])), false);
+});
+
+test('firstUnwatchedEpisode starts new series at the first released episode', () => {
+  assert.equal(firstUnwatchedEpisode(['3', '1', '2']), '1');
+  assert.equal(firstUnwatchedEpisode(['3', '1', '2'], ['1', '2']), '3');
+  assert.equal(firstUnwatchedEpisode(['10', '2', '1'], ['1']), '2');
+  assert.equal(firstUnwatchedEpisode(['1', '2'], ['1', '2']), undefined);
+  assert.equal(firstUnwatchedEpisode([]), undefined);
 });

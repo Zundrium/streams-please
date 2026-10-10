@@ -1,8 +1,9 @@
 <script lang="ts">
-  import { AlertCircle, ArrowUpFromLine, Check, HardDrive, Share2, Trash2, Users } from '@lucide/svelte';
+  import { AlertCircle, ArrowUpFromLine, Check, Gauge, HardDrive, Share2, Trash2, Users } from '@lucide/svelte';
   import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert';
   import { Badge } from '$lib/components/ui/badge';
   import { Button } from '$lib/components/ui/button';
+  import { InputGroup, InputGroupAddon, InputGroupInput } from '$lib/components/ui/input-group';
   import { Progress } from '$lib/components/ui/progress';
   import { Spinner } from '$lib/components/ui/spinner';
   import { callBackend } from '$lib/backend';
@@ -10,13 +11,19 @@
   import { errorMessage } from '$lib/catalog/presentation';
   import { formatBytes } from '$lib/torrent/media';
   import {
+    KIB,
+    MAX_UPLOAD_LIMIT_BPS,
+    MIN_UPLOAD_LIMIT_BPS,
     SEEDING_RATIO_OPTIONS,
+    UPLOAD_LIMIT_PRESETS_BPS,
     formatRatio,
+    formatUploadLimit,
     formatUploadSpeed,
     normalizeSeedingOverview,
     percentOf,
     seedingDetail,
-    seedingStatusLabel
+    seedingStatusLabel,
+    uploadLimitFromKib
   } from '$lib/torrent/seeding';
   import type { SeedingEpisode, SeedingOverview } from '$lib/types';
 
@@ -29,6 +36,10 @@
   let savingRatio = $state<number | null>(null);
   let confirmingRemoval = $state('');
   let removing = $state('');
+  let savingLimit = $state(false);
+  let limitStatus = $state('');
+  let customLimitKib = $state('');
+  let customLimitError = $state('');
 
   let cachePercent = $derived(overview ? percentOf(overview.cacheUsedBytes, overview.cacheLimitBytes) : 0);
   let seedingCount = $derived(overview?.episodes.filter((episode) => episode.status === 'seeding').length ?? 0);
@@ -77,6 +88,38 @@
     } finally {
       removing = '';
     }
+  }
+
+  async function chooseUploadLimit(bytesPerSecond: number | null): Promise<void> {
+    if (savingLimit || !overview) return;
+    savingLimit = true;
+    actionError = '';
+    customLimitError = '';
+    try {
+      overview = normalizeSeedingOverview(
+        await callBackend('set_seeding_upload_limit', { bytesPerSecond })
+      );
+      limitStatus = bytesPerSecond === null
+        ? 'Uploads are no longer limited.'
+        : `Uploads are now limited to ${formatUploadLimit(bytesPerSecond)}.`;
+      if (bytesPerSecond === null || UPLOAD_LIMIT_PRESETS_BPS.some((preset) => preset === bytesPerSecond)) {
+        customLimitKib = '';
+      }
+    } catch (reason) {
+      actionError = errorMessage(reason);
+    } finally {
+      savingLimit = false;
+    }
+  }
+
+  function applyCustomLimit(event: SubmitEvent): void {
+    event.preventDefault();
+    const bytesPerSecond = uploadLimitFromKib(Number(customLimitKib));
+    if (customLimitKib.trim() === '' || bytesPerSecond === null) {
+      customLimitError = `Enter a value between ${MIN_UPLOAD_LIMIT_BPS / KIB} and ${MAX_UPLOAD_LIMIT_BPS / KIB} KiB/s.`;
+      return;
+    }
+    void chooseUploadLimit(bytesPerSecond);
   }
 
   function ratioLabel(ratio: number, defaultRatio: number): string {
@@ -150,6 +193,59 @@
     {/each}
   </div>
   <p class="sr-only" aria-live="polite">{ratioStatus}</p>
+</section>
+
+<section class="mt-10 grid gap-8 border-t border-(--text)/8 pt-10 md:grid-cols-[14rem_minmax(0,1fr)]" aria-labelledby="upload-limit-title">
+  <div class="text-reveal">
+    <span class="mb-3 grid size-9 place-items-center rounded-full bg-(--text)/6 text-(--text)/55"><Gauge class="size-4" /></span>
+    <h2 id="upload-limit-title" class="font-semibold">Upload limit</h2>
+    <p class="mt-2 text-sm leading-6 text-(--text)/42">The most StreamsPlease sends to peers per second, across all episodes. Downloads are not limited.</p>
+  </div>
+
+  <div class="rounded-3xl border border-(--text)/8 bg-(--bg-elevated) p-5">
+    <div class="flex flex-wrap items-baseline justify-between gap-2">
+      <p class="text-sm"><strong class="text-2xl font-semibold tabular-nums">{overview ? formatUploadLimit(overview.uploadLimitBps) : '—'}</strong></p>
+      {#if overview}<span class="text-xs text-(--text)/42 tabular-nums">Uploading at {formatUploadSpeed(overview.uploadSpeedMbps)}</span>{/if}
+    </div>
+    <div class="mt-4 flex flex-wrap gap-2" role="radiogroup" aria-label="Upload limit">
+      {#each [null, ...UPLOAD_LIMIT_PRESETS_BPS] as limit (limit ?? 'unlimited')}
+        {@const selected = overview?.uploadLimitBps === limit}
+        <button
+          type="button"
+          role="radio"
+          aria-checked={selected}
+          disabled={!overview || savingLimit}
+          class="h-9 rounded-full border px-4 text-sm tabular-nums transition-colors disabled:cursor-default {selected ? 'border-chart-1 bg-chart-1 text-white' : 'border-(--text)/12 hover:bg-(--text)/5 disabled:opacity-60'}"
+          onclick={() => void chooseUploadLimit(limit)}
+        >{formatUploadLimit(limit)}</button>
+      {/each}
+    </div>
+    <form class="mt-5 flex flex-wrap items-start gap-2 border-t border-(--text)/8 pt-5" onsubmit={applyCustomLimit}>
+      <label class="sr-only" for="custom-upload-limit">Custom upload limit in KiB per second</label>
+      <InputGroup class="w-full max-w-56">
+        <InputGroupInput
+          id="custom-upload-limit"
+          type="number"
+          inputmode="numeric"
+          min={MIN_UPLOAD_LIMIT_BPS / KIB}
+          max={MAX_UPLOAD_LIMIT_BPS / KIB}
+          step="1"
+          placeholder="Custom"
+          aria-invalid={customLimitError ? 'true' : undefined}
+          aria-describedby={customLimitError ? 'custom-upload-limit-error' : undefined}
+          disabled={!overview || savingLimit}
+          bind:value={customLimitKib}
+          oninput={() => (customLimitError = '')}
+        />
+        <InputGroupAddon align="inline-end" class="pe-4">KiB/s</InputGroupAddon>
+      </InputGroup>
+      <Button type="submit" variant="ghost" class="gap-2" disabled={!overview || savingLimit}>
+        {#if savingLimit}<Spinner class="size-4" />{/if}Set limit
+      </Button>
+      {#if customLimitError}<p id="custom-upload-limit-error" class="basis-full text-xs text-red-600 dark:text-red-400">{customLimitError}</p>{/if}
+    </form>
+  </div>
+  <p class="sr-only" aria-live="polite">{limitStatus}</p>
 </section>
 
 <section class="mt-10 grid gap-8 border-t border-(--text)/8 pt-10 md:grid-cols-[14rem_minmax(0,1fr)]" aria-labelledby="seeding-episodes-title">
