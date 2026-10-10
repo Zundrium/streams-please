@@ -3,6 +3,7 @@ import type { CatalogRequest } from '$lib/catalog/providers';
 import type {
   AddTorrentResponse,
   RuntimeInfo,
+  SeedingOverview,
   SubsPleaseScheduleResponse,
   SubsPleaseShowResponse,
   TorrentStats,
@@ -20,7 +21,10 @@ export type BackendCommands = {
   add_magnet: Command<{ magnet: string }, AddTorrentResponse>;
   torrent_status: Command<{ id: number }, TorrentStats>;
   stream_url: Command<{ id: number; fileId: number }, string>;
-  forget_torrent: Command<{ id: number }, void>;
+  release_torrent: Command<{ id: number }, void>;
+  remove_torrent: Command<{ infoHash: string }, void>;
+  seeding_overview: Command<NoArgs, SeedingOverview>;
+  set_seeding_target_ratio: Command<{ ratio: number }, SeedingOverview>;
   export_library_file: Command<{ contents: string }, boolean>;
   import_library_file: Command<NoArgs, string | null>;
   catalog_providers: Command<NoArgs, unknown>;

@@ -11,6 +11,8 @@ import type {
   AnimeSeason,
   AniListSearchResult,
   AniListSeasonResponse,
+  SeedingEpisode,
+  SeedingOverview,
   SubsPleaseIndexResponse,
   SubsPleaseScheduleResponse,
   SubsPleaseScheduleShow,
@@ -264,6 +266,68 @@ function previewCatalog(
 
 let mockStartedAt = Date.now();
 
+const GIB = 1024 ** 3;
+const previewSeedingStartedAt = Date.now();
+let previewTargetRatio = 1.5;
+const previewSeedingEpisodes: SeedingEpisode[] = [
+  {
+    infoHash: '08ada5a7a6183aae1e09d831df6748d566095a10',
+    name: 'Sintel.2010.1080p.mkv',
+    status: 'seeding',
+    sizeBytes: 1_294_727_168,
+    downloadedBytes: 1_294_727_168,
+    uploadedBytes: 1_120_000_000,
+    ratio: 0,
+    uploadSpeedMbps: 0.42,
+    peers: 6,
+    addedAt: previewSeedingStartedAt - 26 * 60_000,
+    lastActiveAt: previewSeedingStartedAt - 4 * 60_000
+  },
+  {
+    infoHash: '1f3c5a7b9d0e2f4a6c8e0b1d3f5a7c9e1b3d5f70',
+    name: '[SubsPlease] Grand Blue S3 - 03 (1080p).mkv',
+    status: 'seeding',
+    sizeBytes: 1_446_000_000,
+    downloadedBytes: 1_446_000_000,
+    uploadedBytes: 402_000_000,
+    ratio: 0,
+    uploadSpeedMbps: 0.18,
+    peers: 3,
+    addedAt: previewSeedingStartedAt - 3 * 3_600_000,
+    lastActiveAt: previewSeedingStartedAt - 2 * 3_600_000
+  },
+  {
+    infoHash: '2a4c6e8f0b1d3f5a7c9e1b3d5f7092b4d6f8a0c2',
+    name: '[SubsPlease] Black Torch - 02 (720p).mkv',
+    status: 'partial',
+    sizeBytes: 731_000_000,
+    downloadedBytes: 214_000_000,
+    uploadedBytes: 18_400_000,
+    ratio: 0,
+    uploadSpeedMbps: 0,
+    peers: 0,
+    addedAt: previewSeedingStartedAt - 26 * 3_600_000,
+    lastActiveAt: previewSeedingStartedAt - 25 * 3_600_000
+  }
+];
+
+function previewSeedingOverview(): SeedingOverview {
+  const elapsed = (Date.now() - previewSeedingStartedAt) / 1000;
+  const episodes = previewSeedingEpisodes.map((episode) => {
+    const uploadedBytes = episode.uploadedBytes + elapsed * episode.uploadSpeedMbps * 1024 ** 2;
+    return { ...episode, uploadedBytes, ratio: uploadedBytes / episode.sizeBytes };
+  });
+  return {
+    targetRatio: previewTargetRatio,
+    defaultTargetRatio: 1.5,
+    cacheLimitBytes: 10 * GIB,
+    cacheUsedBytes: episodes.reduce((total, episode) => total + episode.sizeBytes, 0),
+    totalUploadedBytes: episodes.reduce((total, episode) => total + episode.uploadedBytes, 0),
+    uploadSpeedMbps: episodes.reduce((total, episode) => total + episode.uploadSpeedMbps, 0),
+    episodes
+  };
+}
+
 type PreviewHandlers = {
   [K in BackendCommand]: (args: BackendArgs<K>) => BackendResult<K>;
 };
@@ -301,7 +365,20 @@ const previewHandlers: PreviewHandlers = {
       }
     };
   },
-  forget_torrent: () => undefined,
+  release_torrent: () => undefined,
+  remove_torrent: ({ infoHash }) => {
+    const index = previewSeedingEpisodes.findIndex((episode) => episode.infoHash === infoHash);
+    if (index < 0) throw new Error('This episode is no longer cached.');
+    previewSeedingEpisodes.splice(index, 1);
+  },
+  seeding_overview: () => previewSeedingOverview(),
+  set_seeding_target_ratio: ({ ratio }) => {
+    if (typeof ratio !== 'number' || !Number.isFinite(ratio) || ratio < 0.5 || ratio > 10) {
+      throw new Error('Choose a seeding ratio between 0.5 and 10.');
+    }
+    previewTargetRatio = Math.round(ratio * 100) / 100;
+    return previewSeedingOverview();
+  },
   subsplease_schedule: ({ timezone }) => ({ tz: String(timezone ?? 'Europe/Amsterdam'), schedule }),
   subsplease_index: () => mockIndex,
   subsplease_show: ({ slug, anilistId, includeMetadata }) =>

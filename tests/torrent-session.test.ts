@@ -18,15 +18,15 @@ function response(id: number, files: TorrentFile[] = [file('episode.mkv')]): Add
   return { id, output_folder: '', details: { info_hash: String(id), output_folder: '', files } };
 }
 
-function harness(add: TorrentBackend['addMagnet'], forget: TorrentBackend['forget'] = async () => undefined) {
+function harness(add: TorrentBackend['addMagnet'], release: TorrentBackend['release'] = async () => undefined) {
   const events: string[] = [];
-  const forgotten: number[] = [];
+  const released: number[] = [];
   const session = new TorrentSession(
     {
       addMagnet: add,
-      forget: async (id) => {
-        forgotten.push(id);
-        await forget(id);
+      release: async (id) => {
+        released.push(id);
+        await release(id);
       }
     },
     {
@@ -35,25 +35,25 @@ function harness(add: TorrentBackend['addMagnet'], forget: TorrentBackend['forge
       onStarted: (torrent: CurrentTorrent) => void events.push(`started ${torrent.id}`)
     }
   );
-  return { session, events, forgotten };
+  return { session, events, released };
 }
 
 test('starting a torrent selects its video and replaces the previous session', async () => {
   let next = 1;
-  const { session, events, forgotten } = harness(async () => response(next++, [file('a.ass'), file('a.mkv', 50)]));
+  const { session, events, released } = harness(async () => response(next++, [file('a.ass'), file('a.mkv', 50)]));
   const first = await session.start('magnet:?xt=urn:btih:a');
   assert.equal(first.status, 'started');
   assert.equal(session.current?.fileId, 1);
   await session.start('magnet:?xt=urn:btih:b');
   assert.deepEqual(events, ['started 1', 'stop 1', 'cleared', 'started 2']);
-  assert.deepEqual(forgotten, [1]);
+  assert.deepEqual(released, [1]);
   assert.equal(session.current?.id, 2);
 });
 
-test('a start issued while another is mid-flight supersedes it and forgets its torrent', async () => {
+test('a start issued while another is mid-flight supersedes it and releases its torrent', async () => {
   const releases: Array<() => void> = [];
   let next = 10;
-  const { session, forgotten } = harness(
+  const { session, released } = harness(
     () =>
       new Promise((resolve) => {
         const id = next++;
@@ -65,7 +65,7 @@ test('a start issued while another is mid-flight supersedes it and forgets its t
   const second = session.start('magnet:?second');
   releases[0]();
   assert.deepEqual(await first, { status: 'superseded' });
-  assert.deepEqual(forgotten, [10]);
+  assert.deepEqual(released, [10]);
   await waitFor(() => releases.length === 2);
   releases[1]();
   assert.equal((await second).status, 'started');
@@ -74,7 +74,7 @@ test('a start issued while another is mid-flight supersedes it and forgets its t
 
 test('back-to-back starts skip the superseded one before it reaches the engine', async () => {
   const added: string[] = [];
-  const { session, forgotten } = harness(async (magnet) => {
+  const { session, released } = harness(async (magnet) => {
     added.push(magnet);
     return response(added.length);
   });
@@ -82,17 +82,17 @@ test('back-to-back starts skip the superseded one before it reaches the engine',
   assert.deepEqual(first, { status: 'superseded' });
   assert.equal(second.status, 'started');
   assert.deepEqual(added, ['magnet:?b']);
-  assert.deepEqual(forgotten, []);
+  assert.deepEqual(released, []);
 });
 
-test('torrents without a playable video are forgotten and reported', async () => {
-  const { session, forgotten } = harness(async () => response(4, [file('notes.txt')]));
+test('torrents without a playable video are released and reported', async () => {
+  const { session, released } = harness(async () => response(4, [file('notes.txt')]));
   await assert.rejects(session.start('magnet:?x'), /does not contain a supported video file/);
-  assert.deepEqual(forgotten, [4]);
+  assert.deepEqual(released, [4]);
   assert.equal(session.current, null);
 });
 
-test('a failed forget or stop never blocks the next start', async () => {
+test('a failed release or stop never blocks the next start', async () => {
   let next = 1;
   const { session } = harness(
     async () => response(next++),

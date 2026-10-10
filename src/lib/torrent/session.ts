@@ -5,7 +5,7 @@ import type { AddTorrentResponse, CurrentTorrent } from '$lib/types';
 
 export type TorrentBackend = {
   addMagnet: (magnet: string) => Promise<AddTorrentResponse>;
-  forget: (id: number) => Promise<void>;
+  release: (id: number) => Promise<void>;
 };
 
 export type TorrentSessionHooks = {
@@ -56,13 +56,13 @@ export class TorrentSession {
     const response = await this.backend.addMagnet(magnet);
     if (response.id === undefined) throw new Error('The torrent engine did not return a session ID.');
     if (!this.starts.isCurrent(generation)) {
-      await this.forget(response.id);
+      await this.release(response.id);
       return SUPERSEDED;
     }
 
     const chosen = chooseVideoFile(response.details.files);
     if (!chosen) {
-      await this.forget(response.id);
+      await this.release(response.id);
       throw new Error('This torrent does not contain a supported video file.');
     }
 
@@ -83,14 +83,14 @@ export class TorrentSession {
     await this.hooks
       .stopPlayback(previous)
       .catch((reason) => console.warn('The previous episode could not be stopped.', reason));
-    await this.forget(previous.id);
+    await this.release(previous.id);
     this.currentValue = null;
     this.hooks.onCleared();
   }
 
-  private async forget(id: number): Promise<void> {
+  private async release(id: number): Promise<void> {
     await this.backend
-      .forget(id)
-      .catch((reason) => console.warn(`Torrent ${id} could not be removed from the session.`, reason));
+      .release(id)
+      .catch((reason) => console.warn(`Torrent ${id} could not be released from the session.`, reason));
   }
 }

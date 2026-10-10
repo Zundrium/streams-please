@@ -11,7 +11,8 @@ StreamsPlease is a local Tauri v2 desktop player for legal or personally owned B
 - embedded ASS/SSA/SRT subtitles and multiple audio tracks;
 - adding external `.ass`, `.ssa`, `.srt`, `.vtt`, and `.sub` files;
 - live download, upload, and peer status, plus pausing P2P and stopping the session;
-- a local media cache in the OS-specific app cache directory;
+- a local media cache in the OS-specific app cache directory, capped at 10 GB with least-recently-watched eviction;
+- automatic seeding of fully downloaded episodes until a configurable share ratio (default 1.5×), after which the episode is removed, with per-episode seeding and cache statistics under **Account settings → Seeding & cache**;
 - multi-provider seasonal browsing with previous/next season navigation, using AniList, official MyAnimeList, Jikan, and Kitsu in a configurable priority order with saved-result fallback;
 - global catalog title search with persistent offline results, source/age labels, and SubsPlease archive availability checks;
 - direct SubsPlease archive browsing without an AniList dependency;
@@ -95,7 +96,7 @@ Set `STREAMSPLEASE_GITHUB_TOKEN` as a GitHub Actions secret containing a fine-gr
 2. Select **Open torrent**. StreamsPlease chooses the largest video file and prioritizes media and subtitles.
 3. Switch embedded audio and subtitles through the player or details panel.
 4. Use **External subtitle** to add a local subtitle file.
-5. Starting another episode forgets the previous torrent but preserves cache files that have already been written.
+5. Starting another episode releases the previous torrent. Fully downloaded episodes keep seeding until they reach the target ratio and are then deleted; partial downloads are paused and kept so they can resume quickly. When the cache exceeds 10 GB, the least recently watched episodes that are not playing are removed first. Seeding state and upload totals survive restarts.
 
 The **Search** tab searches across seasons and checks each result against the SubsPlease
 archive. AniList is preferred by default; reorder AniList, official MyAnimeList, Jikan, and Kitsu in **Account settings**.
@@ -139,14 +140,16 @@ The **Legal Sintel demo** button enters a Creative Commons/open movie torrent so
 - `src/lib/discovery/`: recommendation and airing-candidate domain logic.
 - `src/lib/library.ts` and `src/lib/library-import.ts`: persisted library normalization, identity-safe reducers, and backup hydration.
 - `src/lib/torrent/`: pure torrent file selection, track normalization, and piece-range helpers.
-- `src/lib/torrent/session.ts`: serialized torrent start/replace/forget lifecycle.
+- `src/lib/torrent/session.ts`: serialized torrent start/replace/release lifecycle.
+- `src/lib/torrent/seeding.ts`: seeding overview normalization and display helpers.
 - `src/lib/player/`: framework-free playback building blocks: `MpvClient` (the only place that talks to libmpv, with format-fixed property methods), `StreamLifecycle` (stream attempts, retries, and buffering watchdog), episode stream opening, seek coalescing, next-episode planning, keyboard shortcuts, and viewport math.
 - `src/lib/async/`: reusable generation tokens, serial queue, polling, and operation tracking primitives.
 - `src/lib/library-store.svelte.ts`: reactive library state with injectable persistence.
 - `src/lib/backend/commands.ts`: the typed Tauri command contract shared by `src/lib/backend.ts` (desktop invocation) and `src/lib/backend/preview.ts` (deterministic preview fixtures).
 - `src-tauri/src/catalog/`: catalog adapter registry, AniList/MyAnimeList/Jikan/Kitsu adapters, persistent identity resolution, and independent SubsPlease releases.
 - `src-tauri/src/catalog/http.rs`: shared provider HTTP layer with rate limiting, cooldowns, response caching, and bounded body reads.
-- `src-tauri/src/torrent.rs`: librqbit session, loopback stream server, and torrent commands.
+- `src-tauri/src/torrent.rs`: persistent librqbit session, loopback stream server, and torrent commands.
+- `src-tauri/src/seeding.rs`: seeding ledger, ratio policy, 10 GB cache eviction, and seeding commands.
 - `src-tauri/src/runtime.rs`: bundled libmpv/trailer runtime discovery.
 - `src-tauri/src/library_file.rs`: validated library backup import/export.
 - `src-tauri/src/lib.rs`: plugin setup and command registration.
@@ -211,7 +214,8 @@ fixtures. Library episode refresh skips optional metadata and preserves existing
 
 - The bundled libmpv integration is currently tested most thoroughly on Windows x86-64; macOS and Linux builds need platform-specific libmpv libraries.
 - In this initial version, the UI manages one active episode at a time; the Rust engine can manage multiple torrents.
-- Clearing the cache and configuring the download directory do not have a UI yet.
+- Individual cached episodes can be removed from **Seeding & cache**, but the download directory and cache limit are not configurable yet.
+- StreamsPlease does not open an inbound peer port, so seeding only reaches peers it connects to itself.
 - Tracker reach and startup speed depend on available peers and network or firewall settings.
 
 Use StreamsPlease only for content you are authorized to access. BitTorrent generally also uploads received pieces to other peers while the session is active.

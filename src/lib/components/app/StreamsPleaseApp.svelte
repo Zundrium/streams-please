@@ -247,8 +247,8 @@
   const torrents = new TorrentSession(
     {
       addMagnet: (magnet) => callBackend('add_magnet', { magnet }),
-      forget: async (id) => {
-        if (isTauri()) await callBackend('forget_torrent', { id });
+      release: async (id) => {
+        if (isTauri()) await callBackend('release_torrent', { id });
       }
     },
     {

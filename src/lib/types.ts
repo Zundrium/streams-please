@@ -101,6 +101,33 @@ export interface TorrentStats {
   };
 }
 
+export type SeedingStatus = 'streaming' | 'seeding' | 'partial' | 'downloading' | 'checking' | 'error';
+
+export interface SeedingEpisode {
+  infoHash: string;
+  name: string;
+  status: SeedingStatus;
+  sizeBytes: number;
+  downloadedBytes: number;
+  uploadedBytes: number;
+  ratio: number;
+  uploadSpeedMbps: number;
+  peers: number;
+  addedAt: number;
+  lastActiveAt: number;
+  error?: string;
+}
+
+export interface SeedingOverview {
+  targetRatio: number;
+  defaultTargetRatio: number;
+  cacheLimitBytes: number;
+  cacheUsedBytes: number;
+  totalUploadedBytes: number;
+  uploadSpeedMbps: number;
+  episodes: SeedingEpisode[];
+}
+
 export interface CurrentTorrent {
   id: number;
   details: TorrentDetails;

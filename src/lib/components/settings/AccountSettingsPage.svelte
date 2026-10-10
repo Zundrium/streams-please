@@ -1,6 +1,8 @@
 <script lang="ts">
   import { AlertCircle, Check, ChevronDown, ChevronUp, Database, Download, Languages, MonitorCog, Upload, UserRound } from '@lucide/svelte';
   import ContextToolbar from '$lib/components/shared/ContextToolbar.svelte';
+  import SeedingSettingsPanel from '$lib/components/settings/SeedingSettingsPanel.svelte';
+  import { Tabs, TabsContent, TabsList, TabsTrigger } from '$lib/components/ui/tabs';
   import { Alert, AlertDescription, AlertTitle } from '$lib/components/ui/alert';
   import { Button } from '$lib/components/ui/button';
   import { Input } from '$lib/components/ui/input';
@@ -63,6 +65,7 @@
     { value: 'nl', label: 'Dutch', description: 'Prefer Dutch captions' }
   ];
 
+  let settingsTab = $state<'preferences' | 'seeding'>('preferences');
   let transferOperation = $state<'export' | 'import' | null>(null);
   let transferStatus = $state<TransferStatus | null>(null);
   let catalogProviderOrder = $state<CatalogProviderId[]>(loadSettings().catalogProviderOrder);
@@ -159,7 +162,17 @@
     <p class="hidden text-xs text-(--text)/38 sm:block">Local preferences on this device</p>
   </ContextToolbar>
 
-  <div class="mx-auto max-w-4xl px-5 pb-24 pt-10 lg:px-10">
+  <Tabs bind:value={settingsTab} class="mx-auto max-w-4xl px-5 pb-24 pt-8 lg:px-10">
+    <TabsList aria-label="Settings sections" class="mb-10">
+      <TabsTrigger value="preferences">Preferences</TabsTrigger>
+      <TabsTrigger value="seeding">Seeding &amp; cache</TabsTrigger>
+    </TabsList>
+
+    <TabsContent value="seeding">
+      <SeedingSettingsPanel />
+    </TabsContent>
+
+    <TabsContent value="preferences">
     <section class="grid gap-8 md:grid-cols-[14rem_minmax(0,1fr)]" aria-labelledby="quality-title">
       <div class="text-reveal">
         <span class="mb-3 grid size-9 place-items-center rounded-full bg-(--text)/6 text-(--text)/55"><MonitorCog class="size-4" /></span>
@@ -340,5 +353,6 @@
         {/if}
       </div>
     </section>
-  </div>
+    </TabsContent>
+  </Tabs>
 </main>

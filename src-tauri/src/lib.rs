@@ -3,6 +3,7 @@ use tauri::Manager;
 mod catalog;
 mod library_file;
 mod runtime;
+mod seeding;
 mod torrent;
 mod updates;
 
@@ -33,7 +34,10 @@ pub fn run() {
             torrent::add_magnet,
             torrent::torrent_status,
             torrent::stream_url,
-            torrent::forget_torrent,
+            torrent::release_torrent,
+            seeding::seeding_overview,
+            seeding::set_seeding_target_ratio,
+            seeding::remove_torrent,
             library_file::export_library_file,
             library_file::import_library_file,
             catalog::catalog_providers,
