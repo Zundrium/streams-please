@@ -23,6 +23,7 @@
   } from '$lib/catalog';
   import { preferredDownload } from '$lib/catalog/media';
   import {
+    isSeriesComplete,
     libraryEntryMatches,
     nextUnwatchedEpisode,
     resumePosition,
@@ -119,6 +120,8 @@
       )
   );
   let filteredLibraryShows = $derived(filterEntries(libraryShows, query));
+  let filteredAiringShows = $derived(filteredLibraryShows.filter((entry) => !isSeriesComplete(entry)));
+  let filteredCompletedShows = $derived(filteredLibraryShows.filter(isSeriesComplete));
   let filteredCheckedShows = $derived(filterEntries(checkedShows, query));
   let selectedLibraryEntry = $derived(
     selectedShow
@@ -425,13 +428,13 @@
             </div>
           </div>
         {:else}
-          {#if filteredLibraryShows.length}
+          {#if filteredAiringShows.length}
             <section class="mt-7 grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6" aria-label="Saved shows">
-                {#each filteredLibraryShows as entry (entry.anilistId ?? entry.slug)}
+                {#each filteredAiringShows as entry (entry.anilistId ?? entry.slug)}
                   {@render posterCard(entry)}
                 {/each}
             </section>
-          {:else if !query}
+          {:else if !query && !libraryShows.length}
             <div class="grid min-h-[28vh] place-items-center text-center">
               <div class="max-w-md">
                 <span class="mx-auto grid size-16 place-items-center rounded-full bg-(--text)/6"><BookOpen class="size-7 text-(--text)/45" /></span>
@@ -460,6 +463,24 @@
 
               <div class="mt-7 grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6">
                 {#each filteredCheckedShows as entry (entry.anilistId ?? entry.slug)}
+                  {@render posterCard(entry)}
+                {/each}
+              </div>
+            </section>
+          {/if}
+
+          {#if filteredCompletedShows.length}
+            <section class="mt-16 border-t border-(--text)/8 pt-10" aria-labelledby="completed-shows-title">
+              <div class="flex items-end justify-between gap-6">
+                <div>
+                  <h2 id="completed-shows-title" class="text-2xl font-semibold tracking-[-0.04em]">Completed</h2>
+                  <p class="mt-1.5 text-sm text-(--text)/45">Library shows that have finished airing, with every episode released.</p>
+                </div>
+                <span class="shrink-0 text-xs font-medium tabular-nums text-(--text)/35">{filteredCompletedShows.length} {filteredCompletedShows.length === 1 ? 'show' : 'shows'}</span>
+              </div>
+
+              <div class="mt-7 grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6">
+                {#each filteredCompletedShows as entry (entry.anilistId ?? entry.slug)}
                   {@render posterCard(entry)}
                 {/each}
               </div>

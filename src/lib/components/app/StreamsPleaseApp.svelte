@@ -196,6 +196,7 @@
   let episodeStartTime = 0;
   let lastResumeSave = { key: '', time: 0, paused: false };
   let phase = $state<Phase>('idle');
+  let episodeFrameShown = $state(false);
   let error = $state('');
   let updateStatus = $state<AppUpdateStatus | null>(null);
   const updateController = createUpdateController({
@@ -238,7 +239,10 @@
     watchdogMs: PLAYBACK_START_TIMEOUT_MS,
     phase: () => phase,
     onPhase: (nextPhase, message) => {
-      if (nextPhase === 'ready') episodeStartTime = 0;
+      if (nextPhase === 'ready') {
+        episodeStartTime = 0;
+        episodeFrameShown = true;
+      }
       phase = nextPhase;
       if (message !== undefined) error = message;
     }
@@ -302,6 +306,7 @@
     }
   );
 
+  let episodeSurfaceLive = $derived(Boolean(current) && phase !== 'error' && episodeFrameShown);
   let videoTitle = $derived(current ? readableTitle(current.video.name) : 'Nothing played yet');
   let nowPlayingTitle = $derived(
     playingEpisode
@@ -398,6 +403,7 @@
     const settings = loadSettings();
     preferredQuality = settings.preferredQuality;
     preferredSubtitleLanguage = settings.preferredSubtitleLanguage;
+    if (isTauri()) void getCurrentWindow().show().catch(() => undefined);
     startAppUpdate();
     void callBackend('runtime_info')
       .then((nextRuntime) => (runtime = nextRuntime))
@@ -964,6 +970,7 @@
   function resetEpisodeState(): void {
     stream.begin(null);
     seeks.invalidate();
+    episodeFrameShown = false;
     current = null;
     playingEpisode = null;
     stats = null;
@@ -975,6 +982,7 @@
   async function beginEpisode(torrent: CurrentTorrent): Promise<void> {
     stream.begin(torrent);
     stats = null;
+    episodeFrameShown = false;
     current = torrent;
     phase = 'buffering';
     episodeStartTime = pendingResumeTime;
@@ -987,6 +995,7 @@
     }
     tracks = PREVIEW_TRACKS.map((track) => ({ ...track }));
     playback = { ...playback, duration: 888, paused: false };
+    episodeFrameShown = true;
     phase = 'ready';
   }
 
@@ -1391,10 +1400,10 @@
       onLibraryImport={importLibrary}
     />
   {:else}
-    <main class="h-full min-h-0 {current && phase !== 'error' && isTauri() ? 'bg-transparent' : 'bg-black'}">
+    <main class="h-full min-h-0 {episodeSurfaceLive && isTauri() ? 'bg-transparent' : 'bg-black'}">
         <section
           bind:this={videoViewport}
-          class="video-surface relative h-full min-h-0 overflow-hidden {current && phase !== 'error' ? 'live' : ''}"
+          class="video-surface relative h-full min-h-0 overflow-hidden {episodeSurfaceLive ? 'live' : ''}"
           class:cursor-none={current && !playerUiVisible}
           aria-label="Video player"
           onpointermove={trackPlayerPointer}

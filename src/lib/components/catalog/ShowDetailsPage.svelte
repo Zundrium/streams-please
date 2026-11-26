@@ -39,6 +39,7 @@
   import RevealImage from '$lib/components/shared/RevealImage.svelte';
   import ContextToolbar from '$lib/components/shared/ContextToolbar.svelte';
   import TasteIndicator from '$lib/components/catalog/TasteIndicator.svelte';
+  import CatalogNotice from '$lib/components/catalog/CatalogNotice.svelte';
   import { isTauri } from '$lib/backend';
   import { decodeEntities, errorMessage, metadataLabel, posterUrl, preferredTitle } from '$lib/catalog';
   import { preferredDownload, trailerLinks } from '$lib/catalog/media';
@@ -81,6 +82,7 @@
     day,
     libraryEntry,
     discoveryVerdict,
+    catalogDetails,
     loadShow,
     onBack,
     onPlay,
@@ -96,6 +98,7 @@
     day?: DayName;
     libraryEntry?: LibraryEntry;
     discoveryVerdict?: DiscoveryVerdict;
+    catalogDetails?: SubsPleaseShowResponse;
     loadShow: (
       slug: string,
       timezone: string,
@@ -230,6 +233,7 @@
   $effect(() => {
     const activeShow = show;
     const activeDay = day;
+    const preloadedDetails = catalogDetails;
     detailsRetry;
     let cancelled = false;
     details = null;
@@ -241,6 +245,12 @@
     trailerError = '';
     relationNavigationId = null;
     relationError = '';
+    if (preloadedDetails) {
+      details = preloadedDetails;
+      loadedShowPage = activeShow.page;
+      detailsLoading = false;
+      return;
+    }
     loadShow(activeShow.page, timezone, activeShow.anilist_id)
       .then((nextDetails) => {
         if (cancelled) return;
@@ -538,6 +548,8 @@
             {/each}
             {#if day}
               <Badge class="bg-(--bg-elevated)/75 text-(--text)/70 backdrop-blur"><CalendarDays class="size-3" /> {DAY_LABELS[day]} · {show.time}</Badge>
+            {:else if catalogDetails}
+              <Badge class="bg-(--bg-elevated)/75 text-(--text)/70 backdrop-blur"><Tv2 class="size-3" /> Not on SubsPlease</Badge>
             {:else if libraryEntry}
               <Badge class="bg-(--bg-elevated)/75 text-(--text)/70 backdrop-blur"><BookMarked class="size-3" /> In your library</Badge>
             {:else}
@@ -579,6 +591,7 @@
               {#if detailsLoading}<Spinner class="size-4 border-(--bg)/20 border-t-(--bg)" />{:else}<Film class="size-4" />{/if}
               Watch trailer <ExternalLink class="size-3.5 opacity-55" />
             </Button>
+            {#if !catalogDetails}
             <Select
               type="single"
               value={discoveryVerdict ?? 'unknown'}
@@ -616,6 +629,7 @@
             >
               {#if libraryEntry}<BookMarked class="size-4" /> Remove from library{:else}<BookmarkPlus class="size-4" /> Add to library{/if}
             </Button>
+            {/if}
           </div>
           {#if trailerError}<p class="text-reveal mt-3 text-sm text-red-500">{trailerError}</p>{/if}
         </div>
@@ -661,6 +675,15 @@
       </dl>
     </section>
 
+    {#if catalogDetails}
+    <section class="pt-16" aria-label="Episodes">
+      <CatalogNotice
+        centered
+        title="Not on SubsPlease yet"
+        description={`There are no episodes to play yet.${nextAiringLabel() ? ` ${nextAiringLabel()}.` : ''}`}
+      />
+    </section>
+    {:else}
     <section class="pt-16" aria-labelledby="episodes-title">
       <div class="flex flex-col gap-5 md:flex-row md:items-end md:justify-between">
         <div class="text-reveal">
@@ -771,6 +794,7 @@
         {/if}
       {/if}
     </section>
+    {/if}
   </article>
   {/if}
 </section>

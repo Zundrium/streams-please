@@ -17,11 +17,14 @@
   import { createCatalogSearch } from '$lib/catalog/search.svelte';
   import { catalogSourceLabel, type CatalogSearchResponse } from '$lib/catalog/providers';
   import type { CatalogDetailsActions } from '$lib/catalog/contracts';
+  import { mergeRecommendationDetails } from '$lib/discovery/recommendations';
   import { libraryEntryMatches } from '$lib/library';
   import type {
     AniListRelationNode, AniListSearchResult, SubsPleaseIndexResponse,
-    SubsPleaseIndexShow, SubsPleaseScheduleShow
+    SubsPleaseIndexShow, SubsPleaseScheduleShow, SubsPleaseShowResponse
   } from '$lib/types';
+
+  type DetailView = { show: SubsPleaseScheduleShow; catalogDetails: SubsPleaseShowResponse | null };
 
   let {
     loadSearch, loadIndex, loadShow, onPlay, onPlayTrailer, libraryEntries,
@@ -36,7 +39,8 @@
   let query = $state('');
   let navigationError = $state('');
   let selectedShow = $state<SubsPleaseScheduleShow | null>(null);
-  let detailHistory = $state<SubsPleaseScheduleShow[]>([]);
+  let selectedCatalogDetails = $state<SubsPleaseShowResponse | null>(null);
+  let detailHistory = $state<DetailView[]>([]);
   let navigationGeneration = 0;
   let disposed = false;
   const selectedEntry = $derived(selectedShow ? libraryEntries.find((entry) =>
@@ -80,10 +84,32 @@
     navigationError = '';
     detailHistory = [];
     selectedShow = scheduleShow(provider, anime);
+    selectedCatalogDetails = null;
+  }
+
+  function openCatalogOnly(anime: AniListSearchResult): void {
+    navigationGeneration += 1;
+    navigationError = '';
+    detailHistory = [];
+    selectedShow = {
+      title: preferredTitle(anime),
+      page: '',
+      image_url: posterUrl(anime.coverImage?.extraLarge ?? anime.coverImage?.large ?? ''),
+      time: '',
+      anilist_id: anime.id
+    };
+    selectedCatalogDetails = mergeRecommendationDetails(
+      { title: '', synopsis: '', image_url: '', slug: '', episode: {}, batch: {} },
+      anime,
+      search.provenance?.label
+    );
   }
 
   function openResult(anime: AniListSearchResult, match?: ProviderMatch): void {
-    if (!match) return;
+    if (!match) {
+      openCatalogOnly(anime);
+      return;
+    }
     const confirmed = match.confidence >= CONFIRMED_MATCH_CONFIDENCE;
     if (confirmed) saveProviderMapping(anime.id, match.provider.page);
     openProvider(match.provider, confirmed ? anime : undefined);
@@ -98,15 +124,19 @@
       throw new Error(`${preferredTitle(media)} could not be confidently matched to SubsPlease.`);
     }
     saveProviderMapping(media.id, match.provider.page);
-    if (selectedShow) detailHistory = [...detailHistory, selectedShow];
+    if (selectedShow) {
+      detailHistory = [...detailHistory, { show: selectedShow, catalogDetails: selectedCatalogDetails }];
+    }
     selectedShow = scheduleShow(match.provider, media);
+    selectedCatalogDetails = null;
   }
 
   function closeDetails(): void {
     navigationGeneration += 1;
     const previous = detailHistory.at(-1);
     detailHistory = previous ? detailHistory.slice(0, -1) : [];
-    selectedShow = previous ?? null;
+    selectedShow = previous?.show ?? null;
+    selectedCatalogDetails = previous?.catalogDetails ?? null;
   }
 
   function runSearch(): void {
@@ -121,6 +151,7 @@
     {loadShow} {onPlay} {onPlayTrailer}
     onBack={closeDetails}
     discoveryVerdict={selectedEntry?.discoveryVerdict}
+    catalogDetails={selectedCatalogDetails ?? undefined}
     {onToggleLibrary} {onSetDiscoveryVerdict} {onToggleWatched} {onShowLoaded}
     onOpenRelation={openRelatedShow}
     {preferredQuality}

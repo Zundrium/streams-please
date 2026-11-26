@@ -6,6 +6,7 @@ import {
   loadLibrary,
   mergeLibraryEntries,
   firstUnwatchedEpisode,
+  isSeriesComplete,
   nextUnwatchedEpisode,
   parseLibraryExport,
   resumePosition,
@@ -230,6 +231,14 @@ test('watchedCount and nextUnwatchedEpisode handle mixed episode formats', () =>
   const padded = entry({ availableEpisodes: ['01', '02', '10'], watchedEpisodes: ['01', '02'] });
   assert.equal(nextUnwatchedEpisode(padded), '10');
   assert.equal(nextUnwatchedEpisode(entry({ availableEpisodes: ['1'], watchedEpisodes: ['1'] })), undefined);
+});
+
+test('isSeriesComplete requires a known episode count with every episode released', () => {
+  assert.equal(isSeriesComplete(entry({ episodeCount: 3 })), true);
+  assert.equal(isSeriesComplete(entry({ episodeCount: 3, watchedEpisodes: ['01'] })), true);
+  assert.equal(isSeriesComplete(entry({ episodeCount: 12 })), false);
+  assert.equal(isSeriesComplete(entry()), false);
+  assert.equal(isSeriesComplete(entry({ episodeCount: 0, availableEpisodes: [] })), false);
 });
 
 test('saveLibrary reports success, failure, and retries after clearing caches on quota errors', () => {

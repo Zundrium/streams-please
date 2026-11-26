@@ -97,7 +97,8 @@ Set `STREAMSPLEASE_GITHUB_TOKEN` as a GitHub Actions secret containing a fine-gr
 3. Switch embedded audio and subtitles through the player or details panel.
 4. Use **External subtitle** to add a local subtitle file.
 5. Starting another episode releases the previous torrent. Fully downloaded episodes keep seeding until they reach the target ratio and are then deleted; partial downloads are paused and kept so they can resume quickly. When the cache exceeds 10 GB, the least recently watched episodes that are not playing are removed first. Seeding state and upload totals survive restarts. **Account settings → Seeding & cache** can cap the total upload rate (64 KiB/s minimum, unlimited by default); the header always shows the current total download and upload speed.
-6. Each library show remembers where you stopped in an unwatched episode. Starting that episode again resumes from the saved position, and the Library and show pages label it with the time. The position is saved every 10 seconds and whenever playback pauses. It is cleared once the episode is marked watched, which happens automatically at 80%.
+6. The Library keeps airing shows at the top. Shows whose AniList episode count has been fully released move to **Completed** at the bottom, below **Checked**.
+7. Each library show remembers where you stopped in an unwatched episode. Starting that episode again resumes from the saved position, and the Library and show pages label it with the time. The position is saved every 10 seconds and whenever playback pauses. It is cleared once the episode is marked watched, which happens automatically at 80%.
 
 The **Search** tab searches across seasons and checks each result against the SubsPlease
 archive. AniList is preferred by default; reorder AniList, official MyAnimeList, Jikan, and Kitsu in **Account settings**.
@@ -110,7 +111,7 @@ New requests use the saved order. During an outage, validated saved results take
 the next provider. Compact badges beside catalog counts identify failed and replacement providers;
 source, cache age, and coverage details are available on the badge. Search results use the shared
 poster cards, including archive-only results with saved artwork or a placeholder. Possible SubsPlease matches are labeled for review and never saved as confirmed
-identities. Archive titles remain accessible when catalog providers cannot be reached.
+identities. Results that are not on SubsPlease open a details page built from the catalog result, with the trailer but without episodes, taste, or library actions. Archive titles remain accessible when catalog providers cannot be reached.
 
 The **SubsPlease** tab starts with a normalized season catalog and filters it against the SubsPlease
 show archive. Use the previous and next controls to browse other seasons. The Archive toolbar

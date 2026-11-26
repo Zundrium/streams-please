@@ -561,6 +561,10 @@ export function nextUnwatchedEpisode(entry: LibraryEntry): string | undefined {
   return firstUnwatchedEpisode(entry.availableEpisodes, entry.watchedEpisodes);
 }
 
+export function isSeriesComplete(entry: LibraryEntry): boolean {
+  return Boolean(entry.episodeCount && entry.availableEpisodes.length >= entry.episodeCount);
+}
+
 export function resumePosition(entry: LibraryEntry | undefined, episode: string): number {
   const point = entry ? activeResumePoint(entry.resumePoint, entry.watchedEpisodes) : undefined;
   return point?.episode === episode ? point.position : 0;

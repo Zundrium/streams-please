@@ -25,7 +25,7 @@
   title={preferredTitle(anime)}
   imageUrl={posterUrl(anime.coverImage?.extraLarge ?? anime.coverImage?.large ?? '')}
   bottomLeft={availability}
-  onOpen={match ? onOpen : undefined}
+  onOpen={match || !checking ? onOpen : undefined}
 >
   {#snippet footer()}
     <p class="truncate text-xs text-(--text)/45">{metadata || 'Anime series'}</p>
