@@ -6,7 +6,7 @@ use tauri::{ipc::Channel, AppHandle, State};
 use tauri_plugin_updater::{Update, UpdaterExt};
 
 const GITHUB_RELEASES_URL: &str =
-    "https://api.github.com/repos/Zundrium/streams-please/releases?per_page=10";
+    "https://api.github.com/repos/Zundrium/StreamsPlease/releases?per_page=10";
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const EMBEDDED_GITHUB_TOKEN: Option<&str> = option_env!("STREAMSPLEASE_GITHUB_TOKEN");
 

@@ -86,7 +86,7 @@ The host and the guests can see each other's IP address, and the first contact g
 
 StreamsPlease runs on Windows (x64).
 
-1. Download `StreamsPlease_<version>_x64-setup.exe` from the [latest release](https://github.com/Zundrium/streams-please/releases/latest).
+1. Download `StreamsPlease_<version>_x64-setup.exe` from the [latest release](https://github.com/Zundrium/StreamsPlease/releases/latest).
 2. Run the installer and start StreamsPlease.
 3. Open the **SubsPlease** tab, select a show, and play an episode.
 
@@ -97,8 +97,8 @@ The app checks for a signed update at startup and asks before it downloads one.
 You need Node.js 24 or newer, the stable Rust toolchain, and the [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) for Windows. The repository stores the bundled runtimes with Git LFS.
 
 ```powershell
-git clone https://github.com/Zundrium/streams-please.git
-cd streams-please
+git clone https://github.com/Zundrium/StreamsPlease.git
+cd StreamsPlease
 npm install
 npm run tauri dev
 ```
