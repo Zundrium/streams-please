@@ -357,10 +357,10 @@ fn is_text(value: &str, max_units: usize) -> bool {
 
 fn is_image_url(value: &str) -> bool {
     let local = value.starts_with('/') && !value.starts_with("//");
-    !value.is_empty()
-        && is_text(value, 500)
-        && !value.chars().any(char::is_whitespace)
-        && (value.starts_with("https://") || local)
+    value.is_empty()
+        || (is_text(value, 500)
+            && !value.chars().any(char::is_whitespace)
+            && (value.starts_with("https://") || local))
 }
 
 fn is_slug(value: &str) -> bool {
@@ -754,6 +754,11 @@ pub mod tests {
         assert!(validate_media(&RoomMedia {
             image_url: "/poster.png".into(),
             anilist_id: None,
+            ..media()
+        })
+        .is_ok());
+        assert!(validate_media(&RoomMedia {
+            image_url: String::new(),
             ..media()
         })
         .is_ok());

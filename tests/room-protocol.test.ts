@@ -7,7 +7,8 @@ import {
   parseParticipants,
   parseRoomEvent,
   parseRoomMedia,
-  parseRoomState
+  parseRoomState,
+  roomMediaFrom
 } from '../src/lib/room/protocol.ts';
 import { MAGNET, media, roomState } from './room-fakes.ts';
 
@@ -21,12 +22,22 @@ test('valid room input is accepted and copied', () => {
   const { anilistId: _anilistId, ...withoutAniList } = media();
   assert.deepEqual(parseRoomMedia(withoutAniList), withoutAniList);
   assert.deepEqual(parseRoomMedia({ ...media(), imageUrl: '/poster.png' })?.imageUrl, '/poster.png');
+  assert.deepEqual(parseRoomMedia({ ...media(), imageUrl: '' })?.imageUrl, '');
   assert.deepEqual(parseGuestStatus({ epoch: 2, phase: 'ready', progress: null }), {
     epoch: 2,
     phase: 'ready',
     progress: null
   });
   assert.deepEqual(parseParticipants([participant]), [participant]);
+});
+
+test('an episode request becomes room media without its extra fields, or nothing when invalid', () => {
+  const request = { ...media(), magnet: ` ${MAGNET}\n`, imageUrl: '', day: 'Monday', airingTime: '15:00' };
+  assert.deepEqual(roomMediaFrom(request), { ...media(), imageUrl: '' });
+  const { anilistId: _anilistId, ...withoutAniList } = media();
+  assert.deepEqual(roomMediaFrom({ ...media(), anilistId: null as unknown as number }), withoutAniList);
+  assert.equal(roomMediaFrom({ ...media(), slug: 'Not A Slug' }), null);
+  assert.equal(roomMediaFrom({ ...media(), magnet: 'https://example.com/video.mkv' }), null);
 });
 
 test('room events are narrowed by type and reject unknown types and extra fields', () => {

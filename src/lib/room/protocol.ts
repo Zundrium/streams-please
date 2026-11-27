@@ -186,9 +186,10 @@ export function isRoomMagnet(value: unknown): value is string {
 
 function isImageUrl(value: unknown): value is string {
   return (
-    isText(value, 500, 1) &&
-    !/\s/.test(value) &&
-    (value.startsWith('https://') || (value.startsWith('/') && !value.startsWith('//')))
+    value === '' ||
+    (isText(value, 500) &&
+      !/\s/.test(value) &&
+      (value.startsWith('https://') || (value.startsWith('/') && !value.startsWith('//'))))
   );
 }
 
@@ -214,6 +215,12 @@ export function parseRoomMedia(value: unknown): RoomMedia | null {
   if (anilistId === undefined) return { magnet, title, episode, slug, imageUrl, quality };
   if (!isCount(anilistId) || anilistId === 0) return null;
   return { magnet, title, episode, slug, anilistId, imageUrl, quality };
+}
+
+export function roomMediaFrom(source: RoomMedia): RoomMedia | null {
+  const { title, episode, slug, anilistId, imageUrl, quality } = source;
+  const media = { magnet: source.magnet.trim(), title, episode, slug, imageUrl, quality };
+  return parseRoomMedia(typeof anilistId === 'number' && anilistId > 0 ? { ...media, anilistId } : media);
 }
 
 export function parseRoomState(value: unknown): RoomState | null {

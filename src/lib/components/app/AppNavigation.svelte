@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { BookOpen, CalendarDays, CircleUserRound, MonitorPlay, Search, Sparkles } from '@lucide/svelte';
+  import { BookOpen, CalendarDays, CircleUserRound, MonitorPlay, Search, Sparkles, Users } from '@lucide/svelte';
   import { Button } from '$lib/components/ui/button';
   import { Tabs, TabsList, TabsTrigger } from '$lib/components/ui/tabs';
   import StreamsPleaseLogo from '$lib/components/app/StreamsPleaseLogo.svelte';
@@ -8,9 +8,11 @@
   import { isTauri } from '$lib/backend';
   import type { AppView } from '$lib/types';
 
-  let { activeView, onNavigate }: {
+  let { activeView, onNavigate, roomActive, onOpenRoom }: {
     activeView: AppView;
     onNavigate: (view: AppView) => void;
+    roomActive: boolean;
+    onOpenRoom: () => void;
   } = $props();
 
   const views = [
@@ -40,6 +42,12 @@
     </TabsList>
   </Tabs>
   <div class="min-w-0 flex-1" data-tauri-drag-region></div>
+  {#if import.meta.env.DEV}
+    <Button variant="ghost" size="icon"
+      class={`my-auto shrink-0 ${roomActive ? 'bg-(--text)/10 text-(--text)' : ''}`}
+      aria-label="Watch together" aria-haspopup="dialog"
+      onclick={onOpenRoom}><Users class="size-5" /></Button>
+  {/if}
   <Button variant="ghost" size="icon"
     class={`my-auto shrink-0 ${activeView === 'account' ? 'bg-(--text)/10 text-(--text)' : ''}`}
     aria-label="Account settings" aria-current={activeView === 'account' ? 'page' : undefined}

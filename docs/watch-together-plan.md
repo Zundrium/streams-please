@@ -1,6 +1,6 @@
 # Watch together: implementation plan
 
-Status: Phases 1 (sync core) and 2 (playback seams) are implemented and released in v0.9.1. Phase 2's native checks are open. Phase 0's automated and single-machine checks pass and are released in v0.9.2. Phase 3 (Rust transport and IPC) is implemented with its automated checks green; the commands are registered, but no UI calls them yet. The two-machine run and the firewall prompt of Phase 0 move to the Phase 4 matrix, because the spike executable is gone. The DHT file is now per app, so the two-instance recipe is unblocked but not yet run. Phases 4 to 7 are open.
+Status: Phases 1 (sync core) and 2 (playback seams) are implemented and released in v0.9.1. Phase 2's native checks are open. Phase 0's automated and single-machine checks pass and are released in v0.9.2. Phase 3 (Rust transport and IPC) is implemented with its automated checks green. Phase 4 (host and guest end to end) is implemented behind the development flag, with its automated checks green and the browser preview exercised as host and as guest; its manual matrix has not been run, so Phase 4 is not done. The two-machine run and the firewall prompt of Phase 0 are part of that matrix, because the spike executable is gone. The DHT file is now per app, so the two-instance recipe is unblocked but not yet run. Phases 5 to 7 are open.
 Base: `e3c96cb` (v0.9.0), written 2026-11-26. Decisions 1 to 6 are confirmed.
 Code name: `room`. UI label: "Watch together".
 
@@ -107,7 +107,7 @@ tests/room-*.test.ts
 tests/room-fakes.ts                fake clock, transport, and player shared by the room tests
 ```
 
-The files of Phase 1 exist: `protocol.ts`, `clock.ts`, `readiness.ts`, `reconcile.ts`, `host-controller.ts`, `guest-controller.ts`, their tests, and `tests/room-fakes.ts`. The files of Phase 3 exist: `src-tauri/src/room/`, `transport.ts`, `preview-room.ts`, and `tests/room-transport.test.ts`.
+The files of Phase 1 exist: `protocol.ts`, `clock.ts`, `readiness.ts`, `reconcile.ts`, `host-controller.ts`, `guest-controller.ts`, their tests, and `tests/room-fakes.ts`. The files of Phase 3 exist: `src-tauri/src/room/`, `transport.ts`, `preview-room.ts`, and `tests/room-transport.test.ts`. The files of Phase 4 exist: `session.svelte.ts`, a minimal `RoomPanel.svelte`, and `tests/room-session.test.ts`.
 
 ## 5. Transport
 
@@ -245,7 +245,7 @@ The TypeScript guards apply the rules below, with two notes. The magnet check is
 | `name` | Control characters removed, whitespace collapsed, trimmed, 1 to 24 characters; empty becomes "Guest". |
 | `magnet` | `validate_magnet` and `magnet_info_hash` from `src-tauri/src/torrent.rs` (made `pub(crate)`), plus the 8,192 byte room limit. |
 | `title`, `episode`, `slug`, `quality` | Length caps (200, 16, 120, 8). `slug` only `[a-z0-9-]`. No control characters. |
-| `imageUrl` | At most 500 characters; a `/` path or an `https://` URL. Rendering goes through `posterUrl()` and the existing `img-src` list, so other origins do not load. |
+| `imageUrl` | Empty, or at most 500 characters as a `/` path or an `https://` URL. Episode requests carry an empty string for shows without artwork. Rendering goes through `posterUrl()` and the existing `img-src` list, so other origins do not load. |
 | Numbers | Finite. `seq`, `epoch`, `mediaSeq`, ids: non-negative integers. `position`: 0 to 86,400. `speed`: a member of `PLAYBACK_SPEEDS`. `progress`: 0 to 1 or null. |
 | `anilistId` | Positive integer when present. |
 
@@ -398,7 +398,7 @@ The app keeps one code path for solo playback. Room mode adds seams, not a secon
 
 ### Seams (solo behavior unchanged)
 
-1. **Start paused.** `openEpisodeStream` always unpauses after loading (`src/lib/player/episode-stream.ts:43`). Add a `startPaused()` dependency and pass its value to `setFlag('pause', …)`. Solo passes `false`. In a room it is always `true`; the reconciler unpauses. `beginEpisode` (`StreamsPleaseApp.svelte:982`) sets the optimistic `playback.paused` from the same value. This also makes stream retries come back paused in a room.
+1. **Start paused.** `openEpisodeStream` always unpauses after loading (`src/lib/player/episode-stream.ts:43`). Add a `startPaused()` dependency and pass its value to `setFlag('pause', …)`. Solo passes `false`. In a room it is always `true`; the reconciler unpauses. `beginEpisode` (`StreamsPleaseApp.svelte:982`) sets the optimistic `playback.paused` from the same value. This also makes stream retries come back paused in a room. As built in Phase 4, `startPaused()` reads whether the room drives playback at the moment the stream opens, not a flag stored per start.
 2. **Stop.** `TorrentSession.clear()` is private (`src/lib/torrent/session.ts:80`). Add a public `stop()` that supersedes pending starts and runs `clear()` on the queue. The app wrapper also resets `phase` to `idle`.
 3. **Intent and apply.** Split each transport handler into a role-aware intent and a local apply:
    - `togglePlayback` (`:1151`), `pausePlayback` (`:1158`), `scheduleSeek` (`:1220`), `cycleSpeed` (`:1256`).
@@ -438,6 +438,7 @@ interface PlaybackPort {
 
 Other rules:
 
+- The room drives a player only while the room has media. In an empty room a participant's own episode keeps its local controls, and the reconciler leaves it alone until the host loads something. A guest still cannot start an episode.
 - Starting to host while an episode plays makes that episode the room media at the current position.
 - Leaving a room, or losing the host, pauses the guest's player and returns it to solo with the episode still loaded.
 - Ending a room does not interrupt the host's own playback.
@@ -700,6 +701,31 @@ Goal: a real room works between two apps, with a minimal panel behind the develo
 4. `tests/room-session.test.ts` with a fake transport: role transitions, leave during connect, `closed` reasons, no state change after dispose.
 
 Exit: the Phase 4 rows of the manual matrix in section 13 pass between two machines, and the solo regression passes again.
+
+Implemented, not done: `npm run check` 0 errors, `npm test` 235 pass, `npm run build` ok, `cargo fmt --check` clean, `cargo test` 133 pass, `cargo check` ok. No native check was run. Open: matrix rows 1 to 11 and 19, the Phase 2 native checks, and the first start of `npm run tauri dev` after the DHT change. Both machines need `npm run tauri dev`, because the header button only exists in development builds.
+
+Browser preview, exercised in `npm run dev`:
+
+- Host: the panel shows the invite code and the two simulated guests with their routes. Starting an episode holds the room until both guests are ready, then plays. Pause, resume, and speed apply. Three quick +10 s seeks land 30 seconds ahead, hold the room, and resume. Leaving the Player view pauses the room. Ending the room leaves the host playing in solo.
+- Guest: a bad code shows the error. Joining switches to the Player view and follows the preview host. Play, seek, and speed are locked. Another view reports away; returning resyncs to the live position. Leaving returns to solo, paused.
+- Solo: start, seek, speed, pause, and the pause on a view change are unchanged.
+
+As built:
+
+- `RoomSession` owns one `BackendRoomTransport` and at most one controller. It buffers events while `connecting` and replays them when `room_host` or `room_join` resolves, because the first `state` and `roster` can arrive earlier. `host` and `join` return whether the session entered the role.
+- Every call into a controller runs under `untrack`, so a port call never becomes a dependency of the effect that caused it.
+- `leave` always calls `room_leave`; the app calls it once on start. A `closed` event also calls `room_leave`, which frees the endpoint.
+- Leaving or losing a room that has media pauses a guest's player and sets the room speed, which ends a drift correction. A host's player is left alone.
+- `roomDrivesPlayback` is true while the room has media. `hostsRoom` routes play, pause, seek, and speed to `HostController`; `followsRoom` locks them. The speed button shows the room speed. The next-episode prompt is hidden for guests.
+- Streams open paused when the room drives playback. This replaces Phase 2's `episodeStartsPaused` and the `startPaused` argument of `startEpisode`, because hosting adopts and leaving releases an episode that is already loaded.
+- `PlaybackPort`: `load` flushes the resume point and calls `startEpisode(media, position)`; `stop` is `stopEpisode`; `seek` is `scheduleSeek`. `setPaused` and `setSpeed` do nothing unless an episode is loaded and owns mpv (`episodeOwnsPlayer`), so room code never reaches a trailer.
+- `pausePlayback` calls `room.pause()` on the host even when the local player is already paused. A held room therefore cannot start while the host is on another view, hidden, or in a trailer. The trailer preparation calls `pausePlayback` whenever an episode is loaded.
+- A host's relative seek starts from the room position while the room is not playing, so quick repeats add up before the first seek reaches the player.
+- Hosting adopts the episode when `playingEpisode` and `current` are set. An episode that is still connecting at that moment is not adopted and stays outside the room.
+- `roomMediaFrom` (`protocol.ts`) turns an episode request into room media: it drops the schedule fields, trims the magnet, omits a missing AniList ID, and returns nothing when the room would reject the result. `RoomSession.load` then reports "This episode cannot be shared with the room." and the app opens the panel. The host's `playingEpisode` is the room media, so it has no `day` or `airingTime`.
+- `imageUrl` may be empty (section 6), in Rust and in TypeScript. The ALPN did not change: no released build has a UI that reaches the room commands.
+- The panel is minimal: a name that is not saved, host, join, cancel, the invite code in a read-only field, a roster with phase, hold, and route, and leave. The header button is in `AppNavigation.svelte` behind `import.meta.env.DEV`.
+- Left for Phase 5: Escape and the other shortcuts while the panel is open, the notice when a guest starts an episode, and the Play button and transport that a following guest can still click without effect.
 
 ### Phase 5: UI
 

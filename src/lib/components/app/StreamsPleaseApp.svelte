@@ -72,7 +72,8 @@
     type InlinePlacement
   } from '$lib/player/viewport';
   import { localNow } from '$lib/room/clock';
-  import type { LocalPlayback } from '$lib/room/reconcile';
+  import type { LocalPlayback, PlaybackPort } from '$lib/room/reconcile';
+  import { RoomSession } from '$lib/room/session.svelte';
   import { loadSettings, saveSettings } from '$lib/settings';
   import { localTimezone } from '$lib/time';
   import {
@@ -93,6 +94,7 @@
   import LibraryPage from '$lib/components/library/LibraryPage.svelte';
   import NextEpisodePrompt from '$lib/components/player/NextEpisodePrompt.svelte';
   import PlayerTransport from '$lib/components/player/PlayerTransport.svelte';
+  import RoomPanel from '$lib/components/room/RoomPanel.svelte';
   import RevealImage from '$lib/components/shared/RevealImage.svelte';
   import SearchPage from '$lib/components/catalog/SearchPage.svelte';
   import SubsPleasePage from '$lib/components/catalog/SubsPleasePage.svelte';
@@ -132,8 +134,6 @@
   };
 
   type MpvMediaOwner = 'episode' | 'trailer' | 'transition';
-
-  type EpisodeStart = { startAt: number; startPaused: boolean };
 
   const catalogClient = createCatalogClient();
   const {
@@ -203,7 +203,6 @@
   let preferredSubtitleLanguage = $state<SubtitleLanguage>('en');
   let autoMarkedPlaybackKey = '';
   let pendingResumeTime = 0;
-  let episodeStartsPaused = false;
   let episodeStartTime = 0;
   let lastResumeSave = { key: '', time: 0, paused: false };
   let phase = $state<Phase>('idle');
@@ -218,6 +217,8 @@
   let current = $state<CurrentTorrent | null>(null);
   let stats = $state<TorrentStats | null>(null);
   let queueOpen = $state(false);
+  let roomPanelOpen = $state(false);
+  let documentHidden = $state(false);
   let tracks = $state<MpvTrack[]>([]);
   let seekTarget = $state<number | null>(null);
   let positionSampledAt = $state(0);
@@ -262,7 +263,7 @@
 
   const seeks = new SeekScheduler({
     perform: (target) => mpv.run((player) => player.seek(target)),
-    canSeek: () => Boolean(current) && mpvMediaOwner === 'episode',
+    canSeek: episodeOwnsPlayer,
     onError: (target, reason) => {
       if (seekTarget !== target) return;
       seekTarget = null;
@@ -286,6 +287,22 @@
       onStarted: beginEpisode
     }
   );
+
+  const playbackPort: PlaybackPort = {
+    load: async (media, position) => {
+      flushResumePoint();
+      await startEpisode(media, position);
+    },
+    stop: stopEpisode,
+    setPaused: async (paused) => {
+      if (episodeOwnsPlayer()) await applyPaused(paused);
+    },
+    seek: scheduleSeek,
+    setSpeed: async (speed) => {
+      if (episodeOwnsPlayer()) await applySpeed(speed);
+    }
+  };
+  const room = new RoomSession({ port: playbackPort });
 
   const trailerController = new TrailerPlayerController<TrailerSessionContext>(
     {
@@ -380,6 +397,12 @@
     downloaded: torrentDownloaded,
     seeking: seekTarget !== null
   });
+  let roomDrivesPlayback = $derived(Boolean(room.roomState?.media));
+  let hostsRoom = $derived(room.role === 'host' && roomDrivesPlayback);
+  let followsRoom = $derived(room.role === 'guest' && roomDrivesPlayback);
+  let displayedSpeed = $derived(
+    roomDrivesPlayback && room.roomState ? room.roomState.speed : playback.speed
+  );
   let waitingForPeers = $derived(
     phase === 'buffering' &&
       Date.now() - stream.bufferingStartedAt > 12_000 &&
@@ -407,6 +430,7 @@
   );
   let nextEpisodePromptVisible = $derived.by(() => {
     if (
+      room.role === 'guest' ||
       activeView !== 'player' ||
       phase !== 'ready' ||
       trailerPlayback !== null ||
@@ -427,6 +451,8 @@
     preferredQuality = settings.preferredQuality;
     preferredSubtitleLanguage = settings.preferredSubtitleLanguage;
     if (isTauri()) void getCurrentWindow().show().catch(() => undefined);
+    documentHidden = document.hidden;
+    void room.leave();
     startAppUpdate();
     void callBackend('runtime_info')
       .then((nextRuntime) => (runtime = nextRuntime))
@@ -452,6 +478,7 @@
     onResize();
 
     const onVisibilityChange = () => {
+      documentHidden = document.hidden;
       if (!document.hidden) return;
       if (trailerPlayback) void pauseTrailerPlayback();
       else void pausePlayback();
@@ -486,6 +513,7 @@
       window.removeEventListener('keydown', onKeyDown);
       document.removeEventListener('visibilitychange', onVisibilityChange);
       if (playerUiTimer !== null) clearTimeout(playerUiTimer);
+      room.dispose();
       mpv.dispose();
       trailerController.dispose();
       stream.dispose();
@@ -537,6 +565,14 @@
     const view = activeView;
     const trailer = trailerPlayback;
     if (view !== 'player' && current && !trailer) void pausePlayback();
+  });
+
+  $effect(() => {
+    if (room.role === 'host' || room.role === 'guest') room.localChanged(localPlayback);
+  });
+
+  $effect(() => {
+    room.setAttached(activeView === 'player' && !trailerPlayback && !documentHidden);
   });
 
   $effect(() => {
@@ -680,6 +716,10 @@
     window.setTimeout(sync, 320);
   }
 
+  function episodeOwnsPlayer(): boolean {
+    return Boolean(current) && mpvMediaOwner === 'episode';
+  }
+
   function suspendEpisodeOperations(): void {
     stream.suspend();
     seeks.invalidate();
@@ -724,7 +764,7 @@
 
     await episodeOperations.settled();
     if (cancelled()) return;
-    if (torrents.current && !playback.paused) await pausePlayback();
+    if (torrents.current) await pausePlayback();
     if (cancelled()) return;
     const torrent = torrents.current;
     if (context.resume && torrent) context.resume = captureResumeState(torrent);
@@ -985,7 +1025,7 @@
       markReady: () => stream.markReady(),
       margins: currentVideoMargins,
       resumeAt: () => seekTarget ?? Math.max(playback.time, episodeStartTime),
-      startPaused: () => episodeStartsPaused,
+      startPaused: () => roomDrivesPlayback,
       livePeers: () => stream.livePeers,
       startTimeoutMs: PLAYBACK_START_TIMEOUT_MS,
       probeIntervalMs: PLAYBACK_PROBE_INTERVAL_MS
@@ -1015,14 +1055,14 @@
     phase = 'buffering';
     episodeStartTime = pendingResumeTime;
     pendingResumeTime = 0;
-    playback = { ...playback, paused: episodeStartsPaused, time: episodeStartTime, duration: 0 };
+    playback = { ...playback, paused: roomDrivesPlayback, time: episodeStartTime, duration: 0 };
 
     if (isTauri()) {
       await mpv.ensure();
       return;
     }
     tracks = PREVIEW_TRACKS.map((track) => ({ ...track }));
-    playback = { ...playback, duration: 888, paused: episodeStartsPaused };
+    playback = { ...playback, duration: 888, paused: roomDrivesPlayback };
     episodeFrameShown = true;
     phase = 'ready';
   }
@@ -1033,10 +1073,9 @@
     return false;
   }
 
-  async function startTorrent(releaseMagnet: string, start: EpisodeStart): Promise<boolean> {
+  async function startTorrent(releaseMagnet: string, startAt: number): Promise<boolean> {
     error = '';
-    pendingResumeTime = start.startAt;
-    episodeStartsPaused = start.startPaused;
+    pendingResumeTime = startAt;
     const magnet = releaseMagnet.trim();
     if (!magnet.startsWith('magnet:?')) return failPlayback('Enter a valid magnet link.');
     if (isTauri() && runtime && !runtime.mpvAvailable) {
@@ -1127,11 +1166,14 @@
   }
 
   async function requestEpisode(request: EpisodePlaybackRequest) {
+    if (room.role === 'guest') return;
     flushResumePoint();
-    await startEpisode(request, { startAt: savedResumeTime(request), startPaused: false });
+    const startAt = savedResumeTime(request);
+    if (room.role !== 'host') await startEpisode(request, startAt);
+    else if (!room.load(request, startAt)) roomPanelOpen = true;
   }
 
-  async function startEpisode(request: EpisodePlaybackRequest, start: EpisodeStart) {
+  async function startEpisode(request: EpisodePlaybackRequest, startAt: number) {
     const generation = episodeRequests.next();
     const originView = activeView === 'player' ? episodeOriginView : activeView;
     nextEpisode = null;
@@ -1143,7 +1185,7 @@
     queueOpen = false;
     playingEpisode = null;
     autoMarkedPlaybackKey = '';
-    const started = await startTorrent(request.magnet, start);
+    const started = await startTorrent(request.magnet, startAt);
     if (!started || !episodeRequests.isCurrent(generation)) return;
     playingEpisode = request;
     void prepareNextEpisode(request, generation);
@@ -1188,12 +1230,24 @@
     requestedShowSlug = '';
   }
 
+  async function hostRoom(name: string): Promise<void> {
+    if (!(await room.host(name))) return;
+    if (playingEpisode && current) room.adopt(playingEpisode, localPlayback, playback.speed);
+  }
+
+  async function joinRoom(invite: string, name: string): Promise<void> {
+    if (await room.join(invite, name)) await changeActiveView('player');
+  }
+
   async function togglePlayback() {
-    if (!current) return;
-    await applyPaused(!playback.paused);
+    if (!current || followsRoom) return;
+    if (!hostsRoom) await applyPaused(!playback.paused);
+    else if (room.wantsPlay) room.pause();
+    else room.play();
   }
 
   async function pausePlayback() {
+    if (hostsRoom) room.pause();
     if (!current || playback.paused) return;
     playback = { ...playback, paused: true };
     await applyPaused(true).catch(() => undefined);
@@ -1273,12 +1327,19 @@
   }
 
   function requestSeek(time: number) {
-    scheduleSeek(time);
+    if (followsRoom) return;
+    if (hostsRoom) room.seek(time);
+    else scheduleSeek(time);
+  }
+
+  function seekOrigin(): number {
+    const held = hostsRoom && room.roomState && !room.roomState.playing ? room.roomState : null;
+    return held ? held.position : (seeks.pendingTarget ?? seekTarget ?? playback.time);
   }
 
   function seekRelative(seconds: number) {
     if (!current) return;
-    requestSeek((seeks.pendingTarget ?? seekTarget ?? playback.time) + seconds);
+    requestSeek(seekOrigin() + seconds);
   }
 
   function seekAbsolute(percent: number) {
@@ -1301,7 +1362,10 @@
   }
 
   async function cycleSpeed() {
-    await applySpeed(nextPlaybackSpeed(playback.speed));
+    if (followsRoom) return;
+    const speed = nextPlaybackSpeed(displayedSpeed);
+    if (hostsRoom) room.setSpeed(speed);
+    else await applySpeed(speed);
   }
 
   async function applySpeed(speed: number) {
@@ -1362,7 +1426,12 @@
 
 <div class="grid h-screen min-h-0 grid-cols-[minmax(0,1fr)] overflow-hidden text-(--text) {immersiveMode ? 'grid-rows-[minmax(0,1fr)]' : 'grid-rows-[4rem_minmax(0,1fr)]'}">
   {#if !immersiveMode}
-  <AppNavigation {activeView} onNavigate={(view) => void changeActiveView(view)} />
+  <AppNavigation
+    {activeView}
+    onNavigate={(view) => void changeActiveView(view)}
+    roomActive={room.role !== 'solo'}
+    onOpenRoom={() => (roomPanelOpen = true)}
+  />
   {/if}
 
   <div bind:this={contentViewport} class="relative min-h-0 overflow-hidden">
@@ -1597,7 +1666,7 @@
               >
                 <FileVideo2 class="size-4" />
               </Button>
-              <Button variant="ghost" size="sm" class="text-white hover:bg-white/10 hover:text-white" onclick={() => void cycleSpeed()}>{playback.speed}×</Button>
+              <Button variant="ghost" size="sm" class="text-white hover:bg-white/10 hover:text-white" onclick={() => void cycleSpeed()}>{displayedSpeed}×</Button>
               <Select type="single" value={String(selectedAudio?.id ?? '')} onValueChange={(value) => void selectTrack('aid', String(value))}>
                 <SelectTrigger class="hidden h-9 min-w-32 bg-white/10 text-white hover:bg-white/15 md:flex"><AudioLines class="size-4" /><span class="max-w-20 truncate">{selectedAudio?.title || selectedAudio?.lang || 'Audio'}</span></SelectTrigger>
                 <SelectContent>{#each audioTracks as track (track.id)}<SelectItem value={String(track.id)}>{track.title || track.lang || `Track ${track.id}`}</SelectItem>{/each}</SelectContent>
@@ -1752,6 +1821,10 @@
   {/if}
   </div>
 </div>
+
+{#if roomPanelOpen}
+  <RoomPanel {room} onHost={hostRoom} onJoin={joinRoom} onClose={() => (roomPanelOpen = false)} />
+{/if}
 
 {#if updateStatus}
   <UpdateStatus
