@@ -33,6 +33,7 @@
     visible = true,
     bufferedRanges = [],
     playbackLabel = 'Playback',
+    transportLocked = false,
     onTogglePlayback,
     onSeekRelative,
     onSeekAbsolute,
@@ -53,6 +54,7 @@
     visible?: boolean;
     bufferedRanges?: BufferedRange[];
     playbackLabel?: string;
+    transportLocked?: boolean;
     onTogglePlayback: () => void | Promise<void>;
     onSeekRelative: (seconds: number) => void | Promise<void>;
     onSeekAbsolute: (percent: number) => void | Promise<void>;
@@ -107,6 +109,7 @@
       {bufferedRanges}
       max={100}
       step={TIMELINE_STEP}
+      disabled={transportLocked}
       aria-label={`${playbackLabel} position`}
       class="[&_[data-slot=slider-track]]:bg-white/20 [&_[data-slot=slider-buffer]]:bg-white/38 [&_[data-slot=slider-range]]:bg-white [&_[data-slot=slider-thumb]]:bg-white"
       onValueChange={(value) => previewSeek(Number(value))}
@@ -122,12 +125,14 @@
         size="icon"
         class="text-white hover:bg-white/10 hover:text-white"
         aria-label="Back 10 seconds"
+        disabled={transportLocked}
         onclick={() => void onSeekRelative(-10)}
       ><Rewind class="size-4" /></Button>
       <Button
         size="icon"
         class="size-11 bg-white text-black hover:bg-white/85"
         aria-label={paused ? `Play ${playbackLabel.toLowerCase()}` : `Pause ${playbackLabel.toLowerCase()}`}
+        disabled={transportLocked}
         onclick={() => void onTogglePlayback()}
       >
         {#if paused}<Play class="size-5" fill="currentColor" />{:else}<Pause class="size-5" fill="currentColor" />{/if}
@@ -137,6 +142,7 @@
         size="icon"
         class="text-white hover:bg-white/10 hover:text-white"
         aria-label="Forward 10 seconds"
+        disabled={transportLocked}
         onclick={() => void onSeekRelative(10)}
       ><FastForward class="size-4" /></Button>
       <Button
@@ -157,6 +163,9 @@
         class="hidden shrink-0 sm:flex data-[orientation=horizontal]:w-32 lg:data-[orientation=horizontal]:w-40 [&_[data-slot=slider-track]]:bg-white/20 [&_[data-slot=slider-range]]:bg-white [&_[data-slot=slider-thumb]]:bg-white"
         onValueChange={(value) => void onChangeVolume(Number(value))}
       />
+      {#if transportLocked}
+        <span class="ml-2 truncate text-xs text-white/55">The host controls playback</span>
+      {/if}
     </div>
 
     <div class="flex items-center gap-1">

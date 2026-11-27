@@ -25,6 +25,8 @@ export type RoomRole = 'solo' | 'connecting' | 'host' | 'guest';
 export interface RoomSessionTransport extends RoomTransport {
   host(name: string): Promise<RoomHostResult>;
   join(invite: string, name: string): Promise<RoomJoinResult>;
+  remove(id: number): Promise<void>;
+  lock(locked: boolean): Promise<void>;
   leave(): Promise<void>;
 }
 
@@ -53,6 +55,7 @@ export class RoomSession {
   routes = $state.raw<Record<number, RoomRoute>>({});
   link = $state<RoomLinkStatus>('connected');
   wantsPlay = $state(false);
+  locked = $state(false);
   closeReason = $state<RoomCloseReason | null>(null);
   error = $state('');
 
@@ -75,6 +78,19 @@ export class RoomSession {
       (event) => this.handleEvent(event),
       (reason) => this.handleSendError(reason)
     );
+  }
+
+  get waitingLabel(): string {
+    const self = this.role === 'host' ? 0 : this.selfId;
+    const [first, ...others] = this.roster.filter((participant) => participant.blocking);
+    if (!first || !this.roomState?.media) return '';
+    const name = first.id === self ? 'you' : first.name;
+    if (others.length === 0) return `Waiting for ${name}`;
+    return `Waiting for ${name} and ${others.length} ${others.length === 1 ? 'other' : 'others'}`;
+  }
+
+  get canPlayAnyway(): boolean {
+    return this.role === 'host' && this.roster.some((participant) => participant.blocking && !participant.host);
   }
 
   host = async (name: string): Promise<boolean> => {
@@ -141,6 +157,30 @@ export class RoomSession {
 
   setSpeed = (speed: number): void => this.drive(() => this.hostController?.setSpeed(speed));
 
+  stop = (): void => this.drive(() => this.hostController?.stop());
+
+  playAnyway = (): void => this.drive(() => this.hostController?.playAnyway());
+
+  remove = (id: number): Promise<void> => this.command(() => this.transport.remove(id));
+
+  setLocked = (locked: boolean): Promise<void> => {
+    const previous = this.locked;
+    if (this.role === 'host') this.locked = locked;
+    return this.command(
+      () => this.transport.lock(locked),
+      () => (this.locked = previous)
+    );
+  };
+
+  denyEpisode = (): void => {
+    this.error = 'Only the host can start an episode. Leave the room to watch on your own.';
+  };
+
+  dismissNotice = (): void => {
+    this.closeReason = null;
+    this.error = '';
+  };
+
   localChanged = (local: LocalPlayback): void =>
     this.drive(() => (this.hostController ?? this.guestController)?.localChanged(local));
 
@@ -148,6 +188,18 @@ export class RoomSession {
     this.attached = attached;
     this.drive(() => this.guestController?.setAttached(attached));
   };
+
+  private async command(run: () => Promise<void>, undo?: () => void): Promise<void> {
+    if (this.role !== 'host') return;
+    const attempt = this.attempts.current;
+    try {
+      await run();
+    } catch (reason) {
+      if (!this.attempts.isCurrent(attempt)) return;
+      undo?.();
+      this.error = errorMessage(reason);
+    }
+  }
 
   // Port calls read app state, so they must not become dependencies of the caller's effect.
   private drive(run: () => void): void {
@@ -205,6 +257,7 @@ export class RoomSession {
     this.routes = {};
     this.link = 'connected';
     this.wantsPlay = false;
+    this.locked = false;
     if (followed?.media) this.release(followed.speed);
   }
 

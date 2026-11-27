@@ -5,6 +5,7 @@ import {
   loadSettings,
   normalizeCatalogProviderOrder,
   normalizeMyAnimeListClientId,
+  normalizeRoomDisplayName,
   saveSettings
 } from '../src/lib/settings.ts';
 
@@ -44,6 +45,26 @@ test('catalog provider order normalizes legacy and malformed settings without lo
       preferredSubtitleLanguage: 'nl',
       catalogProviderOrder: ['kitsu', 'anilist', 'myanimelist', 'jikan']
     });
+  } finally {
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: originalWindow });
+  }
+});
+
+test('the room display name is cleaned on save and dropped when empty or malformed', () => {
+  assert.equal(normalizeRoomDisplayName('  Sem\u0007   V  '), 'Sem V');
+  assert.equal(normalizeRoomDisplayName('x'.repeat(40)), 'x'.repeat(24));
+  for (const value of ['', '   ', 7, null, undefined]) assert.equal(normalizeRoomDisplayName(value), undefined);
+
+  const storage = new MemoryStorage();
+  const originalWindow = globalThis.window;
+  Object.defineProperty(globalThis, 'window', { configurable: true, value: { localStorage: storage } });
+  try {
+    storage.setItem('streamsplease.settings.v1', JSON.stringify({ roomDisplayName: ['Sem'] }));
+    assert.equal(loadSettings().roomDisplayName, undefined);
+    saveSettings({ roomDisplayName: '  Sem  ' });
+    assert.equal(loadSettings().roomDisplayName, 'Sem');
+    saveSettings({ roomDisplayName: '' });
+    assert.equal('roomDisplayName' in loadSettings(), false);
   } finally {
     Object.defineProperty(globalThis, 'window', { configurable: true, value: originalWindow });
   }

@@ -22,11 +22,18 @@ const PAUSE_FOR_MS = 3_000;
 const SEEK_BY_SECONDS = 60;
 const LOOP_AFTER_SECONDS = 600;
 
-type PreviewGuest = { id: number; name: string; route: RoomRoute; joinsAfterMs: number; stepMs: number };
+type PreviewGuest = {
+  id: number;
+  name: string;
+  route: RoomRoute;
+  joinsAfterMs: number;
+  loadStepMs: number;
+  seekStepMs: number;
+};
 
 const PREVIEW_GUESTS: PreviewGuest[] = [
-  { id: 1, name: 'Alice', route: 'direct', joinsAfterMs: 600, stepMs: 400 },
-  { id: 2, name: 'Mika', route: 'relay', joinsAfterMs: 1_400, stepMs: 700 }
+  { id: 1, name: 'Alice', route: 'direct', joinsAfterMs: 600, loadStepMs: 400, seekStepMs: 400 },
+  { id: 2, name: 'Mika', route: 'relay', joinsAfterMs: 1_400, loadStepMs: 2_500, seekStepMs: 700 }
 ];
 
 type Role = 'solo' | 'host' | 'guest';
@@ -129,17 +136,19 @@ export class PreviewRoom {
     const previous = this.state;
     this.state = message.state;
     if (previous?.epoch === message.state.epoch && previous.mediaSeq === message.state.mediaSeq) return;
-    for (const guest of this.guests.values()) this.guestLoads(guest, message.state);
+    const stepMs = (guest: PreviewGuest) =>
+      previous?.mediaSeq === message.state.mediaSeq ? guest.seekStepMs : guest.loadStepMs;
+    for (const guest of this.guests.values()) this.guestLoads(guest, message.state, stepMs(guest));
   }
 
   private guestJoins(guest: PreviewGuest): void {
     this.guests.set(guest.id, guest);
     this.emit({ type: 'peerJoined', id: guest.id, name: guest.name });
     this.emit({ type: 'route', id: guest.id, route: guest.route });
-    if (this.state) this.guestLoads(guest, this.state);
+    if (this.state) this.guestLoads(guest, this.state, guest.loadStepMs);
   }
 
-  private guestLoads(guest: PreviewGuest, state: RoomState): void {
+  private guestLoads(guest: PreviewGuest, state: RoomState, stepMs: number): void {
     const { epoch } = state;
     const report = (afterMs: number, status: GuestStatus) =>
       this.later(afterMs, () => {
@@ -150,10 +159,8 @@ export class PreviewRoom {
       report(0, { epoch, phase: 'idle', progress: null });
       return;
     }
-    LOADING_STEPS.forEach((progress, step) =>
-      report(step * guest.stepMs, { epoch, phase: 'loading', progress })
-    );
-    report(LOADING_STEPS.length * guest.stepMs, { epoch, phase: 'ready', progress: null });
+    LOADING_STEPS.forEach((progress, step) => report(step * stepMs, { epoch, phase: 'loading', progress }));
+    report(LOADING_STEPS.length * stepMs, { epoch, phase: 'ready', progress: null });
   }
 
   private guestSent(message: RoomOutbound): void {
@@ -167,6 +174,8 @@ export class PreviewRoom {
     this.emitRoster();
     if (!wasReady && this.selfIsReady() && !this.state?.playing) {
       this.later(READY_SETTLE_MS, () => this.hostPlays());
+    } else if (message.status.phase === 'loading' && this.state?.playing) {
+      this.hostHolds(this.state);
     }
   }
 
@@ -212,6 +221,10 @@ export class PreviewRoom {
     if (!this.state || this.state.playing || !this.selfIsReady()) return;
     const playing = this.broadcast({ playing: true, hostTime: this.now() + START_LEAD_MS });
     this.later(PLAY_FOR_MS, () => this.hostPauses(playing));
+  }
+
+  private hostHolds(playing: RoomState): void {
+    this.broadcast({ playing: false, position: this.livePosition(playing), hostTime: this.now() });
   }
 
   private hostPauses(playing: RoomState | null): void {

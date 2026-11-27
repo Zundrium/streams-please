@@ -95,6 +95,7 @@
   import NextEpisodePrompt from '$lib/components/player/NextEpisodePrompt.svelte';
   import PlayerTransport from '$lib/components/player/PlayerTransport.svelte';
   import RoomPanel from '$lib/components/room/RoomPanel.svelte';
+  import RoomStatusPill from '$lib/components/room/RoomStatusPill.svelte';
   import RevealImage from '$lib/components/shared/RevealImage.svelte';
   import SearchPage from '$lib/components/catalog/SearchPage.svelte';
   import SubsPleasePage from '$lib/components/catalog/SubsPleasePage.svelte';
@@ -403,6 +404,11 @@
   let displayedSpeed = $derived(
     roomDrivesPlayback && room.roomState ? room.roomState.speed : playback.speed
   );
+  let roomWaitingLabel = $derived(
+    phase === 'ready' && !room.roomState?.playing && (room.role === 'guest' || room.wantsPlay)
+      ? room.waitingLabel
+      : ''
+  );
   let waitingForPeers = $derived(
     phase === 'buffering' &&
       Date.now() - stream.bufferingStartedAt > 12_000 &&
@@ -494,6 +500,7 @@
           fromEditable: target instanceof Element && target.matches('input, textarea, select, button')
         },
         {
+          roomPanelOpen,
           queueOpen,
           fullscreen: fullscreenMode,
           trailerOpen: Boolean(trailerPlayback),
@@ -573,6 +580,10 @@
 
   $effect(() => {
     room.setAttached(activeView === 'player' && !trailerPlayback && !documentHidden);
+  });
+
+  $effect(() => {
+    if (room.closeReason) roomPanelOpen = true;
   });
 
   $effect(() => {
@@ -663,6 +674,7 @@
   function runShortcut(shortcut: PlayerShortcut): void {
     const trailer = Boolean(trailerPlayback);
     const actions: Record<PlayerShortcut, () => unknown> = {
+      'close-room-panel': closeRoomPanel,
       'close-queue': () => (queueOpen = false),
       'exit-fullscreen': () => toggleFullscreen(false),
       'close-trailer': closeTrailer,
@@ -1166,7 +1178,11 @@
   }
 
   async function requestEpisode(request: EpisodePlaybackRequest) {
-    if (room.role === 'guest') return;
+    if (room.role === 'guest') {
+      room.denyEpisode();
+      roomPanelOpen = true;
+      return;
+    }
     flushResumePoint();
     const startAt = savedResumeTime(request);
     if (room.role !== 'host') await startEpisode(request, startAt);
@@ -1237,6 +1253,11 @@
 
   async function joinRoom(invite: string, name: string): Promise<void> {
     if (await room.join(invite, name)) await changeActiveView('player');
+  }
+
+  function closeRoomPanel(): void {
+    roomPanelOpen = false;
+    room.dismissNotice();
   }
 
   async function togglePlayback() {
@@ -1430,6 +1451,7 @@
     {activeView}
     onNavigate={(view) => void changeActiveView(view)}
     roomActive={room.role !== 'solo'}
+    roomParticipants={room.roster.length}
     onOpenRoom={() => (roomPanelOpen = true)}
   />
   {/if}
@@ -1533,7 +1555,7 @@
             <div class="grid size-full place-items-center px-6 text-center text-white/42">
               <div>
                 <MonitorPlay class="mx-auto mb-4 size-9 stroke-[1.4]" />
-                <p class="text-sm font-medium tracking-[-0.01em] text-white/62">Select an episode from SubsPlease first.</p>
+                <p class="text-sm font-medium tracking-[-0.01em] text-white/62" aria-live="polite">{room.role === 'guest' ? 'Waiting for the host to pick something.' : 'Select an episode from SubsPlease first.'}</p>
               </div>
             </div>
           {:else if phase === 'connecting'}
@@ -1579,6 +1601,19 @@
             </div>
           {/if}
 
+          {#if current && roomWaitingLabel}
+            <div class="pointer-events-none absolute inset-0 z-30 grid place-items-center text-white" role="status" aria-live="polite">
+              <div class="flex flex-col items-center text-center">
+                <Spinner class="size-11 border-[3px] border-white/15 border-t-white" />
+                <h2 class="mt-5 text-base font-medium tracking-[-0.01em]">{roomWaitingLabel}</h2>
+                <p class="mt-1.5 text-xs text-white/48">The room plays when everyone has loaded</p>
+                {#if room.canPlayAnyway}
+                  <Button variant="ghost" size="sm" class="pointer-events-auto mt-4 text-white/70 hover:bg-white/10 hover:text-white" onclick={room.playAnyway}>Play anyway</Button>
+                {/if}
+              </div>
+            </div>
+          {/if}
+
           {#if current && phase === 'error'}
             <div class="grid size-full place-items-center p-6">
               <Alert variant="destructive" class="max-w-md"><AlertCircle class="size-5" /><AlertTitle>Stream could not start</AlertTitle><AlertDescription>{error}</AlertDescription><Button variant="ghost" size="sm" class="mt-3" onclick={() => void retryPlayback()}>Try again</Button></Alert>
@@ -1586,8 +1621,8 @@
           {/if}
 
           {#if current}
-            <Button variant="ghost" class="absolute inset-0 z-0 h-auto w-full rounded-none bg-transparent hover:bg-transparent" aria-label={playback.paused ? 'Play' : 'Pause'} onclick={() => void togglePlayback()}></Button>
-            {#if playback.paused && phase === 'ready'}
+            <Button variant="ghost" class="absolute inset-0 z-0 h-auto w-full rounded-none bg-transparent hover:bg-transparent" aria-label={playback.paused ? 'Play' : 'Pause'} disabled={followsRoom} onclick={() => void togglePlayback()}></Button>
+            {#if playback.paused && phase === 'ready' && !followsRoom && !roomWaitingLabel}
               <Button size="icon" class="absolute left-1/2 top-1/2 z-10 size-16 -translate-x-1/2 -translate-y-1/2 shadow-xl transition-opacity duration-300 {playerUiVisible ? 'opacity-100' : 'pointer-events-none opacity-0'}" aria-label="Play" onclick={() => void togglePlayback()}><Play class="size-7" fill="currentColor" /></Button>
             {/if}
             <div class="pointer-events-none absolute inset-x-0 top-0 z-10 flex items-start gap-4 bg-gradient-to-b from-black/78 to-transparent p-5 text-white transition-opacity duration-300 {playerUiVisible ? 'opacity-100' : 'opacity-0'}">
@@ -1624,6 +1659,9 @@
               {/if}
 
               <div class="ml-auto flex shrink-0 items-center gap-2">
+                {#if room.role === 'host' || room.role === 'guest'}
+                  <RoomStatusPill count={room.roster.length} onOpen={() => (roomPanelOpen = true)} />
+                {/if}
                 <div class="flex h-7 items-center gap-2.5 rounded-full bg-white/10 px-3 text-[10px] font-medium text-white/62 backdrop-blur-sm" aria-label={phase === 'ready' ? `${torrentDownloaded ? 'Download complete' : `${livePeers} seeders, downloading at ${downloadSpeedLabel}`}, ${playingEpisode?.quality ? `${playingEpisode.quality}p` : 'automatic resolution'}, ${bitrateLabel}` : `${playingEpisode?.quality ? `${playingEpisode.quality}p` : 'automatic resolution'}, ${bitrateLabel}`}>
                   {#if phase === 'ready'}
                     {#if torrentDownloaded}
@@ -1666,7 +1704,7 @@
               >
                 <FileVideo2 class="size-4" />
               </Button>
-              <Button variant="ghost" size="sm" class="text-white hover:bg-white/10 hover:text-white" onclick={() => void cycleSpeed()}>{displayedSpeed}×</Button>
+              <Button variant="ghost" size="sm" class="text-white hover:bg-white/10 hover:text-white" disabled={followsRoom} onclick={() => void cycleSpeed()}>{displayedSpeed}×</Button>
               <Select type="single" value={String(selectedAudio?.id ?? '')} onValueChange={(value) => void selectTrack('aid', String(value))}>
                 <SelectTrigger class="hidden h-9 min-w-32 bg-white/10 text-white hover:bg-white/15 md:flex"><AudioLines class="size-4" /><span class="max-w-20 truncate">{selectedAudio?.title || selectedAudio?.lang || 'Audio'}</span></SelectTrigger>
                 <SelectContent>{#each audioTracks as track (track.id)}<SelectItem value={String(track.id)}>{track.title || track.lang || `Track ${track.id}`}</SelectItem>{/each}</SelectContent>
@@ -1688,6 +1726,7 @@
               visible={playerUiVisible}
               bufferedRanges={bufferedPlaybackRanges}
               playbackLabel="Playback"
+              transportLocked={followsRoom}
               onTogglePlayback={togglePlayback}
               onSeekRelative={seekRelative}
               onSeekAbsolute={seekAbsolute}
@@ -1823,7 +1862,7 @@
 </div>
 
 {#if roomPanelOpen}
-  <RoomPanel {room} onHost={hostRoom} onJoin={joinRoom} onClose={() => (roomPanelOpen = false)} />
+  <RoomPanel {room} onHost={hostRoom} onJoin={joinRoom} onClose={closeRoomPanel} />
 {/if}
 
 {#if updateStatus}

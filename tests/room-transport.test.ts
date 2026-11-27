@@ -106,6 +106,11 @@ test('the preview host room gains guests that load every new epoch', async () =>
 
   room.send({ message: { type: 'state', state: roomState({ epoch: 4 }) } });
   await time.advance(5_000);
+  assert.deepEqual(
+    [1, 2].map((id) => ofType('peerStatus').findLast((event) => event.id === id)?.status.phase),
+    ['ready', 'loading']
+  );
+  await time.advance(5_000);
   const statuses = ofType('peerStatus');
   for (const id of [1, 2]) {
     const phases = statuses.filter((event) => event.id === id).map((event) => event.status.phase);
@@ -139,6 +144,14 @@ test('the preview guest room starts once the guest is ready, then pauses and see
   assert.equal(ofType('pong')[0].pingId, 3);
   assert.equal(started.playing, true);
   assert.ok(started.hostTime > time.now - 1_000);
+
+  room.send({ message: { type: 'status', status: { epoch: 1, phase: 'loading', progress: null } } });
+  await time.advance(0);
+  assert.equal(ofType('state').at(-1)!.state.playing, false);
+  assert.equal(ofType('roster').at(-1)!.participants[1].blocking, true);
+  room.send({ message: { type: 'status', status: { epoch: 1, phase: 'ready', progress: null } } });
+  await time.advance(1_000);
+  assert.equal(ofType('state').at(-1)!.state.playing, true);
 
   await time.advance(30_000);
   const sought = ofType('state').at(-1)!.state;

@@ -15,11 +15,14 @@ import { isPointerAtEdge, relativePlacement, viewportMargins } from '../src/lib/
 import { isSupportedTrailerUrl, youtubeTrailerSearchPlaybackUrl } from '../src/lib/trailers.ts';
 import type { PlaybackState } from '../src/lib/types.ts';
 
-const idle: ShortcutContext = { queueOpen: false, fullscreen: false, trailerOpen: false, theater: false, episodeLoaded: true };
+const idle: ShortcutContext = { roomPanelOpen: false, queueOpen: false, fullscreen: false, trailerOpen: false, theater: false, episodeLoaded: true };
 const key = (keyName: string, code = keyName, fromEditable = false) => ({ key: keyName, code, fromEditable });
 
 test('escape closes the innermost layer first', () => {
   const all = { ...idle, queueOpen: true, fullscreen: true, trailerOpen: true, theater: true };
+  assert.equal(resolvePlayerShortcut(key('Escape'), { ...all, roomPanelOpen: true }), 'close-room-panel');
+  assert.equal(resolvePlayerShortcut(key('Escape', 'Escape', true), { ...idle, roomPanelOpen: true }), 'close-room-panel');
+  assert.equal(resolvePlayerShortcut(key(' ', 'Space'), { ...idle, roomPanelOpen: true }), null);
   assert.equal(resolvePlayerShortcut(key('Escape'), all), 'close-queue');
   assert.equal(resolvePlayerShortcut(key('Escape'), { ...all, queueOpen: false }), 'exit-fullscreen');
   assert.equal(resolvePlayerShortcut(key('Escape'), { ...idle, trailerOpen: true, theater: true }), 'close-trailer');

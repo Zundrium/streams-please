@@ -1,3 +1,4 @@
+import { cleanDisplayName } from '$lib/room/protocol';
 import type { PlaybackQuality, SubtitleLanguage } from '$lib/types';
 
 const STORAGE_KEY = 'streamsplease.settings.v1';
@@ -16,6 +17,7 @@ export interface AppSettings {
   preferredSubtitleLanguage: SubtitleLanguage;
   catalogProviderOrder: CatalogProviderId[];
   myAnimeListClientId?: string;
+  roomDisplayName?: string;
 }
 
 export const DEFAULT_SETTINGS: AppSettings = {
@@ -28,6 +30,10 @@ export function normalizeMyAnimeListClientId(value: unknown): string | undefined
   if (typeof value !== 'string') return undefined;
   const clientId = value.trim();
   return /^[A-Za-z0-9_-]{8,128}$/.test(clientId) ? clientId : undefined;
+}
+
+export function normalizeRoomDisplayName(value: unknown): string | undefined {
+  return typeof value === 'string' && value.trim() ? cleanDisplayName(value) : undefined;
 }
 
 export function normalizeCatalogProviderOrder(value: unknown): CatalogProviderId[] {
@@ -46,6 +52,7 @@ function normalizeSettings(value: unknown): AppSettings {
   const preferredQuality = settings.preferredQuality;
   const preferredSubtitleLanguage = settings.preferredSubtitleLanguage;
   const myAnimeListClientId = normalizeMyAnimeListClientId(settings.myAnimeListClientId);
+  const roomDisplayName = normalizeRoomDisplayName(settings.roomDisplayName);
   return {
     preferredQuality:
       preferredQuality === '480' || preferredQuality === '720' || preferredQuality === '1080'
@@ -58,7 +65,8 @@ function normalizeSettings(value: unknown): AppSettings {
         ? preferredSubtitleLanguage
         : DEFAULT_SETTINGS.preferredSubtitleLanguage,
     catalogProviderOrder: normalizeCatalogProviderOrder(settings.catalogProviderOrder),
-    ...(myAnimeListClientId ? { myAnimeListClientId } : {})
+    ...(myAnimeListClientId ? { myAnimeListClientId } : {}),
+    ...(roomDisplayName ? { roomDisplayName } : {})
   };
 }
 

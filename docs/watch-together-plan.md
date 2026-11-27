@@ -1,6 +1,6 @@
 # Watch together: implementation plan
 
-Status: Phases 1 (sync core) and 2 (playback seams) are implemented and released in v0.9.1. Phase 2's native checks are open. Phase 0's automated and single-machine checks pass and are released in v0.9.2. Phase 3 (Rust transport and IPC) is implemented with its automated checks green. Phase 4 (host and guest end to end) is implemented behind the development flag, with its automated checks green and the browser preview exercised as host and as guest; its manual matrix has not been run, so Phase 4 is not done. The two-machine run and the firewall prompt of Phase 0 are part of that matrix, because the spike executable is gone. The DHT file is now per app, so the two-instance recipe is unblocked but not yet run. Phases 5 to 7 are open.
+Status: Phases 1 (sync core) and 2 (playback seams) are implemented and released in v0.9.1. Phase 2's native checks are open. Phase 0's automated and single-machine checks pass and are released in v0.9.2. Phase 3 (Rust transport and IPC) is implemented with its automated checks green. Phase 4 (host and guest end to end) is implemented behind the development flag, with its automated checks green and the browser preview exercised as host and as guest; its manual matrix has not been run, so Phase 4 is not done. The two-machine run and the firewall prompt of Phase 0 are part of that matrix, because the spike executable is gone. The DHT file is now per app, so the two-instance recipe is unblocked but not yet run. Phase 5 (UI) is implemented with its automated checks green, except that the development flag stays until the matrix passes; its manual rows, the browser preview, and the visual review are open. Phases 6 and 7 are open.
 Base: `e3c96cb` (v0.9.0), written 2026-11-26. Decisions 1 to 6 are confirmed.
 Code name: `room`. UI label: "Watch together".
 
@@ -107,7 +107,7 @@ tests/room-*.test.ts
 tests/room-fakes.ts                fake clock, transport, and player shared by the room tests
 ```
 
-The files of Phase 1 exist: `protocol.ts`, `clock.ts`, `readiness.ts`, `reconcile.ts`, `host-controller.ts`, `guest-controller.ts`, their tests, and `tests/room-fakes.ts`. The files of Phase 3 exist: `src-tauri/src/room/`, `transport.ts`, `preview-room.ts`, and `tests/room-transport.test.ts`. The files of Phase 4 exist: `session.svelte.ts`, a minimal `RoomPanel.svelte`, and `tests/room-session.test.ts`.
+The files of Phase 1 exist: `protocol.ts`, `clock.ts`, `readiness.ts`, `reconcile.ts`, `host-controller.ts`, `guest-controller.ts`, their tests, and `tests/room-fakes.ts`. The files of Phase 3 exist: `src-tauri/src/room/`, `transport.ts`, `preview-room.ts`, and `tests/room-transport.test.ts`. The files of Phase 4 exist: `session.svelte.ts`, a minimal `RoomPanel.svelte`, and `tests/room-session.test.ts`. The files of Phase 5 exist: `RoomRoster.svelte` and `RoomStatusPill.svelte`.
 
 ## 5. Transport
 
@@ -689,7 +689,7 @@ As built:
 - There is one ALPN version, so a version mismatch cannot be told apart from an unreachable host yet. The specific message comes with the second version.
 - Timeouts live in `Timing` (`protocol.rs`) so the loopback tests can shorten the hello, reconnect, and farewell waits.
 - `BackendRoomTransport` (`transport.ts`) ignores events from a channel that a newer room replaced and does not send outside a room. Send failures go to `onError`.
-- `PreviewRoom` takes the fixture media, a clock, and a timer. As host it adds Alice (direct) and Mika (relayed), who load and become ready on every new epoch. As guest it plays under "Preview host": start when the guest is ready, pause after 20 seconds, seek 60 seconds ahead 3 seconds later, and repeat. It does not hold for a stalled guest yet (Phase 5).
+- `PreviewRoom` takes the fixture media, a clock, and a timer. As host it adds Alice (direct) and Mika (relayed), who load and become ready on every new epoch. As guest it plays under "Preview host": start when the guest is ready, pause after 20 seconds, seek 60 seconds ahead 3 seconds later, and repeat. Phase 5 added the hold for a stalled guest.
 
 ### Phase 4: host and guest end to end
 
@@ -739,6 +739,24 @@ Goal: the feature is complete for users and for the browser preview.
 6. Remove the development flag.
 
 Exit: frontend checks; the Phase 5 rows of the manual matrix pass; the browser preview shows hosting, joining, waiting, locked controls, and errors; visual review by the user.
+
+Implemented, not done: `npm run check` 0 errors, `npm test` 239 pass, `npm run build` ok. No Rust file changed. Open: step 6, matrix rows 12 to 14, the browser preview run, and the visual review. No native check was run.
+
+As built:
+
+- Step 6 is postponed: the header button stays behind `import.meta.env.DEV` until the Phase 4 and Phase 5 matrix rows pass.
+- `RoomSession` gained `waitingLabel`, `canPlayAnyway`, `locked`, `stop`, `playAnyway`, `remove`, `setLocked`, `denyEpisode`, and `dismissNotice`. The waiting label is built from the roster's `blocking` flags, so host and guest share it; the participant itself is named "you".
+- `setLocked` updates `locked` at once and restores it when `room_lock` fails. `remove` and `setLocked` do nothing outside the host role and report failures as the session error.
+- The waiting overlay shows while the episode is in the `ready` phase, the room is not playing, and somebody blocks. The host sees it only while its intent is play, so a deliberate pause shows the Play button instead. "Play anyway" shows when a guest blocks, not when only the host does.
+- A guest in an empty room with nothing loaded sees "Waiting for the host to pick something." A guest that starts an episode gets the panel with "Only the host can start an episode. Leave the room to watch on your own."
+- The panel opens by itself when a room closes with a reason. Closing the panel clears the notice.
+- `transportLocked` disables play, the two seek buttons, and the timeline, and shows "The host controls playback". For a following guest the app also disables the speed button and the click on the video, and hides the center Play button.
+- `roomPanelOpen` in `shortcuts.ts`: Escape closes the panel before anything else, and no other shortcut runs while it is open.
+- The room pill sits in the player top bar while in a room. The header button shows the participant count.
+- `roomDisplayName` is saved when hosting or joining, cleaned with `cleanDisplayName`, and dropped when empty.
+- The panel moves focus into the dialog when it opens and returns it when it closes. Copy falls back to selecting the code. The join notice is the text of section 11.
+- The roster has no tooltip and no progress bar; the badge carries the percentage.
+- Preview: Mika takes 7.5 seconds on a new episode, so the waiting overlay and "Play anyway" can be seen; seeks stay quick. The preview host holds when the guest reports loading while playing. `room_lock` has no visible effect in preview, because no guest joins later.
 
 ### Phase 6: hardening
 

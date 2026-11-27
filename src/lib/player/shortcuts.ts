@@ -1,4 +1,5 @@
 export type PlayerShortcut =
+  | 'close-room-panel'
   | 'close-queue'
   | 'exit-fullscreen'
   | 'close-trailer'
@@ -16,6 +17,7 @@ export type ShortcutKey = {
 };
 
 export type ShortcutContext = {
+  roomPanelOpen: boolean;
   queueOpen: boolean;
   fullscreen: boolean;
   trailerOpen: boolean;
@@ -38,6 +40,7 @@ export function resolvePlayerShortcut(
   input: ShortcutKey,
   context: ShortcutContext
 ): PlayerShortcut | null {
+  if (context.roomPanelOpen) return input.key === 'Escape' ? 'close-room-panel' : null;
   if (input.key === 'Escape') {
     if (context.queueOpen) return 'close-queue';
     if (context.fullscreen) return 'exit-fullscreen';

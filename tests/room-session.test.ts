@@ -23,6 +23,9 @@ class FakeSessionTransport extends FakeTransport implements RoomSessionTransport
   hosting = deferred<RoomHostResult>();
   joining = deferred<RoomJoinResult>();
   joined: string[] = [];
+  removed: number[] = [];
+  locks: boolean[] = [];
+  failCommands = false;
   left = 0;
   emit: (event: RoomEvent) => void = () => undefined;
   failSend: (reason: unknown) => void = () => undefined;
@@ -36,6 +39,16 @@ class FakeSessionTransport extends FakeTransport implements RoomSessionTransport
     this.joined = [invite, name];
     this.joining = deferred();
     return this.joining.promise;
+  }
+
+  async remove(id: number): Promise<void> {
+    if (this.failCommands) throw new Error('That guest is no longer in the room.');
+    this.removed.push(id);
+  }
+
+  async lock(locked: boolean): Promise<void> {
+    if (this.failCommands) throw new Error('offline');
+    this.locks.push(locked);
   }
 
   async leave(): Promise<void> {
@@ -118,6 +131,83 @@ test('hosting adopts the playing episode and refuses media the room would reject
   assert.equal(room.session.load({ ...media('02'), slug: 'Not A Slug' }, 0), false);
   assert.equal(room.session.error, 'This episode cannot be shared with the room.');
   assert.equal(room.session.roomState?.seq, seq);
+});
+
+test('the host sees who holds the room, can play anyway, and can stop for everyone', async () => {
+  const room = setup();
+  await host(room);
+  assert.equal(room.session.waitingLabel, '');
+  room.transport.emit({ type: 'peerJoined', id: 1, name: 'Alice' });
+  room.transport.emit({ type: 'peerJoined', id: 2, name: 'Mika' });
+  room.transport.emit({ type: 'peerJoined', id: 3, name: 'Noor' });
+  assert.equal(room.session.waitingLabel, '');
+
+  room.session.load(media(), 0);
+  await settle();
+  assert.equal(room.session.waitingLabel, 'Waiting for you and 3 others');
+  room.player.ready();
+  await room.time.advance(1_500);
+  assert.equal(room.session.waitingLabel, 'Waiting for Alice and 2 others');
+  assert.equal(room.session.canPlayAnyway, true);
+
+  const { epoch } = room.session.roomState!;
+  for (const id of [2, 3]) {
+    room.transport.emit({ type: 'peerStatus', id, status: { epoch, phase: 'ready', progress: null } });
+  }
+  assert.equal(room.session.waitingLabel, 'Waiting for Alice');
+  assert.equal(room.session.roomState?.playing, false);
+
+  room.session.playAnyway();
+  await room.time.advance(1_000);
+  assert.equal(room.session.waitingLabel, '');
+  assert.equal(room.session.canPlayAnyway, false);
+  assert.equal(room.session.roomState?.playing, true);
+
+  room.session.stop();
+  await settle();
+  assert.equal(room.session.roomState?.media, null);
+  assert.equal(room.player.calls.at(-1), 'stop');
+});
+
+test('the host removes guests and locks the room, and a failure restores the lock', async () => {
+  const room = setup();
+  await room.session.setLocked(true);
+  await room.session.remove(1);
+  assert.deepEqual([room.transport.locks, room.transport.removed, room.session.locked], [[], [], false]);
+
+  await host(room);
+  await room.session.setLocked(true);
+  await room.session.remove(1);
+  assert.deepEqual([room.transport.locks, room.transport.removed, room.session.locked], [[true], [1], true]);
+
+  room.transport.failCommands = true;
+  await room.session.setLocked(false);
+  assert.equal(room.session.locked, true);
+  assert.equal(room.session.error, 'offline');
+  await room.session.remove(1);
+  assert.equal(room.session.error, 'That guest is no longer in the room.');
+
+  await room.session.leave();
+  assert.equal(room.session.locked, false);
+});
+
+test('a guest is named in the waiting label and told that only the host starts episodes', async () => {
+  const room = setup();
+  await join(room);
+  const self: Participant = { id: 1, name: 'Sem', host: false, phase: 'loading', progress: 0.4, blocking: true };
+  room.transport.emit({ type: 'state', state: roomState() });
+  room.transport.emit({ type: 'roster', participants: [HOST, self] });
+  assert.equal(room.session.waitingLabel, 'Waiting for you');
+  assert.equal(room.session.canPlayAnyway, false);
+
+  room.session.denyEpisode();
+  assert.match(room.session.error, /Only the host/);
+  room.session.dismissNotice();
+  assert.equal(room.session.error, '');
+
+  room.transport.emit({ type: 'closed', reason: 'ended' });
+  room.session.dismissNotice();
+  assert.equal(room.session.closeReason, null);
 });
 
 test('a guest buffers events until the join resolves, then follows the room', async () => {
