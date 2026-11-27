@@ -35,6 +35,7 @@ function deps(session: MpvSession, patch: Partial<EpisodeStreamDeps> = {}): Epis
     markReady: () => undefined,
     margins: () => ({ top: 0 }),
     resumeAt: () => 0,
+    startPaused: () => false,
     livePeers: () => 0,
     startTimeoutMs: 40,
     probeIntervalMs: 5,
@@ -54,6 +55,14 @@ test('opening a stream loads the file, unpauses, and marks ready once mpv plays 
   let ready = false;
   await openEpisodeStream(torrent, deps(session, { resumeAt: () => 90.4, markReady: () => (ready = true) }));
   assert.deepEqual(calls, ['margins', `load ${streamUrl}/Show%20%2301.mkv start=90`, 'pause=false']);
+  assert.ok(ready);
+});
+
+test('a paused start keeps mpv paused after loading', async () => {
+  const { session, calls } = fakeMpv();
+  let ready = false;
+  await openEpisodeStream(torrent, deps(session, { startPaused: () => true, markReady: () => (ready = true) }));
+  assert.deepEqual(calls, ['margins', `load ${streamUrl}/Show%20%2301.mkv`, 'pause=true']);
   assert.ok(ready);
 });
 

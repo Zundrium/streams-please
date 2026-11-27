@@ -85,6 +85,33 @@ test('back-to-back starts skip the superseded one before it reaches the engine',
   assert.deepEqual(released, []);
 });
 
+test('stopping releases the current torrent and is a no-op when nothing plays', async () => {
+  const { session, events, released } = harness(async () => response(5));
+  await session.stop();
+  assert.deepEqual(events, []);
+  await session.start('magnet:?a');
+  await session.stop();
+  assert.deepEqual(events, ['started 5', 'stop 5', 'cleared']);
+  assert.deepEqual(released, [5]);
+  assert.equal(session.current, null);
+});
+
+test('stopping supersedes a start in flight and releases its torrent', async () => {
+  const releases: Array<() => void> = [];
+  const { session, events, released } = harness(
+    () => new Promise((resolve) => releases.push(() => resolve(response(6))))
+  );
+  const start = session.start('magnet:?a');
+  await waitFor(() => releases.length === 1);
+  const stop = session.stop();
+  releases[0]();
+  assert.deepEqual(await start, { status: 'superseded' });
+  await stop;
+  assert.deepEqual(events, []);
+  assert.deepEqual(released, [6]);
+  assert.equal(session.current, null);
+});
+
 test('torrents without a playable video are released and reported', async () => {
   const { session, released } = harness(async () => response(4, [file('notes.txt')]));
   await assert.rejects(session.start('magnet:?x'), /does not contain a supported video file/);

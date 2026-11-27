@@ -2,6 +2,10 @@ import { CLOCK_SAMPLE_WINDOW } from '$lib/room/protocol';
 
 type ClockSample = { roundTrip: number; offset: number };
 
+export function localNow(): number {
+  return performance.timeOrigin + performance.now();
+}
+
 export class HostClock {
   private samples: ClockSample[] = [];
 

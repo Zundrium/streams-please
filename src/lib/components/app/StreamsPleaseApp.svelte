@@ -71,9 +71,17 @@
     viewportMargins,
     type InlinePlacement
   } from '$lib/player/viewport';
+  import { localNow } from '$lib/room/clock';
+  import type { LocalPlayback } from '$lib/room/reconcile';
   import { loadSettings, saveSettings } from '$lib/settings';
   import { localTimezone } from '$lib/time';
-  import { formatBytes, normalizeTracks, readableTitle, torrentPieceRanges } from '$lib/torrent/media';
+  import {
+    bufferedSecondsAhead,
+    formatBytes,
+    normalizeTracks,
+    readableTitle,
+    torrentPieceRanges
+  } from '$lib/torrent/media';
   import { TorrentSession } from '$lib/torrent/session';
   import {
     TrailerPlayerController,
@@ -124,6 +132,8 @@
   };
 
   type MpvMediaOwner = 'episode' | 'trailer' | 'transition';
+
+  type EpisodeStart = { startAt: number; startPaused: boolean };
 
   const catalogClient = createCatalogClient();
   const {
@@ -193,6 +203,7 @@
   let preferredSubtitleLanguage = $state<SubtitleLanguage>('en');
   let autoMarkedPlaybackKey = '';
   let pendingResumeTime = 0;
+  let episodeStartsPaused = false;
   let episodeStartTime = 0;
   let lastResumeSave = { key: '', time: 0, paused: false };
   let phase = $state<Phase>('idle');
@@ -209,6 +220,7 @@
   let queueOpen = $state(false);
   let tracks = $state<MpvTrack[]>([]);
   let seekTarget = $state<number | null>(null);
+  let positionSampledAt = $state(0);
   let playback = $state<PlaybackState>({
     paused: true,
     time: 0,
@@ -357,6 +369,17 @@
           (stats.file_progress?.[current.fileId] ?? 0) >= current.video.length)
     )
   );
+  let localPlayback = $derived<LocalPlayback>({
+    loaded: Boolean(current),
+    phase,
+    paused: playback.paused,
+    position: playback.time,
+    sampledAt: positionSampledAt,
+    duration: playback.duration,
+    bufferedAhead: bufferedSecondsAhead(stats, current, playback.duration, playback.time),
+    downloaded: torrentDownloaded,
+    seeking: seekTarget !== null
+  });
   let waitingForPeers = $derived(
     phase === 'buffering' &&
       Date.now() - stream.bufferingStartedAt > 12_000 &&
@@ -596,6 +619,7 @@
         ...playback,
         time: Math.min(playback.duration, playback.time + 0.25)
       };
+      positionSampledAt = localNow();
     }, 250);
     return () => window.clearInterval(interval);
   });
@@ -926,7 +950,10 @@
       return;
     }
     playback = applyPlaybackProperty(playback, event.name, event.data);
-    if (event.name === 'time-pos') seekTarget = reconcileSeekTarget(seekTarget, playback.time);
+    if (event.name === 'time-pos') {
+      positionSampledAt = localNow();
+      seekTarget = reconcileSeekTarget(seekTarget, playback.time);
+    }
     if (signalsPlaybackProgress(event.name, event.data)) stream.progressObserved();
   }
 
@@ -958,6 +985,7 @@
       markReady: () => stream.markReady(),
       margins: currentVideoMargins,
       resumeAt: () => seekTarget ?? Math.max(playback.time, episodeStartTime),
+      startPaused: () => episodeStartsPaused,
       livePeers: () => stream.livePeers,
       startTimeoutMs: PLAYBACK_START_TIMEOUT_MS,
       probeIntervalMs: PLAYBACK_PROBE_INTERVAL_MS
@@ -987,14 +1015,14 @@
     phase = 'buffering';
     episodeStartTime = pendingResumeTime;
     pendingResumeTime = 0;
-    playback = { ...playback, paused: false, time: episodeStartTime, duration: 0 };
+    playback = { ...playback, paused: episodeStartsPaused, time: episodeStartTime, duration: 0 };
 
     if (isTauri()) {
       await mpv.ensure();
       return;
     }
     tracks = PREVIEW_TRACKS.map((track) => ({ ...track }));
-    playback = { ...playback, duration: 888, paused: false };
+    playback = { ...playback, duration: 888, paused: episodeStartsPaused };
     episodeFrameShown = true;
     phase = 'ready';
   }
@@ -1005,9 +1033,10 @@
     return false;
   }
 
-  async function startTorrent(releaseMagnet: string, resumeTime = 0): Promise<boolean> {
+  async function startTorrent(releaseMagnet: string, start: EpisodeStart): Promise<boolean> {
     error = '';
-    pendingResumeTime = resumeTime;
+    pendingResumeTime = start.startAt;
+    episodeStartsPaused = start.startPaused;
     const magnet = releaseMagnet.trim();
     if (!magnet.startsWith('magnet:?')) return failPlayback('Enter a valid magnet link.');
     if (isTauri() && runtime && !runtime.mpvAvailable) {
@@ -1097,8 +1126,12 @@
     );
   }
 
-  async function playSubsPleaseRelease(request: EpisodePlaybackRequest) {
+  async function requestEpisode(request: EpisodePlaybackRequest) {
     flushResumePoint();
+    await startEpisode(request, { startAt: savedResumeTime(request), startPaused: false });
+  }
+
+  async function startEpisode(request: EpisodePlaybackRequest, start: EpisodeStart) {
     const generation = episodeRequests.next();
     const originView = activeView === 'player' ? episodeOriginView : activeView;
     nextEpisode = null;
@@ -1110,10 +1143,17 @@
     queueOpen = false;
     playingEpisode = null;
     autoMarkedPlaybackKey = '';
-    const started = await startTorrent(request.magnet, savedResumeTime(request));
+    const started = await startTorrent(request.magnet, start);
     if (!started || !episodeRequests.isCurrent(generation)) return;
     playingEpisode = request;
     void prepareNextEpisode(request, generation);
+  }
+
+  async function stopEpisode(): Promise<void> {
+    flushResumePoint();
+    const generation = episodeRequests.next();
+    await torrents.stop();
+    if (episodeRequests.isCurrent(generation)) phase = 'idle';
   }
 
   function dismissNextEpisode(): void {
@@ -1125,7 +1165,7 @@
     if (!request || nextEpisodeStarting) return;
     nextEpisodeStarting = true;
     try {
-      await playSubsPleaseRelease(request);
+      await requestEpisode(request);
     } finally {
       nextEpisodeStarting = false;
     }
@@ -1150,15 +1190,18 @@
 
   async function togglePlayback() {
     if (!current) return;
-    const paused = !playback.paused;
-    if (isTauri()) await mpv.run((player) => player.setFlag('pause', paused));
-    playback = { ...playback, paused };
+    await applyPaused(!playback.paused);
   }
 
   async function pausePlayback() {
     if (!current || playback.paused) return;
     playback = { ...playback, paused: true };
-    if (isTauri()) await mpv.run((player) => player.setFlag('pause', true)).catch(() => undefined);
+    await applyPaused(true).catch(() => undefined);
+  }
+
+  async function applyPaused(paused: boolean) {
+    if (isTauri()) await mpv.run((player) => player.setFlag('pause', paused));
+    playback = { ...playback, paused };
   }
 
   function canConcealPlayerUi(): boolean {
@@ -1229,14 +1272,18 @@
     seeks.schedule(target);
   }
 
+  function requestSeek(time: number) {
+    scheduleSeek(time);
+  }
+
   function seekRelative(seconds: number) {
     if (!current) return;
-    scheduleSeek((seeks.pendingTarget ?? seekTarget ?? playback.time) + seconds);
+    requestSeek((seeks.pendingTarget ?? seekTarget ?? playback.time) + seconds);
   }
 
   function seekAbsolute(percent: number) {
     if (!current) return;
-    scheduleSeek(percentToTime(percent, playback.duration));
+    requestSeek(percentToTime(percent, playback.duration));
   }
 
   async function changeVolume(volume: number) {
@@ -1254,7 +1301,10 @@
   }
 
   async function cycleSpeed() {
-    const speed = nextPlaybackSpeed(playback.speed);
+    await applySpeed(nextPlaybackSpeed(playback.speed));
+  }
+
+  async function applySpeed(speed: number) {
     playback = { ...playback, speed };
     if (isTauri()) await mpv.run((player) => player.setNumber('speed', speed));
   }
@@ -1332,7 +1382,7 @@
       entries={libraryEntries}
       loadIndex={loadSubsPleaseIndex}
       loadShow={loadSubsPleaseShow}
-      onPlay={playSubsPleaseRelease}
+      onPlay={requestEpisode}
       onPlayTrailer={playTrailer}
       onBrowse={() => void changeActiveView('discovery')}
       onToggleLibrary={toggleLibraryShow}
@@ -1349,7 +1399,7 @@
       loadSearch={loadAniListSearch}
       loadIndex={loadSubsPleaseIndex}
       loadShow={loadSubsPleaseShow}
-      onPlay={playSubsPleaseRelease}
+      onPlay={requestEpisode}
       onPlayTrailer={playTrailer}
       {libraryEntries}
       onToggleLibrary={toggleLibraryShow}
@@ -1379,7 +1429,7 @@
       loadIndex={loadSubsPleaseIndex}
       loadSchedule={loadSubsPleaseSchedule}
       loadShow={loadSubsPleaseShow}
-      onPlay={playSubsPleaseRelease}
+      onPlay={requestEpisode}
       onPlayTrailer={playTrailer}
       libraryEntries={libraryEntries}
       onToggleLibrary={toggleLibraryShow}

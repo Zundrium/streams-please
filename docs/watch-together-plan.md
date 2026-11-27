@@ -1,6 +1,6 @@
 # Watch together: implementation plan
 
-Status: Phase 1 (sync core) is implemented and tested; nothing in the app uses it yet. Phases 0 and 2 to 7 are open.
+Status: Phases 1 (sync core) and 2 (playback seams) are implemented and released in v0.9.1. Phase 2's native checks are open. Nothing in the app uses the room code yet. Phases 0 and 3 to 7 are open. Phase 0 is next, because Phase 3 depends on it.
 Base: `e3c96cb` (v0.9.0), written 2026-11-26. Decisions 1 to 6 are confirmed.
 Code name: `room`. UI label: "Watch together".
 
@@ -404,7 +404,7 @@ The app keeps one code path for solo playback. Room mode adds seams, not a secon
    - Guest: the intent does nothing.
    - Buttons, the timeline, and keyboard shortcuts (`runShortcut`, `:603`) all go through the intents, so one check covers them.
 4. **Start an episode.** Split `playSubsPleaseRelease` (`:1100`) into `requestEpisode(request)`, which is role-aware, and `startEpisode(request, { startAt, startPaused })`, which holds today's mechanics. The host intent broadcasts first, so guests load in parallel with the host.
-5. **Local snapshot.** One `$effect` passes `{ loaded, phase, paused, position, sampledAt, duration, bufferedAhead, downloaded, seeking }` to `RoomSession.localChanged`. The controller remembers which `mediaSeq` it asked the port to load, so the app does not need to know about room sequence numbers. The sync core relies on a new snapshot after every load and seek; `sampledAt` is the local clock time at which `position` was observed.
+5. **Local snapshot.** A `$derived` `localPlayback` holds `{ loaded, phase, paused, position, sampledAt, duration, bufferedAhead, downloaded, seeking }`, and one `$effect` passes it to `RoomSession.localChanged`. The controller remembers which `mediaSeq` it asked the port to load, so the app does not need to know about room sequence numbers. The sync core relies on a new snapshot after every load and seek; `sampledAt` is the local clock time at which `position` was observed.
 
 `PlaybackPort`, implemented by the app from those apply functions:
 
@@ -569,7 +569,7 @@ Exit: two machines exchange frames over a direct path and over relay only, the b
 
 ### Phase 1: sync core (done)
 
-Done on `e3c96cb`, uncommitted: `npm run check` 0 errors, `npm test` 212 pass, `npm run build` ok. No native check applies, because nothing in the app uses the code yet.
+Done in `02391b1`: `npm run check` 0 errors, `npm test` 212 pass, `npm run build` ok. No native check applies, because nothing in the app uses the code yet.
 
 Goal: the whole sync model in pure TypeScript with tests, no network and no UI.
 
@@ -596,7 +596,16 @@ Goal: the app can be driven through `PlaybackPort`; solo behavior is identical.
 1. `startPaused` in `episode-stream.ts` and `beginEpisode`; update `tests/episode-stream.test.ts`.
 2. `TorrentSession.stop()`; update `tests/torrent-session.test.ts`.
 3. Intent and apply split for play, pause, seek, speed, and episode start in `StreamsPleaseApp.svelte`.
-4. The local snapshot effect, with nothing listening yet. Confirm it fires after every load and seek (section 7, the reconciler).
+4. The local snapshot, with nothing listening yet. Confirm it fires after every load and seek (section 7, the reconciler).
+
+Done in v0.9.1: `npm run check` 0 errors, `npm test` 215 pass, `npm run build` ok. Native checks not run yet.
+
+- Intents: `togglePlayback`, `pausePlayback`, `requestSeek` (behind `seekRelative` and `seekAbsolute`), `cycleSpeed`, `requestEpisode`. Applies: `applyPaused`, `scheduleSeek`, `applySpeed`, `startEpisode(request, { startAt, startPaused })`, `stopEpisode`. Phase 4 builds `PlaybackPort` from the applies.
+- `episodeStartsPaused` is set per start and also read by stream retries.
+- `requestEpisode` flushes the resume point before it reads `savedResumeTime`; `startEpisode` does not flush. The guest's `PlaybackPort.load` must flush before it calls `startEpisode`.
+- `stopEpisode` flushes the resume point, bumps the episode generation, runs `TorrentSession.stop()`, and sets `phase` to `idle` unless a newer episode request started meanwhile.
+- The snapshot is the `$derived` `localPlayback`; `positionSampledAt` comes from `localNow()` in `src/lib/room/clock.ts` on every `time-pos` event and preview tick. A `$derived` is lazy, so it costs nothing until Phase 4 reads it.
+- Solo never starts paused and nothing calls `stopEpisode` yet. The paused-load and stop checks need a temporary trigger, such as `startPaused: true` in `requestEpisode`, or they move to Phase 4.
 
 Native checks in `npm run tauri dev`:
 

@@ -11,6 +11,7 @@ export type EpisodeStreamDeps = {
   markReady: () => void;
   margins: () => VideoMarginRatio | null;
   resumeAt: () => number;
+  startPaused: () => boolean;
   livePeers: () => number;
   startTimeoutMs: number;
   probeIntervalMs: number;
@@ -40,7 +41,7 @@ export async function openEpisodeStream(
     if (margins) await mpv.setMargins(margins);
     if (!deps.isActive()) return;
     await mpv.loadFile(url, options);
-    await mpv.setFlag('pause', false);
+    await mpv.setFlag('pause', deps.startPaused());
   });
   if (!deps.isActive()) return;
   await waitForPlaybackStart(streamUrl, deps.mpv.commands, deps);

@@ -49,6 +49,11 @@ export class TorrentSession {
     });
   }
 
+  stop(): Promise<void> {
+    this.starts.next();
+    return this.queue.run(() => this.clear());
+  }
+
   private async replace(magnet: string, generation: number): Promise<TorrentStartResult> {
     await this.clear();
     if (!this.starts.isCurrent(generation)) return SUPERSEDED;
