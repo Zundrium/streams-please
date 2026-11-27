@@ -37,6 +37,10 @@ export type UpdateCheckResult =
       notes?: string | null;
     };
 
+export type RoomHostResult = { invite: string };
+
+export type RoomJoinResult = { selfId: number; hostName: string };
+
 export type UpdateDownloadEvent =
   | { event: 'started'; data: { contentLength?: number } }
   | { event: 'progress'; data: { chunkLength: number } }

@@ -2,6 +2,7 @@ use tauri::Manager;
 
 mod catalog;
 mod library_file;
+mod room;
 mod runtime;
 mod seeding;
 mod torrent;
@@ -25,6 +26,7 @@ pub fn run() {
             app.manage(torrent_state);
             app.manage(catalog_state);
             app.manage(update_state);
+            app.manage(room::RoomService::new());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -42,6 +44,12 @@ pub fn run() {
             seeding::remove_torrent,
             library_file::export_library_file,
             library_file::import_library_file,
+            room::room_host,
+            room::room_join,
+            room::room_send,
+            room::room_remove,
+            room::room_lock,
+            room::room_leave,
             catalog::catalog_providers,
             catalog::catalog_request,
             catalog::subsplease::subsplease_schedule,

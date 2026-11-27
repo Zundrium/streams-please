@@ -99,6 +99,8 @@ export interface RoomTransport {
   send(message: RoomOutbound): void;
 }
 
+export type RoomChannel = { onmessage: (event: unknown) => void };
+
 export type SetTimer = (callback: () => void, ms: number) => () => void;
 
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f-\u009f]/;

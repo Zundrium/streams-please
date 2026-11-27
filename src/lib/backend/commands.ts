@@ -1,7 +1,10 @@
 import type { Channel } from '@tauri-apps/api/core';
 import type { CatalogRequest } from '$lib/catalog/providers';
+import type { RoomChannel, RoomOutbound } from '$lib/room/protocol';
 import type {
   AddTorrentResponse,
+  RoomHostResult,
+  RoomJoinResult,
   RuntimeInfo,
   SeedingOverview,
   SubsPleaseScheduleResponse,
@@ -41,6 +44,12 @@ export type BackendCommands = {
     { slug: string; timezone: string; anilistId?: number; includeMetadata?: boolean },
     SubsPleaseShowResponse
   >;
+  room_host: Command<{ name: string; onEvent: RoomChannel }, RoomHostResult>;
+  room_join: Command<{ invite: string; name: string; onEvent: RoomChannel }, RoomJoinResult>;
+  room_send: Command<{ message: RoomOutbound }, void>;
+  room_remove: Command<{ id: number }, void>;
+  room_lock: Command<{ locked: boolean }, void>;
+  room_leave: Command<NoArgs, void>;
 };
 
 export type BackendCommand = keyof BackendCommands;

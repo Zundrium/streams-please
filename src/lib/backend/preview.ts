@@ -1,5 +1,6 @@
 import { currentSeason } from '$lib/catalog/presentation';
 import { validCatalogRequest, type CatalogProvider, type CatalogRequest } from '$lib/catalog/providers';
+import { PreviewRoom } from '$lib/backend/preview-room';
 import { normalizeMyAnimeListClientId } from '$lib/settings';
 import type {
   BackendArgs,
@@ -330,6 +331,15 @@ function previewSeedingOverview(): SeedingOverview {
   };
 }
 
+const previewRoom = new PreviewRoom({
+  magnet: SINTEL_MAGNET,
+  title: 'Grand Blue S3',
+  episode: '03',
+  slug: 'grand-blue-s3',
+  imageUrl: '/wp-content/uploads/2026/07/158194.jpg',
+  quality: '1080'
+});
+
 type PreviewHandlers = {
   [K in BackendCommand]: (args: BackendArgs<K>) => BackendResult<K>;
 };
@@ -419,7 +429,13 @@ const previewHandlers: PreviewHandlers = {
       typeof myAnimeListClientId === 'string' ? myAnimeListClientId : undefined
     ),
   export_library_file: () => false,
-  import_library_file: () => null
+  import_library_file: () => null,
+  room_host: (args) => previewRoom.host(args),
+  room_join: (args) => previewRoom.join(args),
+  room_send: (args) => previewRoom.send(args),
+  room_remove: (args) => previewRoom.remove(args),
+  room_lock: (args) => previewRoom.lock(args),
+  room_leave: () => previewRoom.leave()
 };
 
 export async function callPreviewBackend<K extends BackendCommand>(

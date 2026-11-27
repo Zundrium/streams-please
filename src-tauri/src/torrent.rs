@@ -6,6 +6,7 @@ use std::{
 
 use librqbit::{
     api::{Api, TorrentIdOrHash},
+    dht::PersistentDhtConfig,
     http_api::{HttpApi, HttpApiOptions},
     AddTorrent, AddTorrentOptions, Magnet, Session, SessionOptions, SessionPersistenceConfig,
 };
@@ -26,33 +27,43 @@ pub struct TorrentState {
     seeding: Arc<SeedingManager>,
 }
 
-fn session_options(session_dir: &Path) -> SessionOptions {
+fn session_options(session_dir: &Path, dht_file: &Path) -> SessionOptions {
     SessionOptions {
         fastresume: true,
         persistence: Some(SessionPersistenceConfig::Json {
             folder: Some(session_dir.to_path_buf()),
         }),
+        dht_config: Some(PersistentDhtConfig {
+            config_filename: Some(dht_file.to_path_buf()),
+            ..Default::default()
+        }),
         ..Default::default()
     }
 }
 
-async fn start_session(download_dir: &Path, session_dir: &Path) -> Result<Arc<Session>, String> {
+async fn start_session(
+    download_dir: &Path,
+    session_dir: &Path,
+    dht_file: &Path,
+) -> Result<Arc<Session>, String> {
     prepare_session_directory(session_dir, download_dir);
-    match Session::new_with_opts(download_dir.to_path_buf(), session_options(session_dir)).await {
+    let options = session_options(session_dir, dht_file);
+    match Session::new_with_opts(download_dir.to_path_buf(), options).await {
         Ok(session) => Ok(session),
         Err(error) => {
             eprintln!("resetting the saved torrent session after a restore failure: {error:#}");
             if let Err(error) = std::fs::remove_dir_all(session_dir) {
                 eprintln!("could not reset the saved torrent session: {error}");
             }
-            Session::new_with_opts(download_dir.to_path_buf(), session_options(session_dir))
+            let options = session_options(session_dir, dht_file);
+            Session::new_with_opts(download_dir.to_path_buf(), options)
                 .await
                 .map_err(|error| error.to_string())
         }
     }
 }
 
-fn magnet_info_hash(magnet: &str) -> Result<String, String> {
+pub(crate) fn magnet_info_hash(magnet: &str) -> Result<String, String> {
     Magnet::parse(magnet)
         .ok()
         .and_then(|magnet| magnet.as_id20())
@@ -68,10 +79,11 @@ impl TorrentState {
             .map_err(|error| error.to_string())?;
         let download_dir = cache_dir.join("media");
         let session_dir = cache_dir.join("session");
+        let dht_file = cache_dir.join("dht").join("dht.json");
         std::fs::create_dir_all(&download_dir).map_err(|error| error.to_string())?;
 
         tauri::async_runtime::block_on(async {
-            let session = start_session(&download_dir, &session_dir).await?;
+            let session = start_session(&download_dir, &session_dir, &dht_file).await?;
             let restored: HashSet<String> = session.with_torrents(|torrents| {
                 torrents
                     .map(|(_, handle)| handle.info_hash().as_string())
@@ -124,7 +136,7 @@ impl TorrentState {
     }
 }
 
-fn validate_magnet(magnet: &str) -> Result<(), String> {
+pub(crate) fn validate_magnet(magnet: &str) -> Result<(), String> {
     let trimmed = magnet.trim();
     if trimmed.len() > MAX_MAGNET_LENGTH {
         return Err("The magnet link is unexpectedly long.".into());

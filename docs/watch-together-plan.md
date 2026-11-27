@@ -1,6 +1,6 @@
 # Watch together: implementation plan
 
-Status: Phases 1 (sync core) and 2 (playback seams) are implemented and released in v0.9.1. Phase 2's native checks are open. Nothing in the app uses the room code yet. Phase 0's automated and single-machine checks pass and are released in v0.9.2; the two-machine run, the firewall prompt, and the two-instance recipe are open, and the recipe is blocked by librqbit's shared DHT file (see the Phase 0 results). Phases 3 to 7 are open.
+Status: Phases 1 (sync core) and 2 (playback seams) are implemented and released in v0.9.1. Phase 2's native checks are open. Phase 0's automated and single-machine checks pass and are released in v0.9.2. Phase 3 (Rust transport and IPC) is implemented with its automated checks green; the commands are registered, but no UI calls them yet. The two-machine run and the firewall prompt of Phase 0 move to the Phase 4 matrix, because the spike executable is gone. The DHT file is now per app, so the two-instance recipe is unblocked but not yet run. Phases 4 to 7 are open.
 Base: `e3c96cb` (v0.9.0), written 2026-11-26. Decisions 1 to 6 are confirmed.
 Code name: `room`. UI label: "Watch together".
 
@@ -107,7 +107,7 @@ tests/room-*.test.ts
 tests/room-fakes.ts                fake clock, transport, and player shared by the room tests
 ```
 
-The files of Phase 1 exist: `protocol.ts`, `clock.ts`, `readiness.ts`, `reconcile.ts`, `host-controller.ts`, `guest-controller.ts`, their tests, and `tests/room-fakes.ts`.
+The files of Phase 1 exist: `protocol.ts`, `clock.ts`, `readiness.ts`, `reconcile.ts`, `host-controller.ts`, `guest-controller.ts`, their tests, and `tests/room-fakes.ts`. The files of Phase 3 exist: `src-tauri/src/room/`, `transport.ts`, `preview-room.ts`, and `tests/room-transport.test.ts`.
 
 ## 5. Transport
 
@@ -574,7 +574,7 @@ Exit: two machines exchange frames over a direct path and over relay only, the b
 
 Measured 2026-11-27 on the development machine with Rust 1.91.1 (MSVC), released in v0.9.2.
 
-Phase 3 keeps the dependency, the lock fix, and `src-tauri/tauri.second-instance.conf.json`. The spike itself is `src-tauri/examples/room_spike.rs`: `host`, `join <invite>`, `--relay-only`, and four tests. Phase 3 replaces it and deletes it.
+Phase 3 kept the dependency, the lock fix, and `src-tauri/tauri.second-instance.conf.json`. The spike was `src-tauri/examples/room_spike.rs` (`host`, `join <invite>`, `--relay-only`, and four tests); Phase 3 replaced it with `src-tauri/src/room/` and deleted it.
 
 | Step | Result |
 |---|---|
@@ -586,9 +586,9 @@ Phase 3 keeps the dependency, the lock fix, and `src-tauri/tauri.second-instance
 | 4. Two machines | Open. On one machine through the real relays: online after 354 ms, connected after 226 ms, `welcome` after 300 ms, direct by the next ping at about 2.3 s, then sub-millisecond round trips. With `--relay-only` on both sides: online after 1.1 s, connected after 189 ms, about 55 ms round trips through `euc1-1`, and the path stays relayed. |
 | 5. Firewall | Open for a second machine. On this machine the installed and development `streamsplease.exe` already have program-wide Windows inbound allow rules, most likely from the prompt for the torrent engine's DHT socket, so the room endpoint adds no prompt for them. The spike executable has no rule and still reached a direct path on one machine. |
 | 6. API | Confirmed in the iroh 1.5.0 source. `online()` waits for a connected home relay and has no timeout of its own. `addr()` holds the home relay URLs, possibly more than one, and the IP addresses. `default_relay_map()` holds `use1-1`, `usw1-1`, `euc1-1`, and `aps1-1` under `relay.n0.iroh.link.`, unchanged from 1.0.0 to 1.5.0; 0.98 used other hostnames, so the match only holds within 1.x. The selected path is the one in `paths()` with `is_selected()`; `is_ip()` means direct and `is_relay()` means relayed; `path_events()` streams changes. Corrections are in section 5: the endpoint preset, and the trailing dot on relay hostnames. |
-| 7. Two instances | Blocked. librqbit keeps its DHT routing table, with a fixed UDP port, in `%LOCALAPPDATA%\rqbit\dht\cache\dht.json`, shared by every rqbit program on the account; here the port is 65528. A second instance loads that file, fails to bind the port, and the app's setup fails with "initializing torrent engine". The fix is a `dht_config` in `session_options` (`src-tauri/src/torrent.rs`) that keeps the file in the app cache directory; existing installs then rebuild their DHT table once. The overlay is untested until then. |
+| 7. Two instances | Blocked. librqbit keeps its DHT routing table, with a fixed UDP port, in `%LOCALAPPDATA%\rqbit\dht\cache\dht.json`, shared by every rqbit program on the account; here the port is 65528. A second instance loads that file, fails to bind the port, and the app's setup fails with "initializing torrent engine". Fixed in Phase 3: a `dht_config` in `session_options` (`src-tauri/src/torrent.rs`) keeps the file at `dht/dht.json` in the app cache directory; existing installs rebuild their DHT table once. The overlay and the recipe below are still to be run. |
 
-Two-instance recipe, once the DHT file is per app. The first instance also starts Vite:
+Two-instance recipe, not yet run. The first instance also starts Vite:
 
 ```powershell
 npm run tauri dev
@@ -601,7 +601,7 @@ $env:CARGO_TARGET_DIR = Join-Path $PWD 'src-tauri\target\second'
 npm run tauri dev -- --config src-tauri/tauri.second-instance.conf.json
 ```
 
-Two-machine run for steps 4 and 5: build with `cargo build --manifest-path src-tauri/Cargo.toml --example room_spike`, copy `src-tauri/target/debug/examples/room_spike.exe` to the other machine, run `room_spike host` on one and `room_spike join <invite>` on the other. Record the connect time and the route lines, answer or decline the firewall prompt, then block UDP for the program on the guest and run it again.
+Two-machine run for steps 4 and 5: the spike executable no longer exists, so these checks run with the app itself in Phase 4 (matrix rows 1 and 17). Record the connect time and the route, answer or decline the firewall prompt, then block UDP for the program on the guest and run it again.
 
 ### Phase 1: sync core (done)
 
@@ -671,6 +671,24 @@ Rust tests beside the code:
 - Integration on loopback with relays disabled: hello and welcome, state and status both ways, remove, host close, guest reconnect.
 
 Exit: `cargo fmt --check`, `cargo test`, `cargo check`, and the frontend checks. The contract is updated in all four places together.
+
+Done: `cargo fmt --check` clean, `cargo test` 133 pass (25 in `room::`), `cargo check` ok, `npm run check` 0 errors, `npm test` 221 pass, `npm run build` ok. No native check was run: the commands are registered but nothing calls them, and the DHT change needs one start of `npm run tauri dev` to confirm.
+
+As built:
+
+- Wire messages nest their payload exactly like the IPC shapes: `{ type: 'status', status }`, `{ type: 'state', state }`, `{ type: 'roster', participants }`. `bye` is `{ type: 'bye' }`; serde only rejects unknown fields on struct variants, so it is declared as an empty struct variant.
+- `welcome` reaches the guest frontend as three events: `link` connected, `state`, `roster`. The same three follow every reconnect. They can arrive before the `room_join` promise resolves.
+- `room_host` and `room_join` bump a generation and close the previous session first. `room_leave` during a pending host or join makes it fail with "The room was left before it was ready.", so Cancel works while connecting.
+- A guest dropped as `lost` keeps its id for 30 seconds (twice the reconnect window). A returning guest passes the lock but not the room limit. A guest that left or was removed gets a new id.
+- A guest whose reconnect returns another id ends with `hostLost`. A host that breaks the rules (rate, invalid message, second `welcome`) ends the guest's room with `failed`.
+- At most 16 connections may be waiting for `hello`; more are refused.
+- A full outbound queue on the guest drops the link and reconnects. Messages sent while reconnecting are dropped.
+- Routes are read when a frame arrives and reported on change; the guest reports the host as id 0.
+- `inviteChanged` is not emitted yet (Phase 6). The TypeScript guard already accepts it.
+- There is one ALPN version, so a version mismatch cannot be told apart from an unreachable host yet. The specific message comes with the second version.
+- Timeouts live in `Timing` (`protocol.rs`) so the loopback tests can shorten the hello, reconnect, and farewell waits.
+- `BackendRoomTransport` (`transport.ts`) ignores events from a channel that a newer room replaced and does not send outside a room. Send failures go to `onError`.
+- `PreviewRoom` takes the fixture media, a clock, and a timer. As host it adds Alice (direct) and Mika (relayed), who load and become ready on every new epoch. As guest it plays under "Preview host": start when the guest is ready, pause after 20 seconds, seek 60 seconds ahead 3 seconds later, and repeat. It does not hold for a stalled guest yet (Phase 5).
 
 ### Phase 4: host and guest end to end
 
