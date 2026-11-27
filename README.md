@@ -1,254 +1,131 @@
-# StreamsPlease
+<p align="center">
+  <img src="docs/assets/logo.svg" alt="StreamsPlease logo" width="180">
+</p>
 
-StreamsPlease is a local Tauri v2 desktop player for legal or personally owned BitTorrent media. A native Rust engine downloads torrent pieces, a local-only HTTP endpoint serves seekable byte ranges, and mpv plays MKV/MP4 files with embedded audio and subtitle tracks.
+<h1 align="center">StreamsPlease</h1>
+
+<p align="center">
+  <b>Pick a show, press play, watch it with friends.</b><br>
+  A Windows desktop player that streams anime releases from the SubsPlease catalog over BitTorrent.
+</p>
+
+<p align="center">
+  <img src="https://img.shields.io/badge/platform-Windows%20x64-111111?style=flat-square" alt="Platform: Windows x64">
+  <img src="https://img.shields.io/badge/Tauri-v2-111111?style=flat-square" alt="Tauri v2">
+  <img src="https://img.shields.io/badge/player-libmpv-111111?style=flat-square" alt="Player: libmpv">
+  <img src="https://img.shields.io/badge/torrents-librqbit-111111?style=flat-square" alt="Torrents: librqbit">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-111111?style=flat-square" alt="MIT license"></a>
+</p>
+
+<p align="center">
+  <a href="#features">Features</a> ·
+  <a href="#watch-together">Watch together</a> ·
+  <a href="#install">Install</a> ·
+  <a href="#build-from-source">Build from source</a> ·
+  <a href="#documentation">Documentation</a> ·
+  <a href="#disclaimer">Disclaimer</a>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/app.webp" alt="The SubsPlease tab showing the Fall 2026 season as a grid of posters with next-episode times" width="900">
+</p>
+
+---
+
+StreamsPlease is built around [SubsPlease](https://subsplease.org/). It shows the current season, tells you when the next episode airs, and starts playing an episode while it downloads. There is no file to download first and no separate torrent client or video player to set up.
+
+Everything runs on your own machine. A Rust torrent engine fetches the pieces you are about to watch, and mpv plays them inside the app with the original subtitles and audio tracks.
 
 ## Features
 
-- magnet links through trackers, DHT, and standard BitTorrent peers;
-- automatically opening the largest video file in a torrent;
-- immediate streaming and seek priority through HTTP range requests;
-- MKV, 10-bit video, and hardware decoding through mpv;
-- embedded ASS/SSA/SRT subtitles and multiple audio tracks;
-- adding external `.ass`, `.ssa`, `.srt`, `.vtt`, and `.sub` files;
-- live download, upload, and peer status, plus pausing P2P and stopping the session;
-- a local media cache in the OS-specific app cache directory, capped at 10 GB with least-recently-watched eviction;
-- automatic seeding of fully downloaded episodes until a configurable share ratio (default 1.5×), after which the episode is removed, with per-episode seeding and cache statistics under **Account settings → Seeding & cache**;
-- multi-provider seasonal browsing with previous/next season navigation, using AniList, official MyAnimeList, Jikan, and Kitsu in a configurable priority order with saved-result fallback;
-- global catalog title search with persistent offline results, source/age labels, and SubsPlease archive availability checks;
-- direct SubsPlease archive browsing without an AniList dependency;
-- SubsPlease availability filtering, weekly release times, and historical episode access;
-- Discord-capturable YouTube trailer search through the same in-process libmpv player;
-- airing discovery and recommendations based on loved series, with trailer previews;
-- signed startup update checks from private GitHub releases, with explicit approval before downloading and installing;
-- watch together: host a room, share an invite code, and control playback for up to seven guests, who each download and play the episode themselves;
-- a browser preview mode for UI development without native Tauri APIs.
+### Based on SubsPlease
 
-## Architecture
+- **The season at a glance.** Browse any season as a poster grid, filtered to what SubsPlease actually releases, with weekly air times.
+- **The full archive.** Every SubsPlease show and its older episodes stay reachable, also when the metadata providers are down.
+- **Rich show pages.** Artwork, synopsis, genres, and scores come from AniList, MyAnimeList, Jikan, or Kitsu, in the order you choose. If one fails, the next one or a saved result takes over.
+- **Search across seasons.** Each result shows whether it is available on SubsPlease.
 
-```text
-SvelteKit UI + Lily components (Tauri WebView)
-  ├─ catalog coordinator ──> native provider registry ──> AniList / MyAnimeList / Jikan / Kitsu
-  │                              └─ persistent cross-provider identity resolver
-  ├─ release catalog ────> SubsPlease availability/releases
-  ├─ Tauri commands ──> librqbit session ──> trackers / DHT / peers
-  ├─ player controls ─> in-process libmpv playback ──> episodes + trailers
-  ├─ trailer search ───> bundled yt-dlp + Deno ──> first YouTube result
-  ├─ room session ────> host gate / guest follower ──> reconciler ──> player controls
-  │                        └─ Tauri commands + channel ──> iroh QUIC endpoint <──> other participants
-  └─ media URL ───────> 127.0.0.1:<random>/torrents/:id/stream/:file
-```
+### A real player, not a browser tab
 
-The stream server binds exclusively to `127.0.0.1`, selects a random available port on every launch, and exposes read-only routes only. Mutations are handled through protected Tauri commands.
+- **Instant streaming.** Playback starts while the torrent downloads, and seeking jumps the download to the part you want.
+- **mpv inside.** MKV, 10-bit video, hardware decoding, styled ASS subtitles, and multiple audio tracks all work. You can add your own subtitle file too.
+- **Discord-friendly.** Video and audio stay in the StreamsPlease window, so screen sharing the app captures both.
+- **Next episode.** The player offers the next episode when the current one ends.
+- **Trailers.** A show's trailer plays in the same player.
 
-The room endpoint is the one listener that other machines can reach. It exists only while a room is open, serves only the room protocol, and carries small control messages: room state, roster, status, and clock pings. Media never crosses it. The sync logic is framework-free TypeScript in `src/lib/room/`; the Rust side in `src-tauri/src/room/` transports and validates messages and tracks membership.
+### A library that keeps track
 
-## Requirements
+- **Airing, Watching, Backlog, Completed.** Your shows sort themselves by what is still releasing and what you have left.
+- **Resume where you stopped.** The position in an unfinished episode is saved, and an episode counts as watched at 80%.
+- **Backups.** Export the library to a file and import it again.
 
-- Node.js 24 or newer (including the built-in TypeScript regression test runner);
-- the current stable Rust toolchain;
-- the Tauri v2 platform prerequisites (on Windows: WebView2 and MSVC build tools);
-- the bundled libmpv, yt-dlp, and Deno runtimes in `src-tauri/lib` (included in this checkout for Windows x86-64).
+### Discovery
 
-StreamsPlease loads libmpv into `streamsplease.exe` instead of playing media in a WebView iframe or launching a separate player process. This keeps episode and trailer audio in StreamsPlease's Windows audio session so application-window streaming tools such as Discord can capture it reliably. yt-dlp and Deno are only used to resolve trailer media URLs; they do not render or output audio.
+- **Airing.** Go through the season one trailer at a time and mark each show: love it, looks okay, or not for me.
+- **Recommendations.** Suggestions based on the shows you loved, limited to titles SubsPlease has.
 
-## Development
+### Fair seeding, small footprint
+
+- **Seeds what you watch.** A finished episode seeds until it reaches a share ratio you set (1.5× by default) and is then removed.
+- **Bounded cache.** The cache is capped at 10 GB, and the least recently watched episodes go first.
+- **Your limits.** Cap the upload rate, and see every cached episode and its upload total in the settings.
+
+## Watch together
+
+Host a room, send your friends the invite code, and press play. Everyone watches the same moment of the same episode.
+
+- **Up to eight people.** One host and seven guests.
+- **The host drives.** Play, pause, seek, speed, and the next episode apply to everyone. Guests keep their own volume, subtitles, audio track, and full screen.
+- **Nobody falls behind.** The room waits while someone is loading or buffering and shows who it is waiting for.
+- **No video is sent between you.** Each guest downloads the episode over BitTorrent. The room only carries small control messages.
+- **Private by default.** Connections are end-to-end encrypted with a key that exists only for that room. The invite code contains no IP address and stops working when the room ends.
+
+The host and the guests can see each other's IP address, and the first contact goes through a public [iroh](https://www.iroh.computer/) relay. The details are in the [usage guide](docs/usage.md#watch-together).
+
+## Install
+
+StreamsPlease runs on Windows (x64).
+
+1. Download `StreamsPlease_<version>_x64-setup.exe` from the [latest release](https://github.com/Zundrium/streams-please/releases/latest).
+2. Run the installer and start StreamsPlease.
+3. Open the **SubsPlease** tab, select a show, and play an episode.
+
+The app checks for a signed update at startup and asks before it downloads one.
+
+## Build from source
+
+You need Node.js 24 or newer, the stable Rust toolchain, and the [Tauri v2 prerequisites](https://v2.tauri.app/start/prerequisites/) for Windows. The repository stores the bundled runtimes with Git LFS.
 
 ```powershell
+git clone https://github.com/Zundrium/streams-please.git
+cd streams-please
 npm install
-npx tauri-plugin-libmpv-api setup-lib # only needed if src-tauri/lib is absent
 npm run tauri dev
 ```
 
-To open the browser preview only:
+`npm run dev` opens a browser preview of the interface with sample data and no native playback.
 
-```powershell
-npm run dev
-```
+## Documentation
 
-Checks:
+- [Usage](docs/usage.md): the player, the library, the catalog tabs, watch together, and known limitations.
+- [Architecture](docs/architecture.md): how the parts fit together, the source layout, and how catalog providers fail over.
+- [Development](docs/development.md): requirements, checks, and signed release builds.
 
-```powershell
-npm run check
-npm test
-npm run build
-cargo fmt --manifest-path src-tauri/Cargo.toml -- --check
-cargo test --manifest-path src-tauri/Cargo.toml
-cargo check --manifest-path src-tauri/Cargo.toml
-```
+## Built with
 
-The frontend uses Svelte 5/SvelteKit in SPA mode with the static adapter. All interactive
-controls and surfaces come from the locally installed Lily component source in
-`src/lib/components/ui`; `components.json` stores the Lily CLI configuration.
+[Tauri](https://tauri.app/) · [SvelteKit](https://svelte.dev/) · [librqbit](https://github.com/ikatson/rqbit) · [mpv](https://mpv.io/) · [iroh](https://www.iroh.computer/) · [AniList](https://anilist.co/) · [Jikan](https://jikan.moe/) · [Kitsu](https://kitsu.app/)
 
-Playback uses `tauri-plugin-libmpv` and its MPL-2.0 wrapper. The Windows runtime is an LGPL libmpv build and is bundled from `src-tauri/lib`; Tauri copies that directory, including the pinned trailer resolver, into desktop packages. The frontend serializes initialization and retries once if the native player instance is recreated.
+## Disclaimer
 
-To build a desktop bundle with updater artifacts, provide the Tauri signing key and private-repository token through the process environment:
+StreamsPlease is a player. It hosts no media, ships with no media, and runs no servers that distribute any.
 
-```powershell
-$env:TAURI_SIGNING_PRIVATE_KEY = 'C:\path\to\streamsplease.key'
-$env:TAURI_SIGNING_PRIVATE_KEY_PASSWORD = ''
-$env:STREAMSPLEASE_GITHUB_TOKEN = (Get-Content 'C:\path\to\github-token.txt' -Raw).Trim()
-npm run tauri build
-```
+- Use it only for content you are authorized to access. You are responsible for following the laws that apply where you live.
+- BitTorrent uploads the pieces you receive to other peers. Your IP address is visible to those peers and, in a room, to the other participants.
+- StreamsPlease is an independent project. It is not affiliated with or endorsed by SubsPlease, AniList, MyAnimeList, Jikan, Kitsu, YouTube, or any rights holder. Their names, data, and artwork belong to their owners.
+- The software comes without warranty, as stated in the license.
 
-The public updater key is bundled in `src-tauri/tauri.conf.json`. Keep the corresponding private key outside the repository and configure it as the `TAURI_SIGNING_PRIVATE_KEY` GitHub Actions secret. Configure `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` too when the key is password-protected.
+## License
 
-Set `STREAMSPLEASE_GITHUB_TOKEN` as a GitHub Actions secret containing a fine-grained token limited to `Zundrium/streams-please` with **Contents: read** permission. Release builds compile that token into the executable so startup checks need no user configuration. GitHub has no releases-only permission, and anyone with the executable can extract the token and read the private repository. Revoking or expiring it also prevents existing builds from downloading later updates. The Windows release workflow builds a single signed NSIS installer (`StreamsPlease_<version>_x64-setup.exe`) and publishes `latest.json`; the app asks for approval before downloading, then verifies, installs, and restarts for newer releases. Choose **Later** to keep using the current version. Versions older than 0.6.0 still use their original automatic-update behavior when upgrading to this version.
+[MIT](LICENSE)
 
-## Usage
-
-1. Start StreamsPlease and paste a magnet link.
-2. Select **Open torrent**. StreamsPlease chooses the largest video file and prioritizes media and subtitles.
-3. Switch embedded audio and subtitles through the player or details panel.
-4. Use **External subtitle** to add a local subtitle file.
-5. Starting another episode releases the previous torrent. Fully downloaded episodes keep seeding until they reach the target ratio and are then deleted; partial downloads are paused and kept so they can resume quickly. When the cache exceeds 10 GB, the least recently watched episodes that are not playing are removed first. Seeding state and upload totals survive restarts. **Account settings → Seeding & cache** can cap the total upload rate (64 KiB/s minimum, unlimited by default); the header always shows the current total download and upload speed.
-6. The Library keeps airing shows at the top. Shows whose AniList episode count has been fully released move to **Completed** at the bottom, below **Checked**.
-7. Each library show remembers where you stopped in an unwatched episode. Starting that episode again resumes from the saved position, and the Library and show pages label it with the time. The position is saved every 10 seconds and whenever playback pauses. It is cleared once the episode is marked watched, which happens automatically at 80%.
-
-The **Search** tab searches across seasons and checks each result against the SubsPlease
-archive. AniList is preferred by default; reorder AniList, official MyAnimeList, Jikan, and Kitsu in **Account settings**.
-The official MyAnimeList API requires your public application **Client ID**, obtained from
-[MyAnimeList API settings](https://myanimelist.net/apiconfig). Enter the Client ID, not a client secret
-or OAuth token. It is saved locally and sent only to native official MyAnimeList requests as
-`X-MAL-CLIENT-ID`. Without it, the official adapter is skipped; Jikan remains a credential-free,
-unofficial source of MyAnimeList data.
-New requests use the saved order. During an outage, validated saved results take priority over
-the next provider. Compact badges beside catalog counts identify failed and replacement providers;
-source, cache age, and coverage details are available on the badge. Search results use the shared
-poster cards, including archive-only results with saved artwork or a placeholder. Possible SubsPlease matches are labeled for review and never saved as confirmed
-identities. Results that are not on SubsPlease open a details page built from the catalog result, with the trailer but without episodes, taste, or library actions. Archive titles remain accessible when catalog providers cannot be reached.
-
-The **SubsPlease** tab starts with a normalized season catalog and filters it against the SubsPlease
-show archive. Use the previous and next controls to browse other seasons. The Archive toolbar
-button is removed; the archive fallback remains available when the seasonal catalog fails. AniList IDs are
-the canonical identity for saved shows; the optional SubsPlease slug and numeric ID are
-retained only for weekly timing and episode retrieval. Selecting an episode passes the
-chosen magnet link to the same local player flow.
-
-The **Discovery** toolbar switches between **Airing** and **Recommendations**. Recommendations
-use up to ten of your most recently loved shows, routed through AniList, MyAnimeList, or Jikan
-according to provider priority. Only confidently matched SubsPlease archive titles are shown;
-unmapped titles are never guessed. Reviewed shows are excluded. Seeds stay fixed while you review
-the queue; refresh or re-enter the mode to use your latest loves. Recommendation metadata is retained
-without requiring AniList details enrichment. Autoplay sits beside the series title, and source/cache
-age appears beside its date. Episode lists run newest-first; library timing uses a compact next-airing badge.
-
-Select a trailer from Discovery, Library, or SubsPlease details to open it in StreamsPlease's native player. The desktop app asks yt-dlp for the first YouTube result matching `<series title> trailer English subtitles`; AniList's trailer remains the browser-preview fallback. Discovery trailers start inside the page's trailer frame and can be expanded with the theater or full-screen controls. Closing a trailer restores the active episode at its previous position and leaves it paused.
-
-### Watch together
-
-The **Watch together** button sits in the header next to Account settings.
-
-1. The host enters a display name and selects **Host a room**, then copies the invite code and sends it to the guests.
-2. A guest enters a display name, pastes the code, and selects **Join**. Joining switches to the Player view.
-3. The host starts any episode. Every participant downloads it over BitTorrent with the host's magnet link and loads it paused. The room starts when everyone is ready.
-4. The host controls play, pause, seeking, speed, the next episode, and **Stop for everyone**. Guests keep their own volume, audio and subtitle tracks, theater, and full-screen controls; their playback controls are locked.
-5. The room pauses while a participant is loading or stalls, and shows who it is waiting for. The host can select **Play anyway**.
-6. A guest who leaves the Player view, opens a trailer, or hides the window is away and does not hold the room; returning resyncs. When the host does the same, the room pauses.
-7. The host can remove a guest and lock the room against new guests. A removed guest can rejoin unless the room is locked. **End room** or closing the app releases the guests, who keep the episode loaded and paused.
-
-Privacy:
-
-- The host chooses what plays. Guests download it over BitTorrent and seed it like any other episode.
-- The host and each guest can see each other's IP address. Guests connect only to the host, but all participants are in the same BitTorrent swarm.
-- Connections are end-to-end encrypted with a key pair that is random per room and never stored. The invite code contains no IP address and stops working when the room ends.
-- The first contact goes through a public [iroh](https://www.iroh.computer/) relay operated by number 0, which sees IP addresses and endpoint IDs but not content. The connection then becomes direct when the networks allow it.
-- Nothing is published to DNS, no router port is mapped, and no metrics are sent.
-
-The **Legal Sintel demo** button enters a Creative Commons/open movie torrent so you can test the flow without commercial content.
-
-## Source organization
-
-- `src/lib/components/app/`: app orchestration (wiring the player, torrent, and library modules to the UI), navigation, window controls, and updates.
-- `src/lib/components/catalog/`: Search, Discovery, SubsPlease, show details, and shared catalog components.
-- `src/lib/components/{library,player,settings,shared}/`: feature UI and reusable presentation.
-- `src/lib/components/ui/`: locally owned Lily primitives.
-- `src/lib/catalog/`: typed request client, validated storage, title matching, presentation helpers, and cancellable page state.
-- `src/lib/discovery/`: recommendation and airing-candidate domain logic.
-- `src/lib/library.ts` and `src/lib/library-import.ts`: persisted library normalization, identity-safe reducers, and backup hydration.
-- `src/lib/torrent/`: pure torrent file selection, track normalization, and piece-range helpers.
-- `src/lib/torrent/session.ts`: serialized torrent start/replace/release lifecycle.
-- `src/lib/torrent/seeding.ts`: seeding overview normalization and display helpers.
-- `src/lib/player/`: framework-free playback building blocks: `MpvClient` (the only place that talks to libmpv, with format-fixed property methods), `StreamLifecycle` (stream attempts, retries, and buffering watchdog), episode stream opening, seek coalescing, next-episode planning, keyboard shortcuts, and viewport math.
-- `src/lib/room/`: watch-together sync: protocol types and guards, host-clock estimate, readiness, the reconciler, host and guest controllers, the backend transport, and the reactive `RoomSession`.
-- `src/lib/components/room/`: room panel, roster, and status pill.
-- `src/lib/backend/preview-room.ts`: simulated room for the browser preview.
-- `src/lib/async/`: reusable generation tokens, serial queue, polling, and operation tracking primitives.
-- `src/lib/library-store.svelte.ts`: reactive library state with injectable persistence.
-- `src/lib/backend/commands.ts`: the typed Tauri command contract shared by `src/lib/backend.ts` (desktop invocation) and `src/lib/backend/preview.ts` (deterministic preview fixtures).
-- `src-tauri/src/catalog/`: catalog adapter registry, AniList/MyAnimeList/Jikan/Kitsu adapters, persistent identity resolution, and independent SubsPlease releases.
-- `src-tauri/src/catalog/http.rs`: shared provider HTTP layer with rate limiting, cooldowns, response caching, and bounded body reads.
-- `src-tauri/src/torrent.rs`: persistent librqbit session, loopback stream server, and torrent commands.
-- `src-tauri/src/seeding.rs`: seeding ledger, ratio policy, 10 GB cache eviction, and seeding commands.
-- `src-tauri/src/room/`: iroh endpoint, invite codes, admission, framing, message validation, rate limits, and room commands.
-- `src-tauri/src/runtime.rs`: bundled libmpv/trailer runtime discovery.
-- `src-tauri/src/library_file.rs`: validated library backup import/export.
-- `src-tauri/src/lib.rs`: plugin setup and command registration.
-- `tests/`: Node regression tests for matching, caches, async state, preview identity, and library refresh.
-
-## Catalog providers and outage behavior
-
-The native `CatalogAdapter` registry declares provider IDs, labels, and supported capabilities.
-`catalog_providers` exposes that ordered registry, and `catalog_request` accepts a provider plus a
-search, season, or canonical-ID recommendation request, plus an optional MyAnimeList Client ID. Adapters return the same normalized `CatalogMedia` envelope; frontend
-components do not parse provider responses. Existing AniList type aliases and IPC commands remain
-compatible. Details enrichment still uses the existing AniList/SubsPlease path independently of
-these listing capabilities.
-
-`src/lib/catalog/coordinator.ts` handles capability routing, request deduplication, provider
-cooldowns, and fallback. For each supported provider in priority order it uses fresh cached data,
-then attempts a refresh, then uses validated stale results before trying the next provider.
-Stale search results are retained for at most 30 days and seasons for 90 days. Provider caches
-remain separate, timestamps are not reset by stale reads, and fallback caches do not prevent
-recovery to the primary provider. A genuine empty response is not an outage. Provider failures,
-missing identity mappings, and truncated listings are not silently reported as complete results.
-
-AniList, Jikan, and Kitsu requests are paced and respect bounded cooldowns without automatic retries or
-attempts to bypass access restrictions. Jikan lists are SFW, with up to 25 search results or four
-season pages of 25 items. A season only includes matching year/season TV, TV_SHORT, and ONA items.
-Kitsu returns up to 20 search results or four season pages of 20 items, excluding adult items
-and validating the requested season/year and TV/ONA formats. Its season boundaries follow Kitsu's
-December–February winter convention. If a later Kitsu page fails, validated earlier pages remain
-available with an incomplete-coverage warning rather than losing the entire season.
-Official MyAnimeList returns up to 50 search items or 100 seasonal items; recommendations use
-verified reverse ID mappings and bounded detail requests. All official MAL requests are paced,
-size-limited, and stop contacting the API during a cooldown after systemic errors. Artwork uses the explicitly allowed
-`https://cdn.myanimelist.net` (Jikan) and `https://media.kitsu.app` (Kitsu) image origins;
-no new WebView API/network permissions are needed.
-
-AniList IDs remain canonical for the existing library. The separate native identity resolver
-learns explicit AniList/MyAnimeList ID pairs and bootstraps independently from
-[Fribb's reduced anime-offline database](https://github.com/Fribb/anime-lists), so an AniList outage
-does not prevent mapping newly retrieved Jikan or Kitsu results. Validated mappings are stored in the
-app cache's `catalog` directory, refreshed after seven days when needed, and usable stale when
-Fribb is unavailable. Conflicting mappings in either direction are excluded. Unknown mappings
-are omitted with a coverage warning, never inferred from title similarity or equal numeric IDs.
-A first-ever fallback needs Fribb or previously learned mappings; no ID database is bundled.
-
-To add another provider, implement and register a native `CatalogAdapter`, declare
-its supported capabilities, normalize its data, extend the resolver's explicit source-ID import
-where necessary, and add deterministic preview fixtures and tests. Add its settings option to
-the normalized priority list; unlisted registry providers are appended automatically. Unsupported
-capabilities are skipped without provider-specific coordinator or listing UI branches. SubsPlease release retrieval remains independent of metadata providers.
-
-Browser preview is isolated from desktop caches. Use `?catalogPreview=anilist-offline` to exercise
-alternative-provider fallback or `?catalogPreview=offline` for all catalog providers unavailable.
-Saved preview results still take precedence; use a fresh browser profile for an uncached fallback.
-Remote artwork and trailer embeds still need network access; episode buttons use legal Sintel
-fixtures. Library episode refresh skips optional metadata and preserves existing progress.
-
-## Known limitations
-
-- Official MyAnimeList queries have deterministic mock HTTP coverage but need a valid Client ID for live verification. Provider request/response fixtures, malformed payloads, identity mapping, pagination, cooldowns, recommendation state, and update consent are covered by the Rust and Node test suites. Mock tests do not prove provider uptime or native trailer/updater safety.
-
-- Simultaneous catalog/mapping outages or unmapped titles can still limit fresh search and seasonal Discovery. Optional details enrichment remains AniList-dependent; SubsPlease details and saved library episodes remain available when SubsPlease is reachable. Jikan and Kitsu listings do not supply AniList relation/prequel or next-airing data; Kitsu listings also lack genres.
-
-- The bundled libmpv integration is currently tested most thoroughly on Windows x86-64; macOS and Linux builds need platform-specific libmpv libraries.
-- In this initial version, the UI manages one active episode at a time; the Rust engine can manage multiple torrents.
-- Individual cached episodes can be removed from **Seeding & cache**, but the download directory and cache limit are not configurable yet.
-- StreamsPlease does not open an inbound BitTorrent peer port, so seeding only reaches peers it connects to itself. The watch-together room endpoint is separate and exists only while a room is open.
-- Watch together has been checked with two instances on one machine. Its sync between two machines on different networks and its behavior behind a firewall have not been verified yet.
-- A room needs a reachable public iroh relay for the first contact, holds at most 8 participants, has no chat and no guest control, and plays the host's file and quality for everyone. The host and all guests need the same room protocol version. Only Windows is checked.
-- Tracker reach and startup speed depend on available peers and network or firewall settings.
-
-Use StreamsPlease only for content you are authorized to access. BitTorrent generally also uploads received pieces to other peers while the session is active.
+The MIT license covers the StreamsPlease source code. The bundled libmpv (LGPL), yt-dlp, and Deno runtimes keep their own licenses.
