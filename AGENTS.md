@@ -2,7 +2,7 @@
 
 ## Product and priorities
 
-StreamsPlease is a local-first Windows desktop player for legal or personally owned BitTorrent media. The production app is a Tauri v2 shell with a SvelteKit SPA, a Rust/librqbit backend, an in-process libmpv renderer, and a loopback-only HTTP range server.
+StreamsPlease is a local-first Windows desktop player for legal or personally owned BitTorrent media. The production app is a Tauri v2 shell with a SvelteKit SPA, a Rust/librqbit backend, an in-process libmpv renderer, a loopback-only HTTP range server, and a watch-together room endpoint that exists only while a room is open.
 
 Prioritize, in order:
 
@@ -45,14 +45,18 @@ Apply the same pattern to other commands below.
 - `src/lib/library.ts`, `src/lib/library-import.ts`, `src/lib/settings.ts`: local persistence, identity-safe library reducers, and domain helpers.
 - `src/lib/torrent/`: pure torrent/media helpers and the serialized `TorrentSession`.
 - `src/lib/player/`: `MpvClient` (all libmpv access; property formats are fixed per method), `StreamLifecycle`, episode stream opening, `SeekScheduler`, next-episode planning, shortcuts, and viewport helpers. Keep these free of Svelte and Tauri imports other than types so they stay unit-testable in Node.
+- `src/lib/room/`: watch-together sync core (`protocol.ts`, `clock.ts`, `readiness.ts`, `reconcile.ts`, `host-controller.ts`, `guest-controller.ts`), the backend `transport.ts`, and the reactive `session.svelte.ts`. Apart from the session, keep these free of Svelte and Tauri imports other than types.
+- `src/lib/components/room/`: `RoomPanel`, `RoomRoster`, and `RoomStatusPill`.
+- `src/lib/backend/preview-room.ts`: simulated room behind the six room commands in browser preview.
 - `src/lib/async/`: shared `Generation`, `SerialQueue`, polling, and `OperationTracker` primitives for stale-work protection.
 - `src/lib/library-store.svelte.ts`: reactive library state with injectable persistence.
 - `src/app.css`: Tailwind v4 entry point, Lily tokens, and global media/motion behavior.
 - `src-tauri/src/lib.rs`: plugin setup and Tauri command registration.
 - `src-tauri/src/torrent.rs`: librqbit state, torrent commands, and the local stream server.
+- `src-tauri/src/room/`: iroh endpoint, invite codes, admission, frame codec, message validation, rate limits, fan-out, and the room commands. It knows roles, not playback.
 - `src-tauri/src/runtime.rs`, `src-tauri/src/library_file.rs`: bundled-runtime discovery and library file import/export.
 - `src-tauri/src/catalog/`: provider adapters, the shared provider HTTP layer (`http.rs`), identity resolution, input validation, parsers, and provider tests.
-- `tests/`: frontend catalog and library regression tests using Node 24's built-in test runner.
+- `tests/`: frontend catalog, library, player, and room regression tests using Node 24's built-in test runner; `tests/room-fakes.ts` holds the fake clock, transport, and player.
 - `src-tauri/tauri.conf.json`: window, CSP, bundle resources, and frontend build integration.
 - `src-tauri/capabilities/default.json`: Tauri permissions.
 - `src-tauri/lib/`: pinned Windows libmpv and trailer-resolver runtimes; binaries are stored with Git LFS.
@@ -64,6 +68,11 @@ Apply the same pattern to other commands below.
 ## Architecture invariants
 
 - The torrent HTTP server must remain bound to `127.0.0.1` on an ephemeral port and must remain read-only. Mutations belong in Tauri commands.
+- The room endpoint is the only listener that other machines can reach, as a deliberate, scoped exception. It exists only while hosting or joined, serves only the room ALPN, and carries control messages only. No media and no file paths cross it.
+- Every room message is validated in Rust in both directions and narrowed from `unknown` in TypeScript.
+- Guests never control playback. The host is the only writer of room state.
+- Room sync uses existing `MpvCommands` methods only. Do not add an mpv property, format, or command for it.
+- A wire change to the room protocol gets a new ALPN version.
 - Keep Tauri capabilities and CSP as narrow as possible. Add origins or permissions only for a concrete feature.
 - Treat magnets, provider HTML/JSON, local paths, media metadata, and IPC arguments as untrusted input. Validate before use.
 - AniList IDs are the canonical identity for library entries. SubsPlease slugs and numeric IDs are provider metadata, not the primary identity.
@@ -158,7 +167,8 @@ Validation expectations:
 - Frontend-only logic or UI: run `npm run check` and `npm run build`; inspect the browser preview when behavior is visual.
 - Rust/backend changes: run Rust formatting, tests, and check, plus frontend checks when the IPC contract is affected.
 - Playback, libmpv, window-margin, track, trailer, seek, or native-runtime changes: also test the exact flow in `npm run tauri dev` on Windows.
-- Browser preview is useful for layout and fallback behavior, but it does not validate Tauri IPC, librqbit, in-process video, bundled runtimes, or FFI safety.
+- Room transport, sync, or room-driven playback changes: also exercise the affected flow between two machines on different networks. Two instances on one machine (a second `npm run tauri dev -- --config src-tauri/tauri.second-instance.conf.json` with its own `CARGO_TARGET_DIR`) cover the flow but not the direct path, the firewall, or real drift.
+- Browser preview is useful for layout and fallback behavior, but it does not validate Tauri IPC, librqbit, iroh, in-process video, room sync quality, bundled runtimes, or FFI safety.
 - If a required manual check cannot be performed, state that explicitly; do not imply it passed.
 
 ## Change discipline

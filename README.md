@@ -20,6 +20,7 @@ StreamsPlease is a local Tauri v2 desktop player for legal or personally owned B
 - Discord-capturable YouTube trailer search through the same in-process libmpv player;
 - airing discovery and recommendations based on loved series, with trailer previews;
 - signed startup update checks from private GitHub releases, with explicit approval before downloading and installing;
+- watch together: host a room, share an invite code, and control playback for up to seven guests, who each download and play the episode themselves;
 - a browser preview mode for UI development without native Tauri APIs.
 
 ## Architecture
@@ -32,10 +33,14 @@ SvelteKit UI + Lily components (Tauri WebView)
   ├─ Tauri commands ──> librqbit session ──> trackers / DHT / peers
   ├─ player controls ─> in-process libmpv playback ──> episodes + trailers
   ├─ trailer search ───> bundled yt-dlp + Deno ──> first YouTube result
+  ├─ room session ────> host gate / guest follower ──> reconciler ──> player controls
+  │                        └─ Tauri commands + channel ──> iroh QUIC endpoint <──> other participants
   └─ media URL ───────> 127.0.0.1:<random>/torrents/:id/stream/:file
 ```
 
 The stream server binds exclusively to `127.0.0.1`, selects a random available port on every launch, and exposes read-only routes only. Mutations are handled through protected Tauri commands.
+
+The room endpoint is the one listener that other machines can reach. It exists only while a room is open, serves only the room protocol, and carries small control messages: room state, roster, status, and clock pings. Media never crosses it. The sync logic is framework-free TypeScript in `src/lib/room/`; the Rust side in `src-tauri/src/room/` transports and validates messages and tracks membership.
 
 ## Requirements
 
@@ -130,6 +135,26 @@ age appears beside its date. Episode lists run newest-first; library timing uses
 
 Select a trailer from Discovery, Library, or SubsPlease details to open it in StreamsPlease's native player. The desktop app asks yt-dlp for the first YouTube result matching `<series title> trailer English subtitles`; AniList's trailer remains the browser-preview fallback. Discovery trailers start inside the page's trailer frame and can be expanded with the theater or full-screen controls. Closing a trailer restores the active episode at its previous position and leaves it paused.
 
+### Watch together
+
+The **Watch together** button sits in the header next to Account settings.
+
+1. The host enters a display name and selects **Host a room**, then copies the invite code and sends it to the guests.
+2. A guest enters a display name, pastes the code, and selects **Join**. Joining switches to the Player view.
+3. The host starts any episode. Every participant downloads it over BitTorrent with the host's magnet link and loads it paused. The room starts when everyone is ready.
+4. The host controls play, pause, seeking, speed, the next episode, and **Stop for everyone**. Guests keep their own volume, audio and subtitle tracks, theater, and full-screen controls; their playback controls are locked.
+5. The room pauses while a participant is loading or stalls, and shows who it is waiting for. The host can select **Play anyway**.
+6. A guest who leaves the Player view, opens a trailer, or hides the window is away and does not hold the room; returning resyncs. When the host does the same, the room pauses.
+7. The host can remove a guest and lock the room against new guests. A removed guest can rejoin unless the room is locked. **End room** or closing the app releases the guests, who keep the episode loaded and paused.
+
+Privacy:
+
+- The host chooses what plays. Guests download it over BitTorrent and seed it like any other episode.
+- The host and each guest can see each other's IP address. Guests connect only to the host, but all participants are in the same BitTorrent swarm.
+- Connections are end-to-end encrypted with a key pair that is random per room and never stored. The invite code contains no IP address and stops working when the room ends.
+- The first contact goes through a public [iroh](https://www.iroh.computer/) relay operated by number 0, which sees IP addresses and endpoint IDs but not content. The connection then becomes direct when the networks allow it.
+- Nothing is published to DNS, no router port is mapped, and no metrics are sent.
+
 The **Legal Sintel demo** button enters a Creative Commons/open movie torrent so you can test the flow without commercial content.
 
 ## Source organization
@@ -145,6 +170,9 @@ The **Legal Sintel demo** button enters a Creative Commons/open movie torrent so
 - `src/lib/torrent/session.ts`: serialized torrent start/replace/release lifecycle.
 - `src/lib/torrent/seeding.ts`: seeding overview normalization and display helpers.
 - `src/lib/player/`: framework-free playback building blocks: `MpvClient` (the only place that talks to libmpv, with format-fixed property methods), `StreamLifecycle` (stream attempts, retries, and buffering watchdog), episode stream opening, seek coalescing, next-episode planning, keyboard shortcuts, and viewport math.
+- `src/lib/room/`: watch-together sync: protocol types and guards, host-clock estimate, readiness, the reconciler, host and guest controllers, the backend transport, and the reactive `RoomSession`.
+- `src/lib/components/room/`: room panel, roster, and status pill.
+- `src/lib/backend/preview-room.ts`: simulated room for the browser preview.
 - `src/lib/async/`: reusable generation tokens, serial queue, polling, and operation tracking primitives.
 - `src/lib/library-store.svelte.ts`: reactive library state with injectable persistence.
 - `src/lib/backend/commands.ts`: the typed Tauri command contract shared by `src/lib/backend.ts` (desktop invocation) and `src/lib/backend/preview.ts` (deterministic preview fixtures).
@@ -152,6 +180,7 @@ The **Legal Sintel demo** button enters a Creative Commons/open movie torrent so
 - `src-tauri/src/catalog/http.rs`: shared provider HTTP layer with rate limiting, cooldowns, response caching, and bounded body reads.
 - `src-tauri/src/torrent.rs`: persistent librqbit session, loopback stream server, and torrent commands.
 - `src-tauri/src/seeding.rs`: seeding ledger, ratio policy, 10 GB cache eviction, and seeding commands.
+- `src-tauri/src/room/`: iroh endpoint, invite codes, admission, framing, message validation, rate limits, and room commands.
 - `src-tauri/src/runtime.rs`: bundled libmpv/trailer runtime discovery.
 - `src-tauri/src/library_file.rs`: validated library backup import/export.
 - `src-tauri/src/lib.rs`: plugin setup and command registration.
@@ -217,7 +246,9 @@ fixtures. Library episode refresh skips optional metadata and preserves existing
 - The bundled libmpv integration is currently tested most thoroughly on Windows x86-64; macOS and Linux builds need platform-specific libmpv libraries.
 - In this initial version, the UI manages one active episode at a time; the Rust engine can manage multiple torrents.
 - Individual cached episodes can be removed from **Seeding & cache**, but the download directory and cache limit are not configurable yet.
-- StreamsPlease does not open an inbound peer port, so seeding only reaches peers it connects to itself.
+- StreamsPlease does not open an inbound BitTorrent peer port, so seeding only reaches peers it connects to itself. The watch-together room endpoint is separate and exists only while a room is open.
+- Watch together has been checked with two instances on one machine. Its sync between two machines on different networks and its behavior behind a firewall have not been verified yet.
+- A room needs a reachable public iroh relay for the first contact, holds at most 8 participants, has no chat and no guest control, and plays the host's file and quality for everyone. The host and all guests need the same room protocol version. Only Windows is checked.
 - Tracker reach and startup speed depend on available peers and network or firewall settings.
 
 Use StreamsPlease only for content you are authorized to access. BitTorrent generally also uploads received pieces to other peers while the session is active.

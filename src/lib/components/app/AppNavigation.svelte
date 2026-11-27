@@ -43,12 +43,10 @@
     </TabsList>
   </Tabs>
   <div class="min-w-0 flex-1" data-tauri-drag-region></div>
-  {#if import.meta.env.DEV}
-    <Button variant="ghost" size={roomParticipants ? 'default' : 'icon'}
-      class={`my-auto shrink-0 gap-1.5 ${roomActive ? 'bg-(--text)/10 text-(--text)' : ''} ${roomParticipants ? 'px-3' : ''}`}
-      aria-label={roomParticipants ? `Watch together, ${roomParticipants} in the room` : 'Watch together'} aria-haspopup="dialog"
-      onclick={onOpenRoom}><Users class="size-5" />{#if roomParticipants}<span class="text-sm tabular-nums">{roomParticipants}</span>{/if}</Button>
-  {/if}
+  <Button variant="ghost" size={roomParticipants ? 'default' : 'icon'}
+    class={`my-auto shrink-0 gap-1.5 ${roomActive ? 'bg-(--text)/10 text-(--text)' : ''} ${roomParticipants ? 'px-3' : ''}`}
+    aria-label={roomParticipants ? `Watch together, ${roomParticipants} in the room` : 'Watch together'} aria-haspopup="dialog"
+    onclick={onOpenRoom}><Users class="size-5" />{#if roomParticipants}<span class="text-sm tabular-nums">{roomParticipants}</span>{/if}</Button>
   <Button variant="ghost" size="icon"
     class={`my-auto shrink-0 ${activeView === 'account' ? 'bg-(--text)/10 text-(--text)' : ''}`}
     aria-label="Account settings" aria-current={activeView === 'account' ? 'page' : undefined}
