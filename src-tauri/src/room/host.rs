@@ -6,7 +6,7 @@ use std::{
 
 use iroh::{
     endpoint::{Connection, RecvStream, SendStream},
-    Endpoint, PublicKey,
+    Endpoint, EndpointAddr, PublicKey, Watcher,
 };
 use tokio::sync::{mpsc, Semaphore};
 
@@ -24,7 +24,6 @@ use super::{
 const MAX_PENDING_HANDSHAKES: usize = 16;
 
 pub struct HostSession {
-    invite: String,
     room: Arc<HostRoom>,
 }
 
@@ -37,6 +36,7 @@ struct HostRoom {
 }
 
 struct PeerTable {
+    invite: String,
     ended: bool,
     locked: bool,
     state: RoomState,
@@ -73,7 +73,12 @@ impl HostSession {
             ),
         };
         match invite {
-            Ok(invite) => Ok(Self::serve(endpoint, invite, name, events, timing)),
+            Ok(invite) => {
+                let addrs = endpoint.watch_addr();
+                let session = Self::serve(endpoint, invite, name, events, timing);
+                tokio::spawn(session.room.clone().follow_invite(addrs));
+                Ok(session)
+            }
             Err(error) => {
                 endpoint.close().await;
                 Err(error)
@@ -102,23 +107,14 @@ impl HostSession {
             host_name,
             events,
             timing,
-            table: Mutex::new(PeerTable {
-                ended: false,
-                locked: false,
-                state: RoomState::default(),
-                roster: vec![host],
-                peers: HashMap::new(),
-                lost: HashMap::new(),
-                last_id: 0,
-                last_link: 0,
-            }),
+            table: Mutex::new(PeerTable::new(invite, host)),
         });
         tokio::spawn(room.clone().accept_guests());
-        Self { invite, room }
+        Self { room }
     }
 
-    pub fn invite(&self) -> &str {
-        &self.invite
+    pub fn invite(&self) -> String {
+        self.room.table().invite.clone()
     }
 
     pub fn endpoint_id(&self) -> PublicKey {
@@ -216,6 +212,29 @@ impl Peer {
 }
 
 impl PeerTable {
+    fn new(invite: String, host: Participant) -> Self {
+        Self {
+            invite,
+            ended: false,
+            locked: false,
+            state: RoomState::default(),
+            roster: vec![host],
+            peers: HashMap::new(),
+            lost: HashMap::new(),
+            last_id: 0,
+            last_link: 0,
+        }
+    }
+
+    fn changed_invite(&mut self, addr: &EndpointAddr) -> Option<String> {
+        let invite = encode_invite(addr).ok()?;
+        if invite == self.invite {
+            return None;
+        }
+        self.invite = invite.clone();
+        Some(invite)
+    }
+
     fn end(&mut self) -> Vec<Connection> {
         self.ended = true;
         self.lost.clear();
@@ -301,6 +320,30 @@ impl HostRoom {
         let ids: Vec<u32> = table.peers.keys().copied().collect();
         for id in ids {
             self.deliver(table, id, message.clone());
+        }
+    }
+
+    fn announce_invite(&self, addr: &EndpointAddr) -> bool {
+        let mut table = self.table();
+        if table.ended {
+            return false;
+        }
+        if let Some(invite) = table.changed_invite(addr) {
+            self.emit(&mut table, RoomEvent::InviteChanged { invite });
+        }
+        true
+    }
+
+    async fn follow_invite(self: Arc<Self>, mut addrs: impl Watcher<Value = EndpointAddr>) {
+        let mut addr = addrs.get();
+        while self.announce_invite(&addr) {
+            addr = tokio::select! {
+                _ = self.endpoint.closed() => return,
+                updated = addrs.updated() => match updated {
+                    Ok(addr) => addr,
+                    Err(_) => return,
+                },
+            };
         }
     }
 
@@ -470,5 +513,28 @@ impl HostRoom {
         }
         self.emit(&mut table, event);
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use iroh::{defaults::prod::default_relay_map, RelayUrl, SecretKey};
+
+    use super::{super::protocol::tests::participant, *};
+
+    #[test]
+    fn invite_changes_only_when_the_relay_does() {
+        let id = SecretKey::generate().public();
+        let relays = default_relay_map().urls::<Vec<RelayUrl>>();
+        let first = EndpointAddr::new(id).with_relay_url(relays[0].clone());
+        let second = EndpointAddr::new(id).with_relay_url(relays[1].clone());
+        let mut table = PeerTable::new(encode_invite(&first).unwrap(), participant(0, "Host"));
+
+        assert_eq!(table.changed_invite(&first), None);
+        assert_eq!(table.changed_invite(&EndpointAddr::new(id)), None);
+        let invite = table.changed_invite(&second).expect("a new invite");
+        assert_eq!(invite, encode_invite(&second).unwrap());
+        assert_eq!(table.invite, invite);
+        assert_eq!(table.changed_invite(&second), None);
     }
 }

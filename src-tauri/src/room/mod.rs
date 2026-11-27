@@ -48,6 +48,10 @@ impl RoomService {
         }
     }
 
+    pub async fn shutdown(&self) {
+        self.replace().await;
+    }
+
     async fn replace(&self) -> u64 {
         let mut generation = 0;
         self.generation.send_modify(|current| {
@@ -161,7 +165,7 @@ pub async fn room_host(
         session = HostSession::start(&name, event_sink(on_event)) => session?,
         _ = service.superseded(generation) => return Err(SUPERSEDED.into()),
     };
-    let invite = session.invite().to_string();
+    let invite = session.invite();
     service.install(generation, Session::Host(session)).await?;
     Ok(RoomHostResult { invite })
 }

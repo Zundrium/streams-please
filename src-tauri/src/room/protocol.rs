@@ -305,6 +305,9 @@ pub enum RoomEvent {
         ping_id: u64,
         sent_at: f64,
     },
+    InviteChanged {
+        invite: String,
+    },
     State {
         state: RoomState,
     },

@@ -56,6 +56,11 @@ pub fn run() {
             catalog::subsplease::subsplease_index,
             catalog::subsplease::subsplease_show,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running StreamsPlease");
+        .build(tauri::generate_context!())
+        .expect("error while running StreamsPlease")
+        .run(|app, event| {
+            if let tauri::RunEvent::Exit = event {
+                tauri::async_runtime::block_on(app.state::<room::RoomService>().shutdown());
+            }
+        });
 }

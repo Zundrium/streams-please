@@ -1,6 +1,6 @@
 # Watch together: implementation plan
 
-Status: Phases 1 (sync core) and 2 (playback seams) are implemented and released in v0.9.1. Phase 2's native checks are open. Phase 0's automated and single-machine checks pass and are released in v0.9.2. Phase 3 (Rust transport and IPC) is implemented with its automated checks green. Phase 4 (host and guest end to end) is implemented behind the development flag, with its automated checks green and the browser preview exercised as host and as guest; its manual matrix has not been run, so Phase 4 is not done. The two-machine run and the firewall prompt of Phase 0 are part of that matrix, because the spike executable is gone. The DHT file is now per app, so the two-instance recipe is unblocked but not yet run. Phase 5 (UI) is implemented with its automated checks green, except that the development flag stays until the matrix passes; its manual rows, the browser preview, and the visual review are open. Phases 6 and 7 are open.
+Status: Phases 1 (sync core) and 2 (playback seams) are implemented and released in v0.9.1. Phase 2's native checks are open. Phase 0's automated and single-machine checks pass and are released in v0.9.2. Phase 3 (Rust transport and IPC) is implemented with its automated checks green. Phase 4 (host and guest end to end) is implemented behind the development flag, with its automated checks green and the browser preview exercised as host and as guest; its manual matrix has not been run, so Phase 4 is not done. The two-machine run and the firewall prompt of Phase 0 are part of that matrix, because the spike executable is gone. The DHT file is now per app, so the two-instance recipe is unblocked but not yet run. Phase 5 (UI) is implemented with its automated checks green, except that the development flag stays until the matrix passes; its manual rows, the browser preview, and the visual review are open. Phase 6 steps 2 to 4 are implemented with their automated checks green; steps 1, 5, and 6 and its matrix rows need two machines and are open. Phase 7 is open.
 Base: `e3c96cb` (v0.9.0), written 2026-11-26. Decisions 1 to 6 are confirmed.
 Code name: `room`. UI label: "Watch together".
 
@@ -141,7 +141,7 @@ Format: `sproom1:<endpoint id in z-base-32>@<relay hostname>`, 86 characters wit
 - The host takes the first relay URL of `addr()` after `online()`. Relay hostnames in the map end with a dot (`euc1-1.relay.n0.iroh.link.`); the invite drops it, and the parser compares without it, ignoring case.
 - Parsing (Rust): length at most 256, exact prefix, id through `PublicKey::from_z32`, and the relay hostname must match a relay in `iroh::defaults::prod::default_relay_map()`. The `RelayUrl` is taken from that map, never built from user text. A crafted invite cannot point a guest at an arbitrary server.
 - Joining your own room is rejected.
-- If the host's home relay changes, the host UI receives a new invite (Phase 6).
+- If the host's home relay changes, the host UI receives a new invite through `inviteChanged`.
 
 ### Connection lifecycle
 
@@ -685,7 +685,7 @@ As built:
 - At most 16 connections may be waiting for `hello`; more are refused.
 - A full outbound queue on the guest drops the link and reconnects. Messages sent while reconnecting are dropped.
 - Routes are read when a frame arrives and reported on change; the guest reports the host as id 0.
-- `inviteChanged` is not emitted yet (Phase 6). The TypeScript guard already accepts it.
+- `inviteChanged` was added in Phase 6.
 - There is one ALPN version, so a version mismatch cannot be told apart from an unreachable host yet. The specific message comes with the second version.
 - Timeouts live in `Timing` (`protocol.rs`) so the loopback tests can shorten the hello, reconnect, and farewell waits.
 - `BackendRoomTransport` (`transport.ts`) ignores events from a channel that a newer room replaced and does not send outside a room. Send failures go to `onError`.
@@ -768,6 +768,14 @@ As built:
 6. Long run: a full episode with two guests, drift logged.
 
 Exit: the Phase 6 rows pass, the whole matrix passes once more, and no run ends in an access violation.
+
+Steps 2 to 4 implemented, not done: `cargo fmt --check` clean, `cargo test` 134 pass, `cargo check` ok. No frontend file changed. No native check was run. Open: steps 1, 5, and 6, matrix rows 15 to 18, and a relay change observed in the app.
+
+As built:
+
+- Step 2 was built in Phase 3 (reconnect, `hostLost`, the kept participant id); matrix row 15 is its check.
+- Step 3: the host follows `Endpoint::watch_addr()` in a task that ends when the endpoint closes or the room ends. The invite lives in the peer table. A new address is encoded like the first invite; when the code differs, the table keeps it and the frontend gets `inviteChanged`. An address without a relay keeps the last invite. Connected guests are not told and keep their connection. A guest that loses the link after a relay change reconnects through the relay of its original invite, so it can end with `hostLost` and need the new code.
+- Step 4: `lib.rs` builds the app and closes the room session on `RunEvent::Exit` through `RoomService::shutdown`, the same path as `room_leave`. A host sends `closed: ended` to every guest and a guest sends `bye`. Exit waits for the farewell: at most 1 second as host and 2 seconds as guest, and not at all outside a room. A killed or crashed process still relies on the 15 second silence timeout.
 
 ### Phase 7: documentation and release
 
