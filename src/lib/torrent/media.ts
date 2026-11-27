@@ -67,27 +67,70 @@ export function inferPieceLength(totalBytes: number, pieceSlots: number): number
   return totalBytes / pieceSlots;
 }
 
-export function torrentPieceRanges(
+type VideoPieceSpan = {
+  pieces: boolean[];
+  pieceLength: number;
+  fileStart: number;
+  fileEnd: number;
+  fileLength: number;
+  firstPiece: number;
+  lastPiece: number;
+};
+
+function videoPieceSpan(
   torrentStats: TorrentStats | null,
-  torrent: CurrentTorrent | null,
-  duration: number
-): PlaybackBufferRange[] {
+  torrent: CurrentTorrent | null
+): VideoPieceSpan | null {
   const pieces = torrentStats?.pieces;
   const files = torrent?.details.files;
-  if (!pieces?.length || !torrent || !files?.length || duration <= 0) return [];
+  if (!pieces?.length || !torrent || !files?.length) return null;
 
   const totalBytes =
     torrentStats?.total_bytes || files.reduce((sum, file) => sum + file.length, 0);
   const pieceLength = inferPieceLength(totalBytes, pieces.length);
   const fileLength = torrent.video.length;
-  if (pieceLength <= 0 || fileLength <= 0) return [];
+  if (pieceLength <= 0 || fileLength <= 0) return null;
 
   const fileStart = files
     .slice(0, torrent.fileId)
     .reduce((sum, file) => sum + file.length, 0);
   const fileEnd = fileStart + fileLength;
-  const firstPiece = Math.max(0, Math.floor(fileStart / pieceLength));
-  const lastPiece = Math.min(pieces.length - 1, Math.ceil(fileEnd / pieceLength) - 1);
+  return {
+    pieces,
+    pieceLength,
+    fileStart,
+    fileEnd,
+    fileLength,
+    firstPiece: Math.max(0, Math.floor(fileStart / pieceLength)),
+    lastPiece: Math.min(pieces.length - 1, Math.ceil(fileEnd / pieceLength) - 1)
+  };
+}
+
+export function bufferedSecondsAhead(
+  torrentStats: TorrentStats | null,
+  torrent: CurrentTorrent | null,
+  duration: number,
+  position: number
+): number | null {
+  const span = videoPieceSpan(torrentStats, torrent);
+  if (!span || duration <= 0) return null;
+  const { pieces, pieceLength, fileStart, fileEnd, fileLength, lastPiece } = span;
+  const fraction = Math.max(0, Math.min(1, position / duration));
+  const positionByte = fileStart + fraction * fileLength;
+  let index = Math.min(lastPiece, Math.floor(positionByte / pieceLength));
+  while (index <= lastPiece && pieces[index]) index += 1;
+  const bufferedByte = Math.min(fileEnd, index * pieceLength);
+  return (Math.max(0, bufferedByte - positionByte) / fileLength) * duration;
+}
+
+export function torrentPieceRanges(
+  torrentStats: TorrentStats | null,
+  torrent: CurrentTorrent | null,
+  duration: number
+): PlaybackBufferRange[] {
+  const span = videoPieceSpan(torrentStats, torrent);
+  if (!span || duration <= 0) return [];
+  const { pieces, pieceLength, fileStart, fileEnd, fileLength, firstPiece, lastPiece } = span;
   const visualMergeGap = Math.min(
     0.5,
     Math.max(0.12, (pieceLength / fileLength) * 100 * 2)

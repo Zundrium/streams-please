@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  bufferedSecondsAhead,
   chooseVideoFile,
   formatBytes,
   inferPieceLength,
@@ -65,4 +66,30 @@ test('maps downloaded pieces onto the selected file timeline', () => {
   assert.ok(Math.abs(ranges[1].start - 200 / 3) < 1e-9);
   assert.equal(ranges[1].end, 100);
   assert.deepEqual(torrentPieceRanges(stats, torrent, 0), []);
+});
+
+test('measures the contiguous buffer ahead of the playback position', () => {
+  const megabyte = 2 ** 20;
+  const files = [file('a.ass', megabyte), file('b.mkv', 6 * megabyte)];
+  const torrent: CurrentTorrent = {
+    id: 1,
+    details: { info_hash: 'x', output_folder: '', files },
+    video: files[1],
+    fileId: 1
+  };
+  const stats = (pieces: boolean[]) => ({ total_bytes: 7 * megabyte, pieces }) as TorrentStats;
+  const gapped = stats([false, true, true, false, true, true, true]);
+
+  assert.equal(bufferedSecondsAhead(gapped, torrent, 600, 0), 200);
+  assert.equal(bufferedSecondsAhead(gapped, torrent, 600, 150), 50);
+  assert.equal(bufferedSecondsAhead(gapped, torrent, 600, 250), 0);
+  assert.equal(bufferedSecondsAhead(gapped, torrent, 600, 450), 150);
+  assert.equal(bufferedSecondsAhead(gapped, torrent, 600, 600), 0);
+  assert.equal(bufferedSecondsAhead(gapped, torrent, 600, 900), 0);
+  assert.equal(bufferedSecondsAhead(stats(Array(7).fill(true)), torrent, 600, 0), 600);
+
+  assert.equal(bufferedSecondsAhead(null, torrent, 600, 0), null);
+  assert.equal(bufferedSecondsAhead({ total_bytes: 7 * megabyte } as TorrentStats, torrent, 600, 0), null);
+  assert.equal(bufferedSecondsAhead(gapped, null, 600, 0), null);
+  assert.equal(bufferedSecondsAhead(gapped, torrent, 0, 0), null);
 });
