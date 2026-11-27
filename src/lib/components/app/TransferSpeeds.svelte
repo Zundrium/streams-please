@@ -18,7 +18,7 @@
 </script>
 
 <span
-  class="flex items-center gap-2.5 text-[0.65rem] font-medium leading-none tabular-nums text-(--text)/50"
+  class="flex flex-col gap-1.5 text-[0.65rem] font-medium leading-none tabular-nums text-(--text)/50"
   aria-label={`Downloading at ${formatUploadSpeed(speeds.downloadMbps)}, uploading at ${formatUploadSpeed(speeds.uploadMbps)}`}
 >
   <span class="flex min-w-[4.75rem] items-center gap-1"><ArrowDown class="size-3 shrink-0" strokeWidth={2.25} />{formatUploadSpeed(speeds.downloadMbps)}</span>

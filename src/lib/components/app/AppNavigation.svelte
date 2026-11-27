@@ -2,7 +2,6 @@
   import { BookOpen, CalendarDays, CircleUserRound, MonitorPlay, Search, Sparkles, Users } from '@lucide/svelte';
   import { Button } from '$lib/components/ui/button';
   import { Tabs, TabsList, TabsTrigger } from '$lib/components/ui/tabs';
-  import StreamsPleaseLogo from '$lib/components/app/StreamsPleaseLogo.svelte';
   import TransferSpeeds from '$lib/components/app/TransferSpeeds.svelte';
   import WindowControls from '$lib/components/app/WindowControls.svelte';
   import logoUrl from '$lib/assets/logo.png';
@@ -29,11 +28,8 @@
 <header class="flex min-w-0 items-stretch gap-1 border-b border-(--text)/8 bg-(--bg) px-2 sm:gap-4 sm:px-4" data-tauri-drag-region>
   <div class="hidden shrink-0 items-center px-2 md:flex" data-tauri-drag-region>
     <span class="pointer-events-none flex select-none items-center gap-2.5">
-      <img src={logoUrl} alt="" width="192" height="125" class="h-8 w-auto" draggable="false" />
-      <span class="flex flex-col gap-1.5">
-        <StreamsPleaseLogo />
-        <TransferSpeeds />
-      </span>
+      <img src={logoUrl} alt="StreamsPlease" width="192" height="125" class="h-8 w-auto" draggable="false" />
+      <TransferSpeeds />
     </span>
   </div>
   <Tabs value={activeView} onValueChange={(value) => onNavigate(value as AppView)} class="h-full min-w-0">
