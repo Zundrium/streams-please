@@ -1,6 +1,6 @@
 # Watch together: implementation plan
 
-Status: Phases 1 (sync core) and 2 (playback seams) are implemented and released in v0.9.1. Phase 2's native checks are open. Nothing in the app uses the room code yet. Phases 0 and 3 to 7 are open. Phase 0 is next, because Phase 3 depends on it.
+Status: Phases 1 (sync core) and 2 (playback seams) are implemented and released in v0.9.1. Phase 2's native checks are open. Nothing in the app uses the room code yet. Phase 0's automated and single-machine checks pass and are released in v0.9.2; the two-machine run, the firewall prompt, and the two-instance recipe are open, and the recipe is blocked by librqbit's shared DHT file (see the Phase 0 results). Phases 3 to 7 are open.
 Base: `e3c96cb` (v0.9.0), written 2026-11-26. Decisions 1 to 6 are confirmed.
 Code name: `room`. UI label: "Watch together".
 
@@ -120,12 +120,14 @@ iroh = { version = "1.5", default-features = false, features = ["tls-ring"] }
 - `tls-ring` reuses `ring`, which is already in `Cargo.lock`.
 - `metrics` is off: no telemetry.
 - `portmapper` is off: no UPnP, PCP, or NAT-PMP port mapping on the router.
-- iroh needs Rust 1.91 or newer. CI uses `dtolnay/rust-toolchain@stable`. Check the local toolchain in Phase 0.
+- iroh needs Rust 1.91 or newer. The local toolchain is 1.91.1; CI uses `dtolnay/rust-toolchain@stable`.
 - `tokio` gains the features the room code needs (`io-util`, `macros`).
+- `wmi` 0.18, through `netwatch`, accepts `windows` and `windows-core` 0.59 to 0.62. Cargo first paired it with the app's `windows` 0.61 and `windows-core` 0.62, which does not compile. `cargo update -p wmi` moved it to `windows` 0.62; repeat that if a later lock update breaks it again.
 
 ### Endpoint
 
-- Built with `Endpoint::builder(presets::N0).clear_address_lookup()`. The preset gives the default relays and the crypto provider. Clearing address lookup means nothing about the room is published to DNS; the invite carries what a guest needs.
+- Built with `Endpoint::builder(presets::Minimal).relay_mode(RelayMode::Default)`. `Minimal` sets only the crypto provider, so no address lookup is configured and nothing about the room is published to DNS; the invite carries what a guest needs. `presets::N0` is not used: it adds DNS lookups that would have to be cleared again, and it switches to the staging relays when `IROH_FORCE_STAGING_RELAYS` is set, which would break the invite's relay match.
+- `bind()` opens UDP sockets on `0.0.0.0` and `[::]` with random ports.
 - The host adds `.alpns(vec![b"streamsplease/room/1".to_vec()])`. Guests set no ALPN, so they accept no connections.
 - The secret key is the builder's fresh random key.
 - The endpoint exists only between `room_host` or `room_join` and `room_leave`. Solo use binds nothing.
@@ -133,9 +135,10 @@ iroh = { version = "1.5", default-features = false, features = ["tls-ring"] }
 
 ### Invite code
 
-Format: `sproom1:<endpoint id in z-base-32>@<relay hostname>`, about 90 characters, plain ASCII.
+Format: `sproom1:<endpoint id in z-base-32>@<relay hostname>`, 86 characters with the current relays, plain ASCII.
 
 - It contains no IP address. The first contact goes through the relay; iroh then upgrades to a direct path.
+- The host takes the first relay URL of `addr()` after `online()`. Relay hostnames in the map end with a dot (`euc1-1.relay.n0.iroh.link.`); the invite drops it, and the parser compares without it, ignoring case.
 - Parsing (Rust): length at most 256, exact prefix, id through `PublicKey::from_z32`, and the relay hostname must match a relay in `iroh::defaults::prod::default_relay_map()`. The `RelayUrl` is taken from that map, never built from user text. A crafted invite cannot point a guest at an arbitrary server.
 - Joining your own room is rejected.
 - If the host's home relay changes, the host UI receives a new invite (Phase 6).
@@ -567,6 +570,39 @@ Goal: prove iroh fits before anything depends on it. Work on a branch; keep only
 
 Exit: two machines exchange frames over a direct path and over relay only, the build and size costs are accepted, and the results are written into this file. If iroh fails here, stop and choose another transport. Phases 1 and 2 do not depend on it.
 
+#### Phase 0 results
+
+Measured 2026-11-27 on the development machine with Rust 1.91.1 (MSVC), released in v0.9.2.
+
+Phase 3 keeps the dependency, the lock fix, and `src-tauri/tauri.second-instance.conf.json`. The spike itself is `src-tauri/examples/room_spike.rs`: `host`, `join <invite>`, `--relay-only`, and four tests. Phase 3 replaces it and deletes it.
+
+| Step | Result |
+|---|---|
+| 1. Build time | Clean optimized build 117 s before, 124 s after. `Cargo.lock` gains 126 crates (614 to 740). |
+| 1. Size | Without room code the app binary is unchanged (24.2 MB; the linker drops unused iroh). With the spike's host and join code wired into the app it is 31.3 MB, or 5.5 MB to 7.2 MB LZMA-compressed. The 83.7 MB v0.9.1 installer would grow by about 1.7 MB (2%). |
+| 1. Duplicates | New duplicate families: `windows` 0.61 and 0.62 with their `windows-*` crates; RustCrypto `digest`, `sha2`, `block-buffer`, `crypto-common`, and `cpufeatures` in two generations; `rand` and `rand_core` 0.10; `lru`; `typenum`; `syn` 1. `reqwest` 0.13 is not new: the updater already brings it. |
+| 2. Toolchain | Local 1.91.1 builds and passes the tests. CI's `stable` is newer than 1.91; the first CI build with iroh happens at the next release. |
+| 3. Loopback | `cargo test --manifest-path src-tauri/Cargo.toml --example room_spike`: 4 pass (frame exchange on loopback with relays disabled, invite round trip, invite rejection, oversized frame). |
+| 4. Two machines | Open. On one machine through the real relays: online after 354 ms, connected after 226 ms, `welcome` after 300 ms, direct by the next ping at about 2.3 s, then sub-millisecond round trips. With `--relay-only` on both sides: online after 1.1 s, connected after 189 ms, about 55 ms round trips through `euc1-1`, and the path stays relayed. |
+| 5. Firewall | Open for a second machine. On this machine the installed and development `streamsplease.exe` already have program-wide Windows inbound allow rules, most likely from the prompt for the torrent engine's DHT socket, so the room endpoint adds no prompt for them. The spike executable has no rule and still reached a direct path on one machine. |
+| 6. API | Confirmed in the iroh 1.5.0 source. `online()` waits for a connected home relay and has no timeout of its own. `addr()` holds the home relay URLs, possibly more than one, and the IP addresses. `default_relay_map()` holds `use1-1`, `usw1-1`, `euc1-1`, and `aps1-1` under `relay.n0.iroh.link.`, unchanged from 1.0.0 to 1.5.0; 0.98 used other hostnames, so the match only holds within 1.x. The selected path is the one in `paths()` with `is_selected()`; `is_ip()` means direct and `is_relay()` means relayed; `path_events()` streams changes. Corrections are in section 5: the endpoint preset, and the trailing dot on relay hostnames. |
+| 7. Two instances | Blocked. librqbit keeps its DHT routing table, with a fixed UDP port, in `%LOCALAPPDATA%\rqbit\dht\cache\dht.json`, shared by every rqbit program on the account; here the port is 65528. A second instance loads that file, fails to bind the port, and the app's setup fails with "initializing torrent engine". The fix is a `dht_config` in `session_options` (`src-tauri/src/torrent.rs`) that keeps the file in the app cache directory; existing installs then rebuild their DHT table once. The overlay is untested until then. |
+
+Two-instance recipe, once the DHT file is per app. The first instance also starts Vite:
+
+```powershell
+npm run tauri dev
+```
+
+The second, in another terminal:
+
+```powershell
+$env:CARGO_TARGET_DIR = Join-Path $PWD 'src-tauri\target\second'
+npm run tauri dev -- --config src-tauri/tauri.second-instance.conf.json
+```
+
+Two-machine run for steps 4 and 5: build with `cargo build --manifest-path src-tauri/Cargo.toml --example room_spike`, copy `src-tauri/target/debug/examples/room_spike.exe` to the other machine, run `room_spike host` on one and `room_spike join <invite>` on the other. Record the connect time and the route lines, answer or decline the firewall prompt, then block UDP for the program on the guest and run it again.
+
 ### Phase 1: sync core (done)
 
 Done in `02391b1`: `npm run check` 0 errors, `npm test` 212 pass, `npm run build` ok. No native check applies, because nothing in the app uses the code yet.
@@ -727,16 +763,16 @@ Browser preview validates layout and state handling only. It does not validate I
 
 | Risk | Mitigation |
 |---|---|
-| iroh adds build time, binary size, and a second `reqwest` | Measured in Phase 0 before commitment. |
+| iroh adds build time and binary size | Measured in Phase 0: 7 s on a clean optimized build, about 1.7 MB on the installer. `reqwest` 0.13 was already in the graph. |
 | The public relays are someone else's infrastructure | Rooms fail with a clear message; solo is unaffected. `RelayMode::Custom` allows an own relay later without protocol changes. |
-| The relay list differs between iroh versions, so an invite is refused | Checked in Phase 0; fall back to matching the relay domain if needed. |
+| The relay list differs between iroh versions, so an invite is refused | Checked in Phase 0: unchanged from 1.0.0 to 1.5.0. Check it again on every iroh upgrade; fall back to matching the relay domain if it changes. |
 | mpv does not signal readiness the same way when loaded paused | Checked natively in Phase 2, before the sync work depends on it. |
 | Bytes-to-time buffer estimate is off for variable bitrate | 10 second margin; an mpv stall is always the authority; the room recovers by holding. |
 | Hold and resume flapping | Hysteresis, settle delay, coalesced seeks. Tuned in Phase 6. |
 | More frequent mpv calls from drift correction | Rate-limited; existing typed calls only; stress run in the matrix. |
 | `StreamsPleaseApp.svelte` grows further (1,725 lines today) | Logic lives in `src/lib/room/`; the app gets the port, the role checks, and component tags. |
 | Timers slow down in a hidden WebView | A hidden host has already paused the room; a hidden guest is away; the silence timeout is 15 s. |
-| Windows Firewall prompt when the endpoint binds | Checked in Phase 0; hole punching and the relay work without an inbound rule; documented in the README. |
+| Windows Firewall prompt when the endpoint binds | The app already has inbound rules from the torrent engine's prompt. On one machine the spike reached a direct path without a rule; the second-machine check is open. Documented in the README. |
 | Version skew between friends, since updates need consent | One ALPN per protocol version; a clear message on mismatch; hosts accept every version they still support. |
 
 ## 15. Open questions

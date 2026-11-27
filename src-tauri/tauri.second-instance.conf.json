@@ -1,0 +1,6 @@
+{
+  "identifier": "app.streamsplease.desktop.second",
+  "build": {
+    "beforeDevCommand": null
+  }
+}
