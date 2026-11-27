@@ -7,6 +7,7 @@ import {
   mergeLibraryEntries,
   firstUnwatchedEpisode,
   isSeriesComplete,
+  librarySection,
   nextUnwatchedEpisode,
   parseLibraryExport,
   resumePosition,
@@ -239,6 +240,23 @@ test('isSeriesComplete requires a known episode count with every episode release
   assert.equal(isSeriesComplete(entry({ episodeCount: 12 })), false);
   assert.equal(isSeriesComplete(entry()), false);
   assert.equal(isSeriesComplete(entry({ episodeCount: 0, availableEpisodes: [] })), false);
+});
+
+test('librarySection separates airing, watching, backlog, and completed shows', () => {
+  const watched = ['01', '02', '03'];
+  assert.equal(librarySection(entry({ episodeCount: 12 })), 'airing');
+  assert.equal(librarySection(entry({ watchedEpisodes: watched })), 'airing');
+  assert.equal(librarySection(entry({ episodeCount: 3 })), 'watching');
+  assert.equal(librarySection(entry({ episodeCount: 3, watchedEpisodes: ['01'] })), 'watching');
+  assert.equal(librarySection(entry({ episodeCount: 3, watchedEpisodes: watched })), 'completed');
+  assert.equal(librarySection(entry({ following: false, discoveryVerdict: 'maybe' })), 'backlog');
+  assert.equal(
+    librarySection(
+      entry({ following: false, discoveryVerdict: 'love', episodeCount: 3, watchedEpisodes: watched })
+    ),
+    'backlog'
+  );
+  assert.equal(librarySection(entry({ following: false })), undefined);
 });
 
 test('saveLibrary reports success, failure, and retries after clearing caches on quota errors', () => {

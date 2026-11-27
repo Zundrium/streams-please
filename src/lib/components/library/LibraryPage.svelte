@@ -23,8 +23,8 @@
   } from '$lib/catalog';
   import { preferredDownload } from '$lib/catalog/media';
   import {
-    isSeriesComplete,
     libraryEntryMatches,
+    librarySection,
     nextUnwatchedEpisode,
     resumePosition,
     watchedCount
@@ -108,21 +108,24 @@
   let relationGeneration = 0;
   let disposed = false;
   let libraryShows = $derived(entries.filter((entry) => entry.following));
-  let checkedShows = $derived.by(() =>
+  let backlogShows = $derived.by(() =>
     entries
-      .filter(
-        (entry) =>
-          !entry.following &&
-          (entry.discoveryVerdict === 'love' || entry.discoveryVerdict === 'maybe')
-      )
+      .filter((entry) => librarySection(entry) === 'backlog')
       .toSorted((left, right) =>
         (right.checkedAt ?? right.updatedAt).localeCompare(left.checkedAt ?? left.updatedAt)
       )
   );
   let filteredLibraryShows = $derived(filterEntries(libraryShows, query));
-  let filteredAiringShows = $derived(filteredLibraryShows.filter((entry) => !isSeriesComplete(entry)));
-  let filteredCompletedShows = $derived(filteredLibraryShows.filter(isSeriesComplete));
-  let filteredCheckedShows = $derived(filterEntries(checkedShows, query));
+  let filteredAiringShows = $derived(
+    filteredLibraryShows.filter((entry) => librarySection(entry) === 'airing')
+  );
+  let filteredWatchingShows = $derived(
+    filteredLibraryShows.filter((entry) => librarySection(entry) === 'watching')
+  );
+  let filteredCompletedShows = $derived(
+    filteredLibraryShows.filter((entry) => librarySection(entry) === 'completed')
+  );
+  let filteredBacklogShows = $derived(filterEntries(backlogShows, query));
   let selectedLibraryEntry = $derived(
     selectedShow
       ? entries.find(
@@ -148,7 +151,7 @@
   });
 
   onMount(() => {
-    const posterShows = [...libraryShows, ...checkedShows];
+    const posterShows = [...libraryShows, ...backlogShows];
     if (!posterShows.length) return;
     let cancelled = false;
     const timezone = localTimezone();
@@ -365,6 +368,26 @@
   </AnimePosterCard>
 {/snippet}
 
+{#snippet showSection(id: string, title: string, description: string, shows: LibraryEntry[])}
+  {#if shows.length}
+    <section class="not-first:mt-16 not-first:border-t not-first:border-(--text)/8 not-first:pt-10" aria-labelledby="{id}-shows-title">
+      <div class="flex items-end justify-between gap-6">
+        <div>
+          <h2 id="{id}-shows-title" class="text-2xl font-semibold tracking-[-0.04em]">{title}</h2>
+          <p class="mt-1.5 text-sm text-(--text)/45">{description}</p>
+        </div>
+        <span class="shrink-0 text-xs font-medium tabular-nums text-(--text)/35">{shows.length} {shows.length === 1 ? 'show' : 'shows'}</span>
+      </div>
+
+      <div class="mt-7 grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6">
+        {#each shows as entry (entry.anilistId ?? entry.slug)}
+          {@render posterCard(entry)}
+        {/each}
+      </div>
+    </section>
+  {/if}
+{/snippet}
+
 <main class="h-full min-h-0 overflow-hidden bg-(--bg) text-(--text)">
   {#if selectedShow}
     {#key selectedShow.page}
@@ -407,7 +430,7 @@
 
         <InputGroup class="col-start-3 row-start-1 min-w-0 w-full max-w-md justify-self-end">
           <InputGroupAddon><Search class="size-4" /></InputGroupAddon>
-          <InputGroupInput bind:value={query} placeholder="Search library and checked" aria-label="Search library and checked shows" />
+          <InputGroupInput bind:value={query} placeholder="Search library and backlog" aria-label="Search library and backlog shows" />
           {#if query}
             <InputGroupAddon align="inline-end">
               <button type="button" aria-label="Clear library search" class="grid size-6 place-items-center" onclick={() => (query = '')}>
@@ -419,7 +442,7 @@
       </ContextToolbar>
 
       <div class="px-5 pb-24 pt-8 sm:px-8 lg:px-10">
-        {#if query && filteredLibraryShows.length === 0 && filteredCheckedShows.length === 0}
+        {#if query && filteredLibraryShows.length === 0 && filteredBacklogShows.length === 0}
           <div class="grid min-h-[45vh] place-items-center text-center">
             <div class="max-w-sm">
               <Search class="mx-auto size-8 text-(--text)/25" />
@@ -428,20 +451,14 @@
             </div>
           </div>
         {:else}
-          {#if filteredAiringShows.length}
-            <section class="mt-7 grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6" aria-label="Saved shows">
-                {#each filteredAiringShows as entry (entry.anilistId ?? entry.slug)}
-                  {@render posterCard(entry)}
-                {/each}
-            </section>
-          {:else if !query && !libraryShows.length}
+          {#if !query && !libraryShows.length}
             <div class="grid min-h-[28vh] place-items-center text-center">
               <div class="max-w-md">
                 <span class="mx-auto grid size-16 place-items-center rounded-full bg-(--text)/6"><BookOpen class="size-7 text-(--text)/45" /></span>
                 <h2 class="mt-5 text-2xl font-semibold tracking-[-0.04em]">Your library is still empty</h2>
                 <p class="mt-2 text-sm leading-6 text-(--text)/45">
-                  {#if checkedShows.length}
-                    Open a checked show below to add it to your library and track its episodes.
+                  {#if backlogShows.length}
+                    Open a backlog show below to add it to your library and track its episodes.
                   {:else}
                     Love a show in Discovery, or add one from SubsPlease to keep it here and track its episodes.
                   {/if}
@@ -451,41 +468,10 @@
             </div>
           {/if}
 
-          {#if filteredCheckedShows.length}
-            <section class="mt-16 border-t border-(--text)/8 pt-10" aria-labelledby="checked-shows-title">
-              <div class="flex items-end justify-between gap-6">
-                <div>
-                  <h2 id="checked-shows-title" class="text-2xl font-semibold tracking-[-0.04em]">Checked</h2>
-                  <p class="mt-1.5 text-sm text-(--text)/45">Shows you loved or thought looked okay in Discovery, but have not added to your library.</p>
-                </div>
-                <span class="shrink-0 text-xs font-medium tabular-nums text-(--text)/35">{filteredCheckedShows.length} {filteredCheckedShows.length === 1 ? 'show' : 'shows'}</span>
-              </div>
-
-              <div class="mt-7 grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6">
-                {#each filteredCheckedShows as entry (entry.anilistId ?? entry.slug)}
-                  {@render posterCard(entry)}
-                {/each}
-              </div>
-            </section>
-          {/if}
-
-          {#if filteredCompletedShows.length}
-            <section class="mt-16 border-t border-(--text)/8 pt-10" aria-labelledby="completed-shows-title">
-              <div class="flex items-end justify-between gap-6">
-                <div>
-                  <h2 id="completed-shows-title" class="text-2xl font-semibold tracking-[-0.04em]">Completed</h2>
-                  <p class="mt-1.5 text-sm text-(--text)/45">Library shows that have finished airing, with every episode released.</p>
-                </div>
-                <span class="shrink-0 text-xs font-medium tabular-nums text-(--text)/35">{filteredCompletedShows.length} {filteredCompletedShows.length === 1 ? 'show' : 'shows'}</span>
-              </div>
-
-              <div class="mt-7 grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 lg:grid-cols-5 xl:grid-cols-6">
-                {#each filteredCompletedShows as entry (entry.anilistId ?? entry.slug)}
-                  {@render posterCard(entry)}
-                {/each}
-              </div>
-            </section>
-          {/if}
+          {@render showSection('airing', 'Airing', 'Library shows that are still releasing episodes.', filteredAiringShows)}
+          {@render showSection('watching', 'Watching', 'Library shows that have finished airing, with episodes you have not watched yet.', filteredWatchingShows)}
+          {@render showSection('backlog', 'Backlog', 'Shows you loved or thought looked okay in Discovery, but have not added to your library.', filteredBacklogShows)}
+          {@render showSection('completed', 'Completed', 'Library shows that have finished airing, with every episode watched.', filteredCompletedShows)}
         {/if}
       </div>
     </section>
